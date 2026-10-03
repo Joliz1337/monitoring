@@ -203,7 +203,7 @@ class ExitProxyService:
             await db.commit()
 
     async def absorb_status(self, settings: SettingsSnapshot, node: ExitProxyNode, server: Server, status: dict) -> None:
-        """Сохранить статус ноды, перенести её новые события в журнал, уведомить."""
+        """Сохранить статус ноды, снять устаревшую ошибку статуса, перенести новые события в журнал, уведомить."""
         events = new_node_events(status.get("events") or [], node.last_event_at)
         self_test = status.get("self_test") or None
         self_test_ok = bool(self_test.get("ok")) if self_test else None
@@ -228,6 +228,13 @@ class ExitProxyService:
                     last_event_at=last_event_at,
                     last_status_at=_now(),
                 )
+            )
+            # Нода ответила — «статус недоступен» прошлых тиков устарел. Ошибку доставки
+            # конфига (failed) не трогаем: её снимает только успешная доставка
+            await db.execute(
+                update(ExitProxyNode)
+                .where(ExitProxyNode.server_id == server.id, ExitProxyNode.sync_status == SYNC_SYNCED)
+                .values(sync_error=None)
             )
             for kind, from_value, to_value, reason in journal:
                 db.add(ExitProxyEvent(

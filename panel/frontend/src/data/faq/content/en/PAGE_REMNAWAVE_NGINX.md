@@ -21,7 +21,7 @@ A profile has three parts: **options** (real-IP scheme, certificates, fallback),
 ## Rules
 
 **gRPC → Xray** — the location for VPN traffic:
-- *serviceName* must match the inbound's `grpcSettings.serviceName`, otherwise Xray rejects the request;
+- *serviceName* must match the inbound's `grpcSettings.serviceName`, otherwise Xray rejects the request. Both a name (`trgrpc`) and a custom path starting with a slash (`/api/v1/Stream`, at least two segments) work — Xray uses such a path as is. The server-side `|` form (`/api/v1/Up|Down`) is two paths: add a rule for each with the same port;
 - *port* is the inbound's local port (check with `ss -tlnp | grep 127.0.0.1`);
 - the client-IP header is always overwritten — it cannot be spoofed.
 

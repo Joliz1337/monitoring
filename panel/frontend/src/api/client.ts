@@ -3,6 +3,14 @@ import type { ChartGap } from '../utils/chartUtils'
 
 const DEFAULT_TIMEOUT_MS = 30000
 
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    // Без автоповтора: у ноды со сбоящей связью три попытки подряд — это минута
+    // пустого экрана, а страница и так покажет «не ответил» с кнопкой повтора
+    skipRetry?: boolean
+  }
+}
+
 const api = axios.create({
   baseURL: '/api',
   withCredentials: true,
@@ -60,6 +68,7 @@ api.interceptors.response.use(
     const status = error.response?.status
     const shouldRetry =
       config &&
+      !config.skipRetry &&
       method === 'get' &&
       (status === undefined || RETRYABLE_STATUSES.has(status)) &&
       (config.__retryCount ?? 0) < MAX_RETRIES
@@ -364,6 +373,14 @@ export interface HAProxyStatRow {
   backup: boolean
   lastchg: number | null
   downtime: number | null
+  // Потери до addr по проверке с ноды; нет у старых нод и у не-серверов
+  probe?: LossProbeStats | null
+}
+
+export interface LossProbeStats {
+  loss_pct: number
+  rtt_ms: number | null
+  samples: number
 }
 
 export interface HAProxyProxyStats {
@@ -523,7 +540,7 @@ export interface DeployJobStatus extends DeployJobInfo {
   next_offset: number
 }
 
-// Установка ноды Remnawave на уже добавленный сервер через агента ноды
+// Установка ноды Remnawave на уже добавленный сервер: через агента ноды или по SSH через панель
 export type RemnawaveInstallEvent =
   | { type: 'start'; name?: string }
   | { type: 'log'; line: string }
@@ -543,11 +560,28 @@ export const remnawaveInstallStreamUrl = (jobId: string) =>
   `/api/servers/remnawave-install/${jobId}/stream`
 
 export const remnawaveInstallApi = {
+  // via_panel — по SSH, всё качается через панель; ssh — разовые креды поверх сохранённых у сервера
   start: (
     serverId: number,
-    body: { remnawave_cert_profile_id?: number | null; remnawave_cert_inline?: string | null },
+    body: {
+      remnawave_cert_profile_id?: number | null
+      remnawave_cert_inline?: string | null
+      via_panel?: boolean
+      ssh?: ImageDeliveryCreds
+    },
   ) => api.post<{ job_id: string }>(`/servers/${serverId}/install-remnawave`, body),
   jobs: () => api.get<{ jobs: RemnawaveInstallJobInfo[] }>('/servers/remnawave-install/jobs'),
+}
+
+// Обновление HAProxy до новейшей официальной LTS-сборки — такая же фоновая задача, как установка Remnawave
+export const haproxyUpgradeStreamUrl = (jobId: string) =>
+  `/api/servers/haproxy-upgrade/${jobId}/stream`
+
+export const haproxyUpgradeApi = {
+  // via_panel — по SSH, пакеты качаются через панель; ssh — разовые креды поверх сохранённых у сервера
+  start: (serverId: number, body?: { via_panel?: boolean; ssh?: ImageDeliveryCreds }) =>
+    api.post<{ job_id: string }>(`/servers/${serverId}/haproxy-upgrade`, body),
+  jobs: () => api.get<{ jobs: RemnawaveInstallJobInfo[] }>('/servers/haproxy-upgrade/jobs'),
 }
 
 // Проверка прокси-конфигураций: ссылки, JSON-конфиги и подписки
@@ -778,7 +812,7 @@ export type NodeImageDeliveryEvent =
   | { type: 'start'; host: string }
   | { type: 'log'; line: string }
   | { type: 'error'; message: string }
-  | { type: 'done'; status?: string; message?: string }
+  | { type: 'done'; status: 'success' | 'error' }
 
 export const imageDeliveryJobStreamUrl = (jobId: string) =>
   `/api/servers/deliver-image/${jobId}/stream`
@@ -801,6 +835,40 @@ export interface ImageDeliveryCreds {
   ssh_passphrase?: string
 }
 
+export type ImageDeliveryJobStatus = 'queued' | 'running' | 'success' | 'error'
+export type ImageDeliveryStep = 'prepare' | 'upload' | 'load' | 'start'
+
+export interface ImageDeliveryJobInfo {
+  job_id: string
+  server_id: number
+  name: string
+  host: string
+  status: ImageDeliveryJobStatus
+  error: string | null
+  started_at: number
+  finished_at: number | null
+  // этап, пока доставка идёт; percent — прогресс заливки образа
+  step: ImageDeliveryStep | null
+  percent: number | null
+}
+
+export type NodeUpdateStep = 'download' | 'files' | 'images' | 'restart'
+
+// Обновление ноды через агента, за итогом которого следит панель
+export interface NodeUpdateProgress {
+  server_id: number
+  // null — нода этапы не сообщает (старый агент) или ещё не ответила
+  step: NodeUpdateStep | null
+  started_at: string
+}
+
+export type ImageDeliverySkipReason = 'no_creds' | 'no_host' | 'not_root' | 'not_found'
+
+export interface ImageDeliveryBulkResult {
+  started: { server_id: number; job_id: string }[]
+  skipped: { server_id: number; name: string | null; reason: ImageDeliverySkipReason }[]
+}
+
 export const nodeImageApi = {
   getSettings: (id: number) =>
     api.get<ImageDeliverySettings>(`/servers/${id}/image-delivery`),
@@ -808,6 +876,11 @@ export const nodeImageApi = {
     api.patch(`/servers/${id}/image-delivery`, data),
   deliver: (id: number, creds: ImageDeliveryCreds) =>
     api.post<{ job_id: string }>(`/servers/${id}/deliver-image`, creds),
+  deliverBulk: (serverIds: number[], creds: Omit<ImageDeliveryCreds, 'ssh_host'>, saveCreds: boolean) =>
+    api.post<ImageDeliveryBulkResult>('/servers/deliver-image/bulk', {
+      server_ids: serverIds, save_creds: saveCreds, ...creds,
+    }),
+  jobs: () => api.get<{ jobs: ImageDeliveryJobInfo[] }>('/servers/deliver-image/jobs'),
 }
 
 export const serversApi = {
@@ -1032,9 +1105,12 @@ export const proxyApi = {
     api.post<BandwidthLimitState & { message: string }>(`/proxy/${serverId}/system/bandwidth-limit`, data, { timeout: 45000 }),
   // Доп. IP-адреса: apply на панели — фоновая задача, ответ ждёт её ≤ 20 с
   getNetworkState: (serverId: number) => api.get<NetworkState>(`/proxy/${serverId}/network/state`),
-  previewNetworkAddresses: (serverId: number, add_text: string) =>
-    api.post<NetworkPreview>(`/proxy/${serverId}/network/preview`, { add_text }, { timeout: 10000 }),
-  applyNetworkAddresses: (serverId: number, data: { interface: string; add_text: string; remove: NetworkAddressRef[] }) =>
+  previewNetworkAddresses: (serverId: number, add_text: string, gateway: string) =>
+    api.post<NetworkPreview>(`/proxy/${serverId}/network/preview`, { add_text, gateway }, { timeout: 10000 }),
+  applyNetworkAddresses: (
+    serverId: number,
+    data: { interface: string; add_text: string; gateway?: string; remove: NetworkAddressRef[]; restore?: NetworkAddressRef[] },
+  ) =>
     api.post<NetworkJobSnapshot>(`/proxy/${serverId}/network/apply`, data, { timeout: 45000 }),
   rollbackNetworkTransaction: (serverId: number, transaction_id: string) =>
     api.post<{ success: boolean; status: string | null; message: string }>(`/proxy/${serverId}/network/rollback`, { transaction_id }, { timeout: 45000 }),
@@ -1186,6 +1262,20 @@ export interface BlocklistSource {
   error_message: string | null
 }
 
+export type PingBlockMode = 'off' | 'all' | 'selected'
+
+export interface PingBlockScope {
+  mode: PingBlockMode
+  folders: string[]
+  server_ids: number[]
+}
+
+export interface BlocklistSettings {
+  ping_block: PingBlockScope
+  min_node_version: string
+  outdated_servers: string[]
+}
+
 export interface SyncServerResult {
   server_id: number
   server_name: string
@@ -1239,7 +1329,12 @@ export const blocklistApi = {
   
   // Sync status
   getSyncStatus: () => api.get<SyncStatus>('/blocklist/sync/status'),
-  
+
+  // Settings
+  getSettings: () => api.get<BlocklistSettings>('/blocklist/settings'),
+  updateSettings: (data: { ping_block: PingBlockScope }) =>
+    api.put<BlocklistSettings>('/blocklist/settings', data),
+
 }
 
 export interface NodeOptimizationsInfo {
@@ -1280,6 +1375,8 @@ export interface VersionBaseNode {
   id: number
   name: string
   url: string
+  folder: string | null
+  has_ssh_creds: boolean
 }
 
 export interface VersionBaseInfo {
@@ -1298,6 +1395,26 @@ export interface VersionBaseInfo {
   update_in_progress: boolean
 }
 
+// Сводка для значка в меню: версии нод панель берёт из своей БД, к нодам не ходит
+export interface UpdateSummary {
+  panel: {
+    version: string
+    latest_version: string | null
+    update_available: boolean
+  }
+  nodes: {
+    latest_version: string | null
+    outdated: number
+    total: number
+  }
+}
+
+// target_version — последняя версия новейшей LTS-ветки под релиз сервера, если она новее установленной
+export interface NodeHAProxyInfo {
+  version: string | null
+  target_version: string | null
+}
+
 export interface SingleNodeVersion {
   id: number
   name: string
@@ -1305,6 +1422,63 @@ export interface SingleNodeVersion {
   version: string | null
   status: 'online' | 'offline'
   optimizations: NodeOptimizationsInfo
+  haproxy: NodeHAProxyInfo | null
+  // null — нода не ответила или ещё не умеет управлять прокси
+  download_proxy: DownloadProxySummary | null
+}
+
+// Прокси для загрузок ноды: где найден (пароль скрыт), проверка и смена
+export type DownloadProxySource =
+  | 'monitoring' | 'apt' | 'docker_daemon' | 'docker_client' | 'git' | 'curl' | 'environment' | 'node_env' | 'agent_env'
+
+export interface DownloadProxySummary {
+  urls: string[]
+  sources: DownloadProxySource[]
+}
+
+export interface DownloadProxyEntry {
+  source: DownloadProxySource
+  location: string
+  url: string
+}
+
+export interface DownloadProxyState {
+  entries: DownloadProxyEntry[]
+  urls: string[]
+}
+
+export interface DownloadProxyCheck {
+  target: string
+  ok: boolean
+  status?: number
+  ms?: number
+  error?: string
+}
+
+export interface DownloadProxyTest {
+  url: string
+  results: DownloadProxyCheck[]
+}
+
+export interface DownloadProxyChange {
+  changed: string[]
+  restart_docker: boolean
+  recreate_agent: boolean
+}
+
+// Смена ждёт записи файлов на ноде, проверка — ответа GitHub и реестра через прокси
+const DOWNLOAD_PROXY_TIMEOUT_MS = 45_000
+
+export const downloadProxyApi = {
+  get: (serverId: number) => api.get<DownloadProxyState>(`/proxy/${serverId}/system/download-proxy`),
+  set: (serverId: number, url: string) =>
+    api.put<DownloadProxyChange>(`/proxy/${serverId}/system/download-proxy`, { url }, { timeout: DOWNLOAD_PROXY_TIMEOUT_MS }),
+  remove: (serverId: number) =>
+    api.delete<DownloadProxyChange>(`/proxy/${serverId}/system/download-proxy`, { timeout: DOWNLOAD_PROXY_TIMEOUT_MS }),
+  test: (serverId: number, url?: string) =>
+    api.post<{ checks: DownloadProxyTest[] }>(
+      `/proxy/${serverId}/system/download-proxy/test`, url ? { url } : {}, { timeout: DOWNLOAD_PROXY_TIMEOUT_MS },
+    ),
 }
 
 export interface UpdateResponse {
@@ -1464,7 +1638,9 @@ export interface PanelHostHistoryResponse {
 export const systemApi = {
   getPanelIp: () => api.get<PanelIpInfo>('/system/panel-ip'),
   getVersionBase: () => api.get<VersionBaseInfo>('/system/version/base'),
+  getUpdateSummary: () => api.get<UpdateSummary>('/system/update-summary'),
   getNodeVersionById: (nodeId: number) => api.get<SingleNodeVersion>(`/system/nodes/${nodeId}/version`, { timeout: 15000 }),
+  nodeUpdates: () => api.get<{ updates: NodeUpdateProgress[] }>('/system/node-updates'),
   updatePanel: (targetRef?: string) =>
     api.post<UpdateResponse>('/system/update', undefined, targetRef ? { params: { target_ref: targetRef } } : undefined),
   
@@ -1785,6 +1961,11 @@ export interface AlertSettingsData {
   load_avg_sustained_checks: number
   conntrack_enabled: boolean
   conntrack_threshold: number
+  packet_loss_enabled: boolean
+  packet_loss_threshold: number
+  packet_loss_sustained_seconds: number
+  packet_loss_calm_seconds: number
+  packet_loss_reminder_hours: number
   excluded_server_ids: number[]
   offline_excluded_server_ids: number[]
   cpu_excluded_server_ids: number[]
@@ -1793,6 +1974,7 @@ export interface AlertSettingsData {
   tcp_excluded_server_ids: number[]
   load_avg_excluded_server_ids: number[]
   conntrack_excluded_server_ids: number[]
+  packet_loss_excluded_server_ids: number[]
 }
 
 export interface AlertHistoryItem {
@@ -1813,6 +1995,161 @@ export interface AlertStatus {
   next_check_in: number | null
   monitored_servers: number
   active_conditions: Record<number, string[]>
+}
+
+export interface LossRelay {
+  server_id: number
+  name: string
+  loss_pct: number
+  rtt_ms: number | null
+  samples: number
+}
+
+export interface LossTarget {
+  target: string
+  ip: string
+  port: number
+  owner: string | null
+  // Адрес вне учёта с галочкой «только полные потери» — виден только при них
+  total_only: boolean
+  worst_loss: number
+  relays: LossRelay[]
+  episode: { level: number; opened_at: number } | null
+}
+
+export interface LossExcludedTarget {
+  // "ip" — все порты адреса, "ip:port" / "[v6]:port" — один бэкенд
+  target: string
+  // Не скрывать совсем, а учитывать только полные потери (от 95%)
+  total_only: boolean
+}
+
+export interface LossExclusions {
+  excluded_server_ids: number[]
+  excluded_targets: LossExcludedTarget[]
+}
+
+export type LossCheckStatus = 'ok' | 'unsupported' | 'denied' | 'unreachable'
+
+export interface LossCheckResult {
+  server_id: number
+  name: string
+  status: LossCheckStatus
+  loss_pct?: number | null
+  rtt_ms?: number | null
+  samples?: number | null
+}
+
+export type BackendEditAction = 'replace' | 'delete'
+
+export interface BackendEditBody {
+  ip: string
+  port: number
+  all_ports: boolean
+  action: BackendEditAction
+  new_ip: string | null
+  new_port: number | null
+}
+
+export interface BackendEditRule {
+  rule: string
+  outcome: 'changed' | 'merged' | 'skipped'
+  reason: 'last_backend' | 'shared_port' | null
+}
+
+export interface BackendEditProfile {
+  kind: 'haproxy' | 'dnat'
+  profile_id: number
+  profile_name: string
+  servers: number
+  rules: BackendEditRule[]
+}
+
+export interface LossSuggestion {
+  ip: string
+  worst_loss: number | null
+}
+
+export interface EditJobProfileProgress {
+  kind: 'haproxy' | 'dnat'
+  profile_id: number
+  profile_name: string
+  total: number
+  synced: number
+  pending: number
+  failed: number
+  denied: number
+}
+
+export interface BackendEditJob {
+  id: string
+  stage: 'editing' | 'rollout' | 'refresh' | 'done' | 'failed'
+  created_at: number
+  finished_at: number | null
+  current: string | null
+  error: string | null
+  failures: string[]
+  edits: BackendEditBody[]
+  items: { changed: number; skipped: number }[]
+  profiles: EditJobProfileProgress[]
+}
+
+export interface TraceHop {
+  hop: number
+  host: string | null
+  asn: string | null
+  as_name: string | null
+  owner: string | null
+  sent: number
+  received: number
+  loss_pct: number
+  avg_ms: number | null
+  best_ms: number | null
+  worst_ms: number | null
+}
+
+export interface TraceAnalysis {
+  verdict: 'waiting' | 'clean' | 'loss_from' | 'broken_after' | 'no_replies'
+  preliminary: boolean
+  start_hop: number | null
+  prev_hop: number | null
+  last_hop: number | null
+  dest_loss: number | null
+  problem_hops: number[]
+  path_hidden: boolean
+}
+
+export interface PathTrace {
+  id: string
+  ip: string
+  port: number
+  state: 'running' | 'done' | 'failed'
+  error: string | null
+  rounds_done: number
+  rounds_total: number
+  hops: TraceHop[]
+  analysis: TraceAnalysis
+}
+
+export const lossApi = {
+  startTrace: (serverId: number, target: string) =>
+    api.post<{ trace_id: string; ip: string; port: number }>('/loss/trace', { server_id: serverId, target }),
+  getTrace: (serverId: number, traceId: string) => api.get<PathTrace>(`/loss/trace/${serverId}/${traceId}`),
+  overview: () => api.get<{ targets: LossTarget[] }>('/loss/overview'),
+  backendsPreview: (edits: BackendEditBody[]) =>
+    api.post<{ items: BackendEditProfile[][]; suggestions: Record<string, LossSuggestion[]> }>(
+      '/loss/backends/preview', { edits },
+    ),
+  backendsApply: (edits: BackendEditBody[]) =>
+    api.post<{ job: BackendEditJob }>('/loss/backends/apply', { edits }),
+  jobs: () => api.get<{ jobs: BackendEditJob[] }>('/loss/jobs'),
+  settings: () => api.get<LossExclusions>('/loss/settings'),
+  updateSettings: (data: LossExclusions) => api.put<LossExclusions>('/loss/settings', data),
+  check: (target: string, serverIds: number[]) =>
+    api.post<{ ip: string; port: number; results: LossCheckResult[] }>('/loss/check', {
+      target,
+      server_ids: serverIds,
+    }),
 }
 
 export const alertsApi = {
@@ -1849,6 +2186,7 @@ export interface BillingServerData {
   updated_at: string | null
   cloud_provider: string | null
   cloud_account_id: string | null
+  cloud_proxy: string | null
   cloud_balance_threshold: number | null
   cloud_daily_cost: number | null
   cloud_last_sync_at: string | null
@@ -1878,6 +2216,7 @@ export const billingApi = {
     cloud_provider?: string
     cloud_credential?: string
     cloud_account_id?: string
+    cloud_proxy?: string
     cloud_balance_threshold?: number
   }) => api.post<{ success: boolean; server: BillingServerData }>('/billing/servers', data),
   updateServer: (id: number, data: {
@@ -1892,6 +2231,7 @@ export const billingApi = {
     cloud_provider?: string
     cloud_credential?: string
     cloud_account_id?: string | null
+    cloud_proxy?: string | null
     cloud_balance_threshold?: number
   }) => api.put<BillingServerData>(`/billing/servers/${id}`, data),
   deleteServer: (id: number) =>
@@ -2088,32 +2428,35 @@ export const sshBulkStreamUrls = {
   status: '/api/ssh-security/bulk/status',
 }
 
+// Чтение с одной ноды: ответ панели ограничен по времени, повтор — кнопкой на странице
+const NODE_READ: AxiosRequestConfig = { skipRetry: true }
+
 export const sshSecurityApi = {
   getConfig: (serverId: number) =>
-    api.get<{ config: SSHConfig }>(`/ssh-security/server/${serverId}/config`),
+    api.get<{ config: SSHConfig }>(`/ssh-security/server/${serverId}/config`, NODE_READ),
   updateConfig: (serverId: number, config: Partial<SSHConfig>) =>
     api.post<{ success: boolean; message: string; warnings: string[] }>(`/ssh-security/server/${serverId}/config`, config),
 
   getFail2ban: (serverId: number) =>
-    api.get<Fail2banConfig>(`/ssh-security/server/${serverId}/fail2ban/status`),
+    api.get<Fail2banConfig>(`/ssh-security/server/${serverId}/fail2ban/status`, NODE_READ),
   updateFail2ban: (serverId: number, config: Partial<Fail2banConfig>) =>
     api.post<{ success: boolean; message: string }>(`/ssh-security/server/${serverId}/fail2ban/config`, config),
   getBanned: (serverId: number) =>
-    api.get<{ count: number; ips: Fail2banBannedIP[] }>(`/ssh-security/server/${serverId}/fail2ban/banned`),
+    api.get<{ count: number; ips: Fail2banBannedIP[] }>(`/ssh-security/server/${serverId}/fail2ban/banned`, NODE_READ),
   unbanIp: (serverId: number, ip: string) =>
     api.post<{ success: boolean }>(`/ssh-security/server/${serverId}/fail2ban/unban`, { ip }),
   unbanAll: (serverId: number) =>
     api.post<{ success: boolean }>(`/ssh-security/server/${serverId}/fail2ban/unban-all`),
 
   getKeys: (serverId: number) =>
-    api.get<{ user: string; count: number; keys: SSHKey[] }>(`/ssh-security/server/${serverId}/keys`),
+    api.get<{ user: string; count: number; keys: SSHKey[] }>(`/ssh-security/server/${serverId}/keys`, NODE_READ),
   addKey: (serverId: number, publicKey: string, user: string = 'root') =>
     api.post<{ success: boolean; fingerprint: string }>(`/ssh-security/server/${serverId}/keys`, { public_key: publicKey, user }),
   removeKey: (serverId: number, fingerprint: string, user: string = 'root') =>
     api.delete<{ success: boolean }>(`/ssh-security/server/${serverId}/keys`, { data: { fingerprint, user } }),
 
   getStatus: (serverId: number) =>
-    api.get<SSHStatus>(`/ssh-security/server/${serverId}/status`),
+    api.get<SSHStatus>(`/ssh-security/server/${serverId}/status`, NODE_READ),
 
   changePassword: (serverId: number, password: string, user: string = 'root') =>
     api.post<{ success: boolean; message: string }>(`/ssh-security/server/${serverId}/password`, { user, password }),
@@ -2140,6 +2483,7 @@ export interface InfraAccount {
   name: string
   position: number
   projects: InfraProject[]
+  server_ids: number[]
 }
 
 export interface InfraTree {
@@ -2166,6 +2510,10 @@ export const infraApi = {
     api.post(`/infra/projects/${projectId}/servers`, { server_id: serverId }),
   removeServerFromProject: (projectId: number, serverId: number) =>
     api.delete(`/infra/projects/${projectId}/servers/${serverId}`),
+  addServerToAccount: (accountId: number, serverId: number) =>
+    api.post(`/infra/accounts/${accountId}/servers`, { server_id: serverId }),
+  removeServerFromAccount: (accountId: number, serverId: number) =>
+    api.delete(`/infra/accounts/${accountId}/servers/${serverId}`),
 }
 
 // ==================== Shared Notes ====================
@@ -2324,7 +2672,13 @@ export interface HAProxyProfileServer {
   last_sync_at: string | null
 }
 
+export interface HAProxyProfileOptions {
+  sni_filter_enabled: boolean
+  sni_filter_domains: string[]
+}
+
 export interface HAProxyProfileDetail extends Omit<HAProxyConfigProfile, 'linked_servers_count' | 'synced_servers_count'> {
+  options: HAProxyProfileOptions
   servers: HAProxyProfileServer[]
 }
 
@@ -2355,6 +2709,16 @@ export interface HAProxyAvailableServer {
   folder: string | null
 }
 
+export interface HAProxyIpOwner {
+  id: number
+  name: string
+  // null — основной адрес сервера, N — его N-й дополнительный адрес
+  extra_number: number | null
+}
+
+// Ключ — IPv4 или домен в нижнем регистре
+export type HAProxyIpOwners = Record<string, HAProxyIpOwner>
+
 export interface HAProxyServerStatus {
   server_id: number
   server_name: string
@@ -2372,6 +2736,16 @@ export interface HAProxyServerStatus {
     la1: number | null
     cores: number | null
   } | null
+  listen_ips: string[]
+  source_ips: string[]
+  addresses_supported: boolean
+  addresses_min_node_version: string
+}
+
+export interface HAProxyServerAddressesResult {
+  listen_ips: string[]
+  source_ips: string[]
+  sync: Pick<HAProxySyncResult, 'success' | 'message' | 'status'> | null
 }
 
 export interface BackendServer {
@@ -2426,7 +2800,12 @@ export interface HAProxyProfileRule {
   is_balancer?: boolean
   servers?: BackendServer[]
   balancer_options?: BalancerOptions | null
+  sni_mode?: HAProxySniMode
+  sni_domains?: string[]
 }
+
+// profile — общий список профиля, custom — свой список правила, off — без фильтра
+export type HAProxySniMode = 'profile' | 'custom' | 'off'
 
 export const haproxyProfilesApi = {
   getServerCores: (profileId: number, addresses: string[]) =>
@@ -2447,6 +2826,8 @@ export const haproxyProfilesApi = {
     api.post(`/haproxy-profiles/${profileId}/servers/${serverId}`),
   unlinkServer: (profileId: number, serverId: number) =>
     api.delete(`/haproxy-profiles/${profileId}/servers/${serverId}`),
+  updateServerAddresses: (profileId: number, serverId: number, data: { listen_ips: string[]; source_ips: string[] }) =>
+    api.put<HAProxyServerAddressesResult>(`/haproxy-profiles/${profileId}/servers/${serverId}/addresses`, data, { timeout: 60000 }),
   syncAll: (profileId: number) =>
     api.post<{ results: HAProxySyncResult[] }>(`/haproxy-profiles/${profileId}/sync`),
   syncOne: (profileId: number, serverId: number) =>
@@ -2455,6 +2836,8 @@ export const haproxyProfilesApi = {
     api.get<HAProxySyncLogEntry[]>(`/haproxy-profiles/${profileId}/log`, { params: { limit: limit || 50 } }),
   getAvailableServers: () =>
     api.get<HAProxyAvailableServer[]>('/haproxy-profiles/available-servers'),
+  getIpOwners: () =>
+    api.get<HAProxyIpOwners>('/haproxy-profiles/ip-owners'),
   getServersStatus: (profileId: number) =>
     api.get<HAProxyServerStatus[]>(`/haproxy-profiles/${profileId}/servers-status`),
   getRules: (profileId: number) =>
@@ -2467,6 +2850,8 @@ export const haproxyProfilesApi = {
     api.delete<{ success: boolean; rules: HAProxyProfileRule[] }>(`/haproxy-profiles/${profileId}/rules/${ruleName}`),
   regenerateConfig: (profileId: number) =>
     api.post<{ config_content: string }>(`/haproxy-profiles/${profileId}/regenerate-config`),
+  updateOptions: (profileId: number, options: HAProxyProfileOptions) =>
+    api.put<{ success: boolean; options: HAProxyProfileOptions; config_content: string }>(`/haproxy-profiles/${profileId}/options`, options),
   validateConfig: (config_content: string) =>
     api.post<{ valid: boolean; message: string }>('/haproxy-profiles/validate', { config_content }),
 }
@@ -2899,6 +3284,7 @@ export interface DnatTargetCounters {
   bytes_in: number
   packets_out: number
   bytes_out: number
+  probe?: LossProbeStats | null
 }
 
 export type NetworkAddressFamily = 'ipv4' | 'ipv6'
@@ -2911,6 +3297,7 @@ export interface NetworkAddress {
   managed: boolean
   primary: boolean
   dynamic: boolean
+  gateway?: string | null
 }
 
 export interface NetworkInterface {
@@ -2924,6 +3311,7 @@ export interface NetworkInterface {
 export interface NetworkAddressRef {
   address: string
   prefix: number
+  gateway?: string | null
 }
 
 export type NetworkTxStatus = 'applying' | 'pending' | 'confirmed' | 'rolled_back' | 'failed'
@@ -2950,6 +3338,7 @@ export interface NetworkJobSnapshot {
   interface: string
   added: NetworkAddressRef[]
   removed: NetworkAddressRef[]
+  restored: NetworkAddressRef[]
   started_at: string
   deadline_at: string | null
   attempts: number
@@ -2965,12 +3354,19 @@ export interface NetworkState {
   supported: boolean
   message?: string | null
   min_node_version: string
+  min_node_version_gateway?: string
+  min_node_version_hoster_removal?: string
+  // Адрес, по которому панель ходит на ноду: его удалить нельзя
+  access_address?: string | null
   node_version?: string | null
   backend?: string | null
   backend_detail?: string
   default_interface?: string | null
+  default_gateway?: Partial<Record<NetworkAddressFamily, string>>
   interfaces: NetworkInterface[]
-  managed: { interface: string; address: string; prefix: number }[]
+  managed: { interface: string; address: string; prefix: number; gateway?: string | null }[]
+  // Адреса хостера, снятые панелью: в конфиге хостера остались, нода снимает их после перезагрузки
+  suppressed?: { interface: string; address: string; prefix: number }[]
   transaction: NetworkTransaction | null
   history: NetworkTransaction[]
   rollback_timeout_sec?: number
@@ -3322,10 +3718,20 @@ export const exitProxyApi = {
 
 export type SourcePoolInstallStatus = 'off' | 'pending' | 'active' | 'drift' | 'failed' | 'denied' | 'unsupported'
 
+export type SourcePoolMode = 'auto' | 'manual'
+
+// Метка (строкой, как в JSON) → адрес
+export type SourcePoolAssignments = Record<string, string>
+
 export interface SourcePoolAddress {
   address: string
   excluded: boolean
   marks: number
+}
+
+export interface SourcePoolBinding {
+  mark: number
+  address: string
 }
 
 export interface SourcePoolNodeView {
@@ -3334,8 +3740,14 @@ export interface SourcePoolNodeView {
   online: boolean
   node_version: string | null
   min_node_version: string
+  min_node_version_manual: string
   supported_by_node: boolean
+  supports_manual: boolean
   enabled: boolean
+  mode: SourcePoolMode
+  assignments: SourcePoolAssignments
+  bindings: SourcePoolBinding[]
+  unavailable_marks: number[]
   install_status: SourcePoolInstallStatus
   sync_error: string | null
   interface: string | null
@@ -3359,10 +3771,17 @@ export interface SourcePoolSnippet {
 
 const SOURCE_POOL_NODE_TIMEOUT_MS = 40000
 
+export interface SourcePoolNodePatch {
+  enabled?: boolean
+  mode?: SourcePoolMode
+  excluded?: string[]
+  assignments?: SourcePoolAssignments
+}
+
 export const sourcePoolApi = {
   getNodes: () => api.get<{ nodes: SourcePoolNodeView[] }>('/source-pool/nodes'),
   getNode: (serverId: number) => api.get<SourcePoolNodeView>(`/source-pool/nodes/${serverId}`),
-  updateNode: (serverId: number, patch: { enabled?: boolean; excluded?: string[] }) =>
+  updateNode: (serverId: number, patch: SourcePoolNodePatch) =>
     api.put<SourcePoolNodeView>(`/source-pool/nodes/${serverId}`, patch, { timeout: SOURCE_POOL_NODE_TIMEOUT_MS }),
   refreshNode: (serverId: number) =>
     api.post<SourcePoolNodeView>(`/source-pool/nodes/${serverId}/refresh`, undefined, { timeout: SOURCE_POOL_NODE_TIMEOUT_MS }),

@@ -14,7 +14,7 @@ import { TimeSyncSection } from './TimeSyncSection'
 const toIntervalOptions = (options: CollectorIntervalOption[]): SegmentedOption<number>[] =>
   options.map(option => ({
     value: option.value,
-    label: <>{option.label}{option.recommended && <Zap className="w-3 h-3" />}</>,
+    label: <>{option.label}{option.recommended && <Zap className="w-3.5 h-3.5" />}</>,
   }))
 
 const METRICS_OPTIONS = toIntervalOptions(METRICS_INTERVAL_OPTIONS)
@@ -51,7 +51,7 @@ export function NodesTab() {
           <SegmentedControl value={haproxyCollectInterval} options={HAPROXY_OPTIONS} onChange={setHaproxyCollectInterval} />
         </SettingRow>
         <p className="text-xs text-dark-500 mt-4 flex items-center gap-1">
-          <Zap className="w-3 h-3 text-accent-500" />
+          <Zap className="w-3.5 h-3.5 text-accent-500" />
           {t('settings.recommended_values')}
         </p>
       </SettingsSection>

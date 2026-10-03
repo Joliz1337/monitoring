@@ -15,7 +15,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app.capabilities import CapabilityMiddleware, get_policy
 from app.config import get_settings
-from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat, network, exit_proxy, source_pool, hoster_access
+from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat, network, exit_proxy, source_pool, hoster_access, loss_probe as loss_probe_router
 from app.services.port_traffic_sampler import get_port_traffic_sampler
 from app.services.rate_sampler import get_rate_sampler
 from app.services.ipset_manager import get_ipset_manager
@@ -24,6 +24,7 @@ from app.services.bandwidth_limit import get_bandwidth_limiter
 from app.services.extra_ips import get_extra_ip_manager
 from app.services.exit_proxy.manager import get_exit_proxy_manager
 from app.services.source_pool import get_source_pool_manager
+from app.services.loss_probe import get_loss_probe
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +51,10 @@ async def lifespan(app: FastAPI):
     haproxy_manager = get_haproxy_manager()
     success, msg = haproxy_manager.full_init()
     logger.info(f"HAProxy initialization: {msg}")
+    try:
+        await asyncio.to_thread(haproxy_manager.restore_silent_drop_guard)
+    except Exception as e:
+        logger.error(f"Silent-drop RST guard restore failed, scanners may fill conntrack: {e}", exc_info=True)
 
     port_sampler = get_port_traffic_sampler()
     try:
@@ -79,8 +84,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Bandwidth limiter start failed, shaping is not restored: {e}", exc_info=True)
 
+    extra_ip_manager = get_extra_ip_manager()
     try:
-        await get_extra_ip_manager().start()
+        await extra_ip_manager.start()
     except Exception as e:
         logger.error(f"Extra IP manager start failed, a stale transaction may stay pending: {e}", exc_info=True)
 
@@ -95,6 +101,12 @@ async def lifespan(app: FastAPI):
         await source_pool_manager.start()
     except Exception as e:
         logger.error(f"Source pool start failed, outbound traffic stays on one address: {e}", exc_info=True)
+
+    loss_probe = get_loss_probe()
+    try:
+        await loss_probe.start()
+    except Exception as e:
+        logger.error(f"Loss probe start failed, backend loss is not measured: {e}", exc_info=True)
 
     from app.services import cpu_affinity
     from app.services.host_executor import get_host_executor
@@ -148,6 +160,14 @@ async def lifespan(app: FastAPI):
         await source_pool_manager.stop()
     except Exception as e:
         logger.error(f"Source pool stop failed: {e}", exc_info=True)
+    try:
+        await loss_probe.stop()
+    except Exception as e:
+        logger.error(f"Loss probe stop failed: {e}", exc_info=True)
+    try:
+        await extra_ip_manager.stop()
+    except Exception as e:
+        logger.error(f"Extra IP manager stop failed: {e}", exc_info=True)
     logger.info("Shutdown complete")
 
 
@@ -186,6 +206,7 @@ app.include_router(network.router)
 app.include_router(exit_proxy.router)
 app.include_router(source_pool.router)
 app.include_router(hoster_access.router)
+app.include_router(loss_probe_router.router)
 
 
 @app.get("/health")

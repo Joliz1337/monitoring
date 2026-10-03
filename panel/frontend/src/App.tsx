@@ -51,6 +51,7 @@ const XrayTest = lazyRetry(() => import('./pages/XrayTest'))
 const RemnawaveNginx = lazyRetry(() => import('./pages/RemnawaveNginx'))
 const ExitProxy = lazyRetry(() => import('./pages/ExitProxy'))
 const DnatProfiles = lazyRetry(() => import('./pages/DnatProfiles'))
+const Loss = lazyRetry(() => import('./pages/Loss'))
 const Dnat = lazyRetry(() => import('./pages/Dnat'))
 const SourcePool = lazyRetry(() => import('./pages/SourcePool'))
 
@@ -217,6 +218,7 @@ export default function App() {
           <Route path="haproxy-configs" element={<ModuleGuard id="haproxy-configs"><SuspenseWithBoundary><HAProxyConfigs /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="firewall-profiles" element={<ModuleGuard id="firewall-profiles"><SuspenseWithBoundary><FirewallProfiles /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="dnat-profiles" element={<ModuleGuard id="dnat-profiles"><SuspenseWithBoundary><DnatProfiles /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="loss" element={<ModuleGuard id="loss"><SuspenseWithBoundary><Loss /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="wildcard-ssl" element={<ModuleGuard id="wildcard-ssl"><SuspenseWithBoundary><WildcardSSL /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="settings" element={<SuspenseWithBoundary><Settings /></SuspenseWithBoundary>} />
           <Route path="updates" element={<ModuleGuard id="updates"><SuspenseWithBoundary><Updates /></SuspenseWithBoundary></ModuleGuard>} />

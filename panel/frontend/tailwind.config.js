@@ -38,8 +38,13 @@ export default {
         purple: '#a855f7',
       },
       fontFamily: {
-        sans: ['Twemoji Country Flags', 'Outfit', 'system-ui', 'sans-serif'],
+        sans: ['Twemoji Country Flags', 'Onest', 'system-ui', 'sans-serif'],
         mono: ['Twemoji Country Flags', 'JetBrains Mono', 'monospace'],
+      },
+      // Нижняя планка шрифта — 12px (2xs): мельче на тёмном фоне не читается
+      fontSize: {
+        '2xs': ['0.75rem', { lineHeight: '1rem' }],
+        xs: ['0.8125rem', { lineHeight: '1.125rem' }],
       },
     },
   },

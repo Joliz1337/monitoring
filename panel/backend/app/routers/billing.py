@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +17,7 @@ from app.services.cloud_billing import (
     CloudBillingError,
     sync_cloud_balance,
 )
+from app.services.http_client import validate_proxy_input
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -40,7 +41,13 @@ class BillingServerCreate(BaseModel):
     cloud_provider: Optional[str] = None
     cloud_credential: Optional[str] = None
     cloud_account_id: Optional[str] = None
+    cloud_proxy: Optional[str] = None
     cloud_balance_threshold: Optional[float] = 0
+
+    @field_validator("cloud_proxy")
+    @classmethod
+    def validate_proxy(cls, v: str | None) -> str | None:
+        return validate_proxy_input(v)
 
 
 class BillingServerUpdate(BaseModel):
@@ -55,7 +62,13 @@ class BillingServerUpdate(BaseModel):
     cloud_provider: Optional[str] = None
     cloud_credential: Optional[str] = None
     cloud_account_id: Optional[str] = None
+    cloud_proxy: Optional[str] = None
     cloud_balance_threshold: Optional[float] = None
+
+    @field_validator("cloud_proxy")
+    @classmethod
+    def validate_proxy(cls, v: str | None) -> str | None:
+        return validate_proxy_input(v)
 
 
 class ExtendRequest(BaseModel):
@@ -162,6 +175,7 @@ def _server_to_dict(s: BillingServer) -> dict:
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
         "cloud_provider": s.cloud_provider,
         "cloud_account_id": s.cloud_account_id,
+        "cloud_proxy": s.cloud_proxy,
         "cloud_balance_threshold": s.cloud_balance_threshold,
         "cloud_daily_cost": s.cloud_daily_cost,
         "cloud_last_sync_at": s.cloud_last_sync_at.isoformat() if s.cloud_last_sync_at else None,
@@ -236,6 +250,7 @@ async def create_billing_server(data: BillingServerCreate, db: AsyncSession = De
         else:
             days = data.paid_days or 30
             server.paid_until = now + timedelta(days=days)
+        server.monthly_cost = data.monthly_cost or None
     elif billing_type == "resource":
         server.monthly_cost = data.monthly_cost or 0
         server.account_balance = data.account_balance or 0
@@ -249,6 +264,7 @@ async def create_billing_server(data: BillingServerCreate, db: AsyncSession = De
         server.cloud_provider = provider
         server.cloud_credential = data.cloud_credential
         server.cloud_account_id = data.cloud_account_id
+        server.cloud_proxy = data.cloud_proxy
         server.cloud_balance_threshold = data.cloud_balance_threshold or 0
         server.currency = data.currency or PROVIDERS[provider].default_currency
 

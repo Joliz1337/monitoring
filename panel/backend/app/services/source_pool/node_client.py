@@ -14,6 +14,8 @@ from app.services.node_capabilities import Capability, denied_message, learn_fro
 from app.services.reserved_ports_sync import _version_tuple
 
 MIN_NODE_VERSION_SOURCE_POOL = "10.29.0"
+# Агент постарше молча проигнорировал бы ручную раскладку и продолжил раскладывать по кругу
+MIN_NODE_VERSION_SOURCE_POOL_MANUAL = "10.31.0"
 NODE_TIMEOUT_SEC = 25.0
 BASE_PATH = "/api/system/source-pool"
 
@@ -34,10 +36,25 @@ class SourcePoolNodeConflict(SourcePoolNodeError):
     """Нода отказала: на ней включён exit-прокси, который сам выбирает исходящий адрес."""
 
 
-def node_supports_source_pool(node_version: Optional[str]) -> bool:
+def _version_at_least(node_version: Optional[str], minimum: str) -> bool:
     if not node_version:
         return False
-    return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_SOURCE_POOL)
+    return _version_tuple(node_version) >= _version_tuple(minimum)
+
+
+def node_supports_source_pool(node_version: Optional[str]) -> bool:
+    return _version_at_least(node_version, MIN_NODE_VERSION_SOURCE_POOL)
+
+
+def node_supports_manual_marks(node_version: Optional[str]) -> bool:
+    return _version_at_least(node_version, MIN_NODE_VERSION_SOURCE_POOL_MANUAL)
+
+
+def manual_marks_unsupported_message(node_version: Optional[str]) -> str:
+    return (
+        f"ручная раскладка меток требует агент {MIN_NODE_VERSION_SOURCE_POOL_MANUAL} или новее "
+        f"(сейчас {node_version or 'unknown'}) — обновите ноду"
+    )
 
 
 def ensure_node_ready(server: Server) -> None:

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from typing import Optional
@@ -9,11 +10,45 @@ from typing import Optional
 from sqlalchemy import select, delete, func
 
 from app.database import async_session
-from app.models import Server, AlertSettings, AlertHistory
-from app.services.http_client import get_node_client, node_auth_headers
+from app.models import Server, AlertSettings, AlertHistory, PacketLossEpisode, PacketLossRelayIncident
+from app.services.http_client import get_node_client, node_auth_headers, sanitize_proxy
+from app.services.loss_alerts import (
+    AlertEvent,
+    Episode,
+    LossPolicy,
+    LossTracker,
+    RelayIncident,
+    collect_observations,
+    format_digest,
+    history_records,
+    total_only_targets,
+)
+from app.services.loss_registry import get_loss_registry
+from app.services.socks_probe import ProxyFault, find_proxy_fault
 from app.services.traffic_ingest import get_traffic_ingest
 
 ALERT_HISTORY_RETENTION_DAYS = 30
+
+API_PROBE_TIMEOUT = 5.0
+# Рукопожатие SOCKS5 таймаутами httpx не покрыто: без потолка зависший прокси
+# подвесил бы пробу, а с ней и проверку всех серверов
+API_PROBE_HARD_TIMEOUT = 10.0
+PROXY_CHECK_TIMEOUT = 5.0
+
+PROXY_FAULT_REASONS = {
+    "ru": {
+        ProxyFault.UNREACHABLE: "SOCKS5-прокси {proxy} не принимает подключения",
+        ProxyFault.SILENT: "SOCKS5-прокси {proxy} принимает подключение, но не отвечает",
+        ProxyFault.AUTH_REJECTED: "SOCKS5-прокси {proxy} отклоняет авторизацию — проверьте логин и пароль",
+        ProxyFault.NOT_SOCKS5: "по адресу {proxy} отвечает не SOCKS5-прокси",
+    },
+    "en": {
+        ProxyFault.UNREACHABLE: "SOCKS5 proxy {proxy} does not accept connections",
+        ProxyFault.SILENT: "SOCKS5 proxy {proxy} accepts connections but does not respond",
+        ProxyFault.AUTH_REJECTED: "SOCKS5 proxy {proxy} rejects authentication — check the login and password",
+        ProxyFault.NOT_SOCKS5: "{proxy} does not answer as a SOCKS5 proxy",
+    },
+}
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +107,10 @@ class ServerAlerter:
         self._check_interval = 60
         self._last_check: Optional[datetime] = None
         self._time_since_check = 0
+        # Эпизоды потерь — на весь парк, по адресу назначения; в базе
+        # хранится последний записанный набор, чтобы писать только изменения
+        self._loss = LossTracker()
+        self._loss_persisted: Optional[dict] = None
 
     async def start(self):
         if self._running:
@@ -163,6 +202,7 @@ class ServerAlerter:
         first_run = True
 
         await self._restore_state_from_history()
+        await self._restore_loss_episodes()
 
         while self._running:
             try:
@@ -237,6 +277,7 @@ class ServerAlerter:
             "tcp": self._parse_id_list(settings.tcp_excluded_server_ids),
             "load_avg": self._parse_id_list(settings.load_avg_excluded_server_ids),
             "conntrack": self._parse_id_list(settings.conntrack_excluded_server_ids),
+            "packet_loss": self._parse_id_list(settings.packet_loss_excluded_server_ids),
         }
 
         async with async_session() as db:
@@ -258,6 +299,8 @@ class ServerAlerter:
         stale = [k for k in self._states if k not in monitored_ids]
         for k in stale:
             del self._states[k]
+
+        await self._check_packet_loss(settings, excluded_ids, now)
 
     async def _check_server(
         self,
@@ -482,6 +525,13 @@ class ServerAlerter:
             return f"Сервер {srv.name} недоступен (API не отвечает, ICMP доступен)"
         return f"Server {srv.name} is offline (API unreachable, ICMP reachable)"
 
+    def _msg_offline_proxy(self, srv: Server, settings: AlertSettings, fault: ProxyFault) -> str:
+        lang = "ru" if self._lang(settings) == "ru" else "en"
+        reason = PROXY_FAULT_REASONS[lang][fault].format(proxy=sanitize_proxy(srv.proxy_url))
+        if lang == "ru":
+            return f"Сервер {srv.name} недоступен из-за прокси: {reason}"
+        return f"Server {srv.name} is offline because of its proxy: {reason}"
+
     def _msg_recovery(self, srv: Server, settings: AlertSettings) -> str:
         if self._lang(settings) == "ru":
             return f"Сервер {srv.name} снова онлайн"
@@ -614,6 +664,122 @@ class ServerAlerter:
             )
 
     # ------------------------------------------------------------------
+    # Packet loss (relays -> destination addresses), весь парк разом
+    # ------------------------------------------------------------------
+    def loss_episodes(self) -> dict[str, Episode]:
+        return self._loss.episodes
+
+    @staticmethod
+    def _loss_policy(settings: AlertSettings) -> LossPolicy:
+        return LossPolicy(
+            threshold=settings.packet_loss_threshold or 20.0,
+            sustained_sec=settings.packet_loss_sustained_seconds or 300,
+            calm_sec=settings.packet_loss_calm_seconds or 900,
+            reminder_sec=(settings.packet_loss_reminder_hours or 0) * 3600,
+        )
+
+    async def _check_packet_loss(self, settings: AlertSettings, excluded_ids: set[int], now: float):
+        if not settings.packet_loss_enabled:
+            if self._loss.episodes:
+                self._loss.reset()
+                await self._save_loss_episodes()
+            return
+        registry = get_loss_registry()
+        excluded = excluded_ids | self._trigger_excluded.get("packet_loss", set())
+        policy = self._loss_policy(settings)
+        rules = registry.target_rules()
+        observations = collect_observations(registry.fresh(), excluded, rules)
+        events = self._loss.evaluate(observations, policy, now, total_only_targets(observations, rules))
+        await self._save_loss_episodes()
+        if events:
+            await self._send_loss_digest(settings, events, registry.owners(), policy)
+
+    async def _send_loss_digest(self, settings: AlertSettings, events: list[AlertEvent],
+                                owners: dict[str, str], policy: LossPolicy):
+        lang = self._lang(settings)
+        notified = False
+        if settings.telegram_bot_token and settings.telegram_chat_id:
+            from app.services.telegram_bot import get_telegram_bot_service
+            service = get_telegram_bot_service()
+            sent = [
+                await service.send_message(settings.telegram_bot_token, settings.telegram_chat_id, text)
+                for text in format_digest(events, owners, policy, lang)
+            ]
+            notified = all(sent)
+
+        entries = [
+            AlertHistory(
+                server_id=record.server_id,
+                server_name=record.server_name,
+                alert_type="packet_loss_recovery" if record.recovered else "packet_loss",
+                severity="info" if record.recovered else "warning",
+                message=record.message,
+                details=json.dumps(record.details, ensure_ascii=False),
+                notified=notified,
+            )
+            for record in history_records(events, owners, lang)
+        ]
+        if not entries:
+            return
+        try:
+            async with async_session() as db:
+                db.add_all(entries)
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to save packet loss history: {e}")
+
+    async def _restore_loss_episodes(self):
+        try:
+            async with async_session() as db:
+                rows = (await db.execute(select(PacketLossEpisode))).scalars().all()
+                incident_rows = (await db.execute(select(PacketLossRelayIncident))).scalars().all()
+        except Exception as e:
+            logger.warning(f"Packet loss episodes restore failed: {e}")
+            return
+        self._loss.episodes = {
+            row.target: Episode(
+                level=row.level, opened_at=row.opened_at, last_data_at=row.last_data_at,
+                notified_at=row.notified_at, calm_since=row.calm_since, blamed_relay_id=row.blamed_relay_id,
+            )
+            for row in rows
+        }
+        self._loss.incidents = {
+            row.relay_id: RelayIncident(
+                relay_name=row.relay_name, opened_at=row.opened_at,
+                notified_at=row.notified_at, reported=row.reported,
+            )
+            for row in incident_rows
+        }
+        self._loss_persisted = self._loss_state()
+
+    def _loss_state(self) -> dict:
+        return {
+            "episodes": {target: asdict(e) for target, e in self._loss.episodes.items()},
+            "incidents": {relay_id: asdict(i) for relay_id, i in self._loss.incidents.items()},
+        }
+
+    async def _save_loss_episodes(self):
+        current = self._loss_state()
+        if current == self._loss_persisted:
+            return
+        try:
+            async with async_session() as db:
+                await db.execute(delete(PacketLossEpisode))
+                await db.execute(delete(PacketLossRelayIncident))
+                db.add_all([
+                    PacketLossEpisode(target=target, **fields)
+                    for target, fields in current["episodes"].items()
+                ])
+                db.add_all([
+                    PacketLossRelayIncident(relay_id=relay_id, **fields)
+                    for relay_id, fields in current["incidents"].items()
+                ])
+                await db.commit()
+            self._loss_persisted = current
+        except Exception as e:
+            logger.error(f"Failed to save packet loss episodes: {e}")
+
+    # ------------------------------------------------------------------
     # Load Average
     # ------------------------------------------------------------------
     async def _check_load_avg(
@@ -673,17 +839,21 @@ class ServerAlerter:
 
                 if self._cooldown_ok(state, "offline", now, cooldown):
                     state.last_alert["offline"] = now
+                    details = {"icmp_reachable": icmp_reachable}
 
-                    if icmp_reachable:
+                    proxy_fault = None
+                    if srv.proxy_url:
+                        proxy_fault = await find_proxy_fault(srv.proxy_url, PROXY_CHECK_TIMEOUT)
+
+                    if proxy_fault:
+                        message = self._msg_offline_proxy(srv, settings, proxy_fault)
+                        details["proxy_fault"] = proxy_fault.value
+                    elif icmp_reachable:
                         message = self._msg_offline_api_only(srv, settings)
                     else:
                         message = self._msg_offline_full(srv, settings)
 
-                    await self._send_and_save(
-                        srv, settings, "offline", "critical",
-                        message,
-                        {"icmp_reachable": icmp_reachable},
-                    )
+                    await self._send_and_save(srv, settings, "offline", "critical", message, details)
         else:
             if state.was_offline and settings.offline_recovery_notify:
                 if self._cooldown_ok(state, "recovery", now, cooldown):
@@ -911,10 +1081,13 @@ class ServerAlerter:
     async def _api_probe(srv: Server) -> bool:
         try:
             client = get_node_client(srv)
-            response = await client.get(
-                f"{srv.url}/api/metrics",
-                headers=node_auth_headers(srv),
-                timeout=5.0,
+            response = await asyncio.wait_for(
+                client.get(
+                    f"{srv.url}/api/metrics",
+                    headers=node_auth_headers(srv),
+                    timeout=API_PROBE_TIMEOUT,
+                ),
+                API_PROBE_HARD_TIMEOUT,
             )
             return response.status_code == 200
         except Exception:

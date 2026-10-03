@@ -27,6 +27,7 @@ import { formatListen, formatTarget, protocolLabel } from '../utils/dnat'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useModuleEnabled } from '../hooks/useModuleEnabled'
 import { Tooltip } from '../components/ui/Tooltip'
+import LossProbeBadge from '../components/ui/LossProbeBadge'
 import { FAQIcon } from '../components/FAQ'
 
 const REFRESH_INTERVAL_MS = 5000
@@ -394,12 +395,13 @@ export default function Dnat() {
                       <tr>
                         <th className="text-left px-3 py-2 font-medium">{t('dnat.col_rule')}</th>
                         <th className="text-left px-3 py-2 font-medium">{t('dnat.col_route')}</th>
+                        <th className="text-left px-3 py-2 font-medium">{t('loss_probe.column')}</th>
                         <th className="text-right px-3 py-2 font-medium">{t('dnat.col_conns')}</th>
                         <th className="text-right px-3 py-2 font-medium">
-                          <span className="inline-flex items-center gap-1"><ArrowDownToLine className="w-3 h-3" /> {t('dnat.col_in')}</span>
+                          <span className="inline-flex items-center gap-1"><ArrowDownToLine className="w-3.5 h-3.5" /> {t('dnat.col_in')}</span>
                         </th>
                         <th className="text-right px-3 py-2 font-medium">
-                          <span className="inline-flex items-center gap-1"><ArrowUpFromLine className="w-3 h-3" /> {t('dnat.col_out')}</span>
+                          <span className="inline-flex items-center gap-1"><ArrowUpFromLine className="w-3.5 h-3.5" /> {t('dnat.col_out')}</span>
                         </th>
                         <th className="text-right px-3 py-2 font-medium">{t('dnat.col_status')}</th>
                       </tr>
@@ -409,6 +411,7 @@ export default function Dnat() {
                         const counters = countersByName[rule.name]
                         const rate = rates[rule.name]
                         const targetRows = (counters?.targets ?? []).length > 1 ? counters.targets : []
+                        const singleTarget = counters?.targets.length === 1 ? counters.targets[0] : null
                         return (
                           <Fragment key={rule.name}>
                           <tr className={`border-t border-dark-800/40 hover:bg-dark-800/30 transition-colors ${rule.enabled ? '' : 'opacity-50'}`}>
@@ -420,40 +423,43 @@ export default function Dnat() {
                               <span className="text-dark-400 text-xs mr-2">{protocolLabel(rule.protocol)}</span>
                               :{formatListen(rule)} → {formatTarget(rule)}
                               {!rule.masquerade && (
-                                <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-warning/10 text-warning border border-warning/20">
+                                <span className="ml-2 px-1.5 py-0.5 rounded text-2xs bg-warning/10 text-warning border border-warning/20">
                                   {t('dnat_profiles.no_masq_badge')}
                                 </span>
                               )}
                             </td>
+                            <td className="px-3 py-2">
+                              {singleTarget && <LossProbeBadge probe={singleTarget.probe} />}
+                            </td>
                             <td className="px-3 py-2 text-right font-mono text-dark-200 whitespace-nowrap">
                               {counters ? counters.conns.toLocaleString() : '—'}
                               {rate && rate.connsPerSec > 0 && (
-                                <span className="block text-[11px] text-accent-400">+{rate.connsPerSec.toFixed(1)}/s</span>
+                                <span className="block text-2xs text-accent-400">+{rate.connsPerSec.toFixed(1)}/s</span>
                               )}
                             </td>
                             <td className="px-3 py-2 text-right font-mono text-dark-200 whitespace-nowrap">
                               {counters ? formatBytes(counters.bytes_in) : '—'}
                               {rate && (
-                                <span className="block text-[11px] text-dark-500">{formatBitsPerSecLocalized(rate.bytesInPerSec, t)}</span>
+                                <span className="block text-2xs text-dark-500">{formatBitsPerSecLocalized(rate.bytesInPerSec, t)}</span>
                               )}
                             </td>
                             <td className="px-3 py-2 text-right font-mono text-dark-200 whitespace-nowrap">
                               {counters ? formatBytes(counters.bytes_out) : '—'}
                               {rate && (
-                                <span className="block text-[11px] text-dark-500">{formatBitsPerSecLocalized(rate.bytesOutPerSec, t)}</span>
+                                <span className="block text-2xs text-dark-500">{formatBitsPerSecLocalized(rate.bytesOutPerSec, t)}</span>
                               )}
                             </td>
                             <td className="px-3 py-2 text-right">
                               {!rule.enabled ? (
-                                <span className="px-2 py-0.5 rounded-md text-[11px] bg-dark-700/50 text-dark-400 border border-dark-600/40">
+                                <span className="px-2 py-0.5 rounded-md text-2xs bg-dark-700/50 text-dark-400 border border-dark-600/40">
                                   {t('dnat_profiles.disabled_badge')}
                                 </span>
                               ) : counters?.present ? (
-                                <span className="px-2 py-0.5 rounded-md text-[11px] bg-success/10 text-success border border-success/20">
+                                <span className="px-2 py-0.5 rounded-md text-2xs bg-success/10 text-success border border-success/20">
                                   {t('dnat.rule_active')}
                                 </span>
                               ) : (
-                                <span className="px-2 py-0.5 rounded-md text-[11px] bg-danger/10 text-danger border border-danger/20">
+                                <span className="px-2 py-0.5 rounded-md text-2xs bg-danger/10 text-danger border border-danger/20">
                                   {t('dnat.rule_missing')}
                                 </span>
                               )}
@@ -463,6 +469,7 @@ export default function Dnat() {
                             <tr key={`${rule.name}@${target.ip}`} className="bg-dark-900/30 text-xs">
                               <td className="px-3 py-1 text-dark-500 pl-8">↳ {t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}`)}</td>
                               <td className="px-3 py-1 font-mono text-dark-300">→ {target.ip}</td>
+                              <td className="px-3 py-1"><LossProbeBadge probe={target.probe} /></td>
                               <td className="px-3 py-1 text-right font-mono text-dark-300">{target.conns.toLocaleString()}</td>
                               <td className="px-3 py-1 text-right font-mono text-dark-300">{formatBytes(target.bytes_in)}</td>
                               <td className="px-3 py-1 text-right font-mono text-dark-300">{formatBytes(target.bytes_out)}</td>

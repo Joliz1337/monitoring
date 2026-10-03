@@ -113,19 +113,19 @@ export default function ExtraServerCard({
           </span>
           {status === 'running' && (
             <span className="flex items-center gap-1 text-xs text-dark-300">
-              <Loader2 className="w-3 h-3 animate-spin" />
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
               {t('common.loading')}
             </span>
           )}
           {status === 'success' && (
             <span className="flex items-center gap-1 text-xs text-success">
-              <CheckCircle2 className="w-3 h-3" />
+              <CheckCircle2 className="w-3.5 h-3.5" />
               {t('servers.deploy_extra_ok')}
             </span>
           )}
           {status === 'error' && (
             <span className="flex items-center gap-1 text-xs text-danger">
-              <XCircle className="w-3 h-3" />
+              <XCircle className="w-3.5 h-3.5" />
               {t('servers.deploy_extra_failed')}
             </span>
           )}
@@ -240,7 +240,7 @@ export default function ExtraServerCard({
             </div>
             <pre
               ref={logRef}
-              className="text-[11px] leading-relaxed font-mono text-dark-300 max-h-48 overflow-auto whitespace-pre-wrap"
+              className="text-2xs leading-relaxed font-mono text-dark-300 max-h-48 overflow-auto whitespace-pre-wrap"
             >
               {target.log.join('\n')}
             </pre>

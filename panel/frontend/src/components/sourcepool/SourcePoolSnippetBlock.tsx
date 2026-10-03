@@ -3,10 +3,10 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { ChevronDown, Loader2, Shuffle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { sourcePoolApi, type SourcePoolSnippet } from '../../api/client'
-import { CopyField } from './SnippetBlock'
+import { CopyField } from '../exitproxy/SnippetBlock'
 
-// Кусок конфига Xray для пула исходящих адресов: метки одинаковы на всех нодах,
-// поэтому блок общий и живёт рядом с конфигом exit-прокси
+// Метки одинаковы на всех нодах, поэтому кусок конфига Xray не зависит от сервера,
+// на странице которого открыт
 export default function SourcePoolSnippetBlock() {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)

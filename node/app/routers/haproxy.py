@@ -37,6 +37,7 @@ from app.services.haproxy_manager import HAProxyRule, get_haproxy_manager
 from app.models.haproxy import BackendServerModel, BalancerOptionsModel
 from app.services.firewall_manager import get_firewall_manager
 from app.services.dnat_manager import get_dnat_manager
+from app.services.loss_probe import get_loss_probe
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +96,11 @@ async def get_haproxy_status():
 
 @router.get("/stats", response_model=HAProxyStatsResponse)
 async def get_haproxy_stats():
-    """Live stats from the HAProxy stats socket (show stat), read-only"""
+    """Live stats from the HAProxy stats socket (show stat) plus loss per server, read-only"""
     manager = get_haproxy_manager()
-    return await asyncio.to_thread(manager.get_stats)
+    # Менеджер отдаёт свой кэш словарём: модель — свежая копия, разметка его не трогает
+    stats = HAProxyStatsResponse.model_validate(await asyncio.to_thread(manager.get_stats))
+    return get_loss_probe().annotate_haproxy(stats)
 
 
 @router.get("/rules", response_model=HAProxyRulesListResponse)
@@ -281,6 +284,7 @@ async def apply_config(request: ConfigApplyRequest):
 
     if success:
         logger.info(f"HAProxy config applied from panel (reloaded: {reloaded})")
+        get_loss_probe().request_refresh()
     
     return ConfigApplyResponse(
         success=success,

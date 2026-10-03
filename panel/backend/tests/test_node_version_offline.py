@@ -1,5 +1,6 @@
 """Версия ноды со страниц «Обновления»/«Системные оптимизации»: ноду, которую
 коллектор метрик считает офлайн, панель не опрашивает — отдаёт «offline» сразу.
+Плюс общий кэш файлов оптимизаций с GitHub для массового применения.
 
 Голый unittest, без PostgreSQL и без сети.
 
@@ -26,9 +27,13 @@ except ImportError as e:  # рантайм панели не установле�
 class FakeDb:
     def __init__(self, server):
         self._server = server
+        self.committed = False
 
     async def execute(self, _stmt):
         return SimpleNamespace(scalar_one_or_none=lambda: self._server)
+
+    async def commit(self):
+        self.committed = True
 
 
 def make_server(last_seen_age_sec: int | None, last_error: str | None = None):
@@ -46,10 +51,12 @@ NODE_ANSWER = {"node_version": "10.29.0", "optimizations": {"installed": True, "
 
 class SingleNodeVersionTest(unittest.TestCase):
     def call(self, server):
+        db = FakeDb(server)
         calls = []
 
         async def fake_versions(srv):
             calls.append(srv.id)
+            self.committed_before_poll = db.committed
             return NODE_ANSWER
 
         async def fake_threshold(_db):
@@ -57,7 +64,7 @@ class SingleNodeVersionTest(unittest.TestCase):
 
         with patch.object(system_router, "get_node_all_versions", fake_versions), \
                 patch.object(system_router, "get_offline_threshold", fake_threshold):
-            payload = asyncio.run(system_router.get_single_node_version(server.id, FakeDb(server), {}))
+            payload = asyncio.run(system_router.get_single_node_version(server.id, db, {}))
         return payload, calls
 
     def test_offline_by_collector_is_not_polled(self):
@@ -83,6 +90,53 @@ class SingleNodeVersionTest(unittest.TestCase):
         payload, calls = self.call(make_server(last_seen_age_sec=None))
         self.assertEqual(calls, [7])
         self.assertEqual(payload["status"], "online")
+
+    def test_pool_connection_released_before_polling(self):
+        # После «Обновить все» страница перечитывает все ноды разом: коннект
+        # пула, провисевший весь запрос к ноде, выгреб бы пул БД
+        self.call(make_server(last_seen_age_sec=5))
+        self.assertTrue(self.committed_before_poll)
+
+
+class OptimizationsGithubCacheTest(unittest.TestCase):
+    """«Обновить все» шлёт применение на все ноды разом — файлы с GitHub
+    должны скачиваться один раз на волну, а не по 12 запросов на ноду."""
+
+    def setUp(self):
+        system_router._optimizations_cache.clear()
+        self.fetches = []
+        self.complete = True
+
+    def run_wave(self, profiles, base="https://raw.example/main/configs"):
+        async def fake_fetch(profile):
+            self.fetches.append(profile)
+            await asyncio.sleep(0.01)
+            return {"profile": profile}, self.complete
+
+        async def wave():
+            return await asyncio.gather(*(system_router.get_optimizations_from_github(p) for p in profiles))
+
+        # Свой лок на каждый asyncio.run: занятый лок привязывается к циклу событий
+        with patch.object(system_router, "_fetch_optimizations_from_github", fake_fetch), \
+                patch.object(system_router, "_optimizations_lock", asyncio.Lock()), \
+                patch.object(system_router.update_channel, "github_configs_base", lambda: base):
+            return asyncio.run(wave())
+
+    def test_concurrent_wave_fetches_once_per_profile(self):
+        results = self.run_wave(["vpn"] * 50 + ["panel"] * 10)
+        self.assertEqual(sorted(self.fetches), ["panel", "vpn"])
+        self.assertEqual(results[0], {"profile": "vpn"})
+        self.assertEqual(results[-1], {"profile": "panel"})
+
+    def test_failed_fetch_is_not_repeated_by_waiters(self):
+        self.complete = False
+        self.run_wave(["vpn"] * 20)
+        self.assertEqual(self.fetches, ["vpn"])
+
+    def test_channel_switch_bypasses_cache(self):
+        self.run_wave(["vpn"], base="https://raw.example/main/configs")
+        self.run_wave(["vpn"], base="https://raw.example/dev/configs")
+        self.assertEqual(self.fetches, ["vpn", "vpn"])
 
 
 if __name__ == "__main__":

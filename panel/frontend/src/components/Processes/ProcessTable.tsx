@@ -145,8 +145,8 @@ export default function ProcessTable({ processes, className = '' }: ProcessTable
               {field === 'pid' && t('process_table.pid')}
               {sortField === field && (
                 sortDirection === 'asc' 
-                  ? <ChevronUp className="w-3 h-3" />
-                  : <ChevronDown className="w-3 h-3" />
+                  ? <ChevronUp className="w-3.5 h-3.5" />
+                  : <ChevronDown className="w-3.5 h-3.5" />
               )}
             </button>
           ))}

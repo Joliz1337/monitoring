@@ -30,6 +30,7 @@ import {
 import { toast } from 'sonner'
 import { billingApi, BillingServerData, BillingSettingsData } from '../api/client'
 import { Tooltip } from '../components/ui/Tooltip'
+import { writeStorage } from '../utils/storage'
 import { FAQIcon } from '../components/FAQ'
 import { BillingSummary } from '../components/billing/BillingSummary'
 import { ProjectCard } from '../components/billing/ProjectCard'
@@ -69,7 +70,7 @@ function loadCollapsed(): Set<string> {
 }
 
 function saveCollapsed(set: Set<string>) {
-  localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set]))
+  writeStorage(COLLAPSED_KEY, JSON.stringify([...set]))
 }
 
 function loadFolderOrder(): string[] {
@@ -79,7 +80,7 @@ function loadFolderOrder(): string[] {
 }
 
 function saveFolderOrder(order: string[]) {
-  localStorage.setItem(FOLDER_ORDER_KEY, JSON.stringify(order))
+  writeStorage(FOLDER_ORDER_KEY, JSON.stringify(order))
 }
 
 function loadServerOrder(): number[] {
@@ -89,7 +90,7 @@ function loadServerOrder(): number[] {
 }
 
 function saveServerOrder(order: number[]) {
-  localStorage.setItem(SERVER_ORDER_KEY, JSON.stringify(order))
+  writeStorage(SERVER_ORDER_KEY, JSON.stringify(order))
 }
 
 export default function Billing() {
@@ -529,7 +530,7 @@ export default function Billing() {
           animate={{ opacity: 1, y: 0 }}
           className="bg-dark-900/50 rounded-xl border border-dark-800/50 p-12 text-center"
         >
-          <Box className="w-10 h-10 text-dark-600 mx-auto mb-3" />
+          <Box className="w-10 h-10 text-dark-500 mx-auto mb-3" />
           <p className="text-dark-400 text-sm">{t('billing.no_items')}</p>
         </motion.div>
       ) : (
@@ -562,7 +563,7 @@ export default function Billing() {
                               ref={handleProps.ref}
                               {...handleProps.listeners}
                               {...handleProps.attributes}
-                              className="p-1 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing transition rounded flex-shrink-0"
+                              className="p-1 text-dark-500 hover:text-dark-400 cursor-grab active:cursor-grabbing transition rounded flex-shrink-0"
                             >
                               <GripVertical className="w-4 h-4" />
                             </div>
@@ -588,8 +589,8 @@ export default function Billing() {
                                 </span>
                               )}
                               {isCollapsed
-                                ? <ChevronRight className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />
-                                : <ChevronDown className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />
+                                ? <ChevronRight className="w-3.5 h-3.5 text-dark-500 flex-shrink-0" />
+                                : <ChevronDown className="w-3.5 h-3.5 text-dark-500 flex-shrink-0" />
                               }
                             </button>
                           </div>
@@ -599,7 +600,7 @@ export default function Billing() {
                                 onClick={() => setModal({ kind: 'rename-folder', folderName })}
                                 className="p-1.5 text-dark-500 hover:text-dark-300 transition rounded-lg hover:bg-dark-800/50"
                               >
-                                <Pencil className="w-3.5 h-3.5" />
+                                <Pencil className="w-4 h-4" />
                               </button>
                             </Tooltip>
                             <Tooltip label={t('common.delete')}>
@@ -607,7 +608,7 @@ export default function Billing() {
                                 onClick={() => handleDeleteFolder(folderName)}
                                 className="p-1.5 text-dark-500 hover:text-red-400 transition rounded-lg hover:bg-dark-800/50"
                               >
-                                <Trash2 className="w-3.5 h-3.5" />
+                                <Trash2 className="w-4 h-4" />
                               </button>
                             </Tooltip>
                           </div>

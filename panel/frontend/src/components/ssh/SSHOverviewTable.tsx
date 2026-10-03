@@ -170,7 +170,7 @@ export function SSHOverviewTable({ servers, onOpenServer }: SSHOverviewTableProp
                             ? 'bg-orange-500/15 text-orange-400'
                             : 'bg-red-500/15 text-red-400'
                         }`}>
-                          {row.state === 'outdated' ? <ShieldAlert className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
+                          {row.state === 'outdated' ? <ShieldAlert className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
                           {row.state === 'outdated'
                             ? t('ssh_security.overview_outdated')
                             : t('ssh_security.overview_offline')}

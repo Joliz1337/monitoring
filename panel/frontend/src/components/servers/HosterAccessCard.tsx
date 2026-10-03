@@ -12,6 +12,7 @@ import {
 } from '../../api/client'
 import { nodeAllows } from '../../utils/nodeCapabilities'
 import { Tooltip } from '../ui/Tooltip'
+import { Checkbox } from '../ui/Checkbox'
 import { FAQIcon } from '../FAQ'
 
 interface Props {
@@ -164,9 +165,9 @@ export default function HosterAccessCard({ serverId, server }: Props) {
           <button
             onClick={rescan}
             disabled={scanning || purging || loading}
-            className="text-xs text-dark-400 hover:text-dark-200 inline-flex items-center gap-1.5 disabled:opacity-50"
+            className="btn-tool"
           >
-            {scanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            {scanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             {t('server_details.hoster_rescan')}
           </button>
         </div>
@@ -259,12 +260,7 @@ export default function HosterAccessCard({ serverId, server }: Props) {
               )}
 
               <label className="flex items-start gap-2 text-sm text-dark-300 cursor-pointer mb-4">
-                <input
-                  type="checkbox"
-                  checked={confirmAck}
-                  onChange={e => setConfirmAck(e.target.checked)}
-                  className="accent-accent-500 mt-0.5"
-                />
+                <Checkbox checked={confirmAck} onChange={e => setConfirmAck(e.target.checked)} className="mt-px" />
                 {t('server_details.hoster_confirm_ack')}
               </label>
 
@@ -308,19 +304,13 @@ function FindingRow({
         checked ? 'border-accent-500/40 bg-accent-500/5' : 'border-dark-700 bg-dark-800/40'
       } ${disabled ? 'opacity-60 cursor-default' : 'hover:border-dark-600'}`}
     >
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={onToggle}
-        className="accent-accent-500 mt-0.5"
-      />
+      <Checkbox checked={checked} disabled={disabled} onChange={onToggle} className="mt-px" />
       <span className={`w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 ${severityDot(finding.severity)}`} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-sm font-medium text-dark-100">{finding.title}</span>
           {finding.access_critical && (
-            <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-danger/15 text-danger">
+            <span className="text-2xs uppercase tracking-wide px-1.5 py-0.5 rounded bg-danger/15 text-danger">
               {t('server_details.hoster_badge_critical')}
             </span>
           )}

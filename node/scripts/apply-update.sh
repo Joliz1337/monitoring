@@ -49,6 +49,10 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Метка этапа для агента ноды: по последней из них в логе апдейтера панель
+# показывает, на каком шаге обновление. В терминале при ручном запуске не нужна
+stage() { [ -t 1 ] || echo "[STAGE] $1"; }
+
 # ==================== Container Detection ====================
 
 IN_CONTAINER=0
@@ -562,6 +566,7 @@ NEW_VERSION="unknown"
 if [ -f "$TMP_DIR/node/VERSION" ]; then
     NEW_VERSION=$(cat "$TMP_DIR/node/VERSION")
 fi
+stage files
 log_info "Applying update: ${CURRENT_VERSION:-unknown} → $NEW_VERSION"
 
 # HAProxy migration check
@@ -699,6 +704,7 @@ fi
 # (на плохой сети — десятки минут), нода продолжает работать на старой версии.
 # Если скачать/собрать не удалось — обновление отменяется без даунтайма.
 cd "$NODE_DIR"
+stage images
 
 set +e
 # Блок-режим (MON_ALLOW_LOCAL_BUILD=0, панель-триггер для заблокированной ноды):
@@ -733,6 +739,7 @@ if [ $IN_CONTAINER -eq 0 ]; then
 fi
 
 # Образы на диске — теперь короткий рестарт на новую версию
+stage restart
 log_info "Restarting containers on new version..."
 docker compose down --timeout 30 || true
 CONTAINERS_STOPPED=1

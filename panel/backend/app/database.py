@@ -246,6 +246,18 @@ async def run_migrations(conn):
             except Exception:
                 pass
 
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'packet_loss_episodes'
+    """))
+    loss_episode_columns = {row[0] for row in result.fetchall()}
+    if loss_episode_columns and "blamed_relay_id" not in loss_episode_columns:
+        try:
+            await conn.execute(text('ALTER TABLE packet_loss_episodes ADD COLUMN "blamed_relay_id" INTEGER'))
+            logger.info("Added column: packet_loss_episodes.blamed_relay_id")
+        except Exception:
+            pass
+
     # Check remnawave_settings columns
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns 
@@ -390,6 +402,22 @@ async def run_migrations(conn):
                 except Exception:
                     pass
 
+        packet_loss_columns = [
+            ("packet_loss_enabled", "BOOLEAN DEFAULT TRUE"),
+            ("packet_loss_threshold", "FLOAT DEFAULT 20.0"),
+            ("packet_loss_sustained_seconds", "INTEGER DEFAULT 300"),
+            ("packet_loss_calm_seconds", "INTEGER DEFAULT 900"),
+            ("packet_loss_reminder_hours", "INTEGER DEFAULT 0"),
+            ("packet_loss_excluded_server_ids", "TEXT"),
+        ]
+        for col_name, col_type in packet_loss_columns:
+            if col_name not in alert_columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE alert_settings ADD COLUMN "{col_name}" {col_type}'))
+                    logger.info(f"Added column: alert_settings.{col_name}")
+                except Exception:
+                    pass
+
         # Подтянуть старые дефолты шумовых порогов к новым значениям.
         # Срабатывает только если пользователь не менял значения вручную —
         # т.е. они точно равны предыдущим встроенным дефолтам.
@@ -491,6 +519,8 @@ async def run_migrations(conn):
             ("haproxy_config_hash", "VARCHAR(64)"),
             ("haproxy_last_sync_at", "TIMESTAMP"),
             ("haproxy_sync_status", "VARCHAR(20)"),
+            ("haproxy_listen_ips", "TEXT"),
+            ("haproxy_source_ips", "TEXT"),
         ]
         for col_name, col_type in haproxy_profile_columns:
             if col_name not in columns:
@@ -1843,6 +1873,7 @@ async def _migrate_cloud_billing(conn):
         ("cloud_provider", "VARCHAR(30)"),
         ("cloud_credential", "TEXT"),
         ("cloud_account_id", "VARCHAR(100)"),
+        ("cloud_proxy", "TEXT"),
         ("cloud_balance_threshold", "DOUBLE PRECISION DEFAULT 0"),
         ("cloud_daily_cost", "DOUBLE PRECISION"),
         ("cloud_last_sync_at", "TIMESTAMP WITH TIME ZONE"),
@@ -2140,6 +2171,49 @@ async def _migrate_metrics_window_peaks(conn):
                     logger.warning(f"Could not add {table}.{col_name}: {e}")
 
 
+async def _migrate_haproxy_profile_options(conn):
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'haproxy_config_profiles'
+    """))
+    columns = {row[0] for row in result.fetchall()}
+    if not columns or "options" in columns:
+        return
+    try:
+        await conn.execute(text('ALTER TABLE haproxy_config_profiles ADD COLUMN "options" TEXT'))
+        logger.info("Added column: haproxy_config_profiles.options")
+    except Exception as e:
+        if "already exists" not in str(e).lower():
+            logger.warning(f"Could not add haproxy_config_profiles.options: {e}")
+
+
+async def _migrate_source_pool_manual(conn):
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'source_pool_nodes'
+    """))
+    columns = {row[0] for row in result.fetchall()}
+    if not columns:
+        return
+    for col_name, col_type in (("mode", "VARCHAR(10) DEFAULT 'auto'"), ("assignments", "TEXT")):
+        if col_name in columns:
+            continue
+        try:
+            await conn.execute(text(f'ALTER TABLE source_pool_nodes ADD COLUMN "{col_name}" {col_type}'))
+            logger.info(f"Added column: source_pool_nodes.{col_name}")
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.warning(f"Could not add source_pool_nodes.{col_name}: {e}")
+
+
+async def _migrate_node_update_step(conn):
+    """Этап обновления ноды для статуса на «Обновлениях» — таблица старше колонки."""
+    try:
+        await conn.execute(text('ALTER TABLE node_update_attempts ADD COLUMN IF NOT EXISTS "step" VARCHAR(20)'))
+    except Exception as e:
+        logger.warning(f"Could not add node_update_attempts.step: {e}")
+
+
 # (таблица, колонка) — целевые секреты: приватные ключи, не публичные сертификаты
 _SECRET_COLUMNS = [
     ("keygen", "ca_key_pem"),
@@ -2149,6 +2223,7 @@ _SECRET_COLUMNS = [
     ("servers", "api_key"),
     ("remnawave_cert_profiles", "secret_key"),
     ("billing_servers", "cloud_credential"),
+    ("billing_servers", "cloud_proxy"),
 ]
 
 
@@ -2203,6 +2278,9 @@ async def init_db():
         await _migrate_traffic_v2(conn)
         await _migrate_node_capabilities(conn)
         await _migrate_metrics_window_peaks(conn)
+        await _migrate_haproxy_profile_options(conn)
+        await _migrate_source_pool_manual(conn)
+        await _migrate_node_update_step(conn)
         await _migrate_encrypt_secrets(conn)
 
     await _warmup_pool()

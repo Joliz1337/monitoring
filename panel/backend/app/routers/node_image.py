@@ -2,16 +2,17 @@
 
 Метод обновления ноды и SSH-креды доставки живут на записи сервера; креды
 шифруются (EncryptedString) и наружу не отдаются — только флаг «заданы».
-Сама доставка — фоновая задача с NDJSON-стримом лога (как авторазвёртывание).
+Сама доставка — фоновая задача с NDJSON-стримом лога (как авторазвёртывание):
+окно лога можно закрыть, список задач (GET /servers/deliver-image/jobs) даёт
+фронту статусы по серверам. Массовый запуск — POST /servers/deliver-image/bulk.
 """
 import json
 import logging
 from typing import Optional
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,45 +20,63 @@ from app.auth import verify_auth
 from app.database import get_db
 from app.models import Server
 from app.services import update_channel
-from app.services.node_image_delivery import SSHTarget, get_image_delivery_manager
+from app.services.node_image_delivery import get_image_delivery_manager
+from app.services.ssh_target import (
+    SSHTarget,
+    SSHTargetError,
+    has_stored_creds,
+    host_from_url,
+    resolve_ssh_target,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/servers", tags=["node-image"])
+
+MAX_BULK_SERVERS = 1000
 
 
 def _ndjson(obj: dict) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode()
 
 
-def _host_from_url(url: str) -> str:
-    return urlparse(url).hostname or ""
+class SSHCreds(BaseModel):
+    ssh_port: Optional[int] = None
+    ssh_user: Optional[str] = None
+    ssh_password: Optional[str] = None
+    ssh_private_key: Optional[str] = None
+    ssh_passphrase: Optional[str] = None
 
 
-def _target_tag_ref() -> tuple[str, str]:
-    """Тег образа и git-ref по текущему каналу обновлений: dev → :dev, иначе :latest."""
-    branch = update_channel.current_branch()
-    tag = "dev" if branch == update_channel.DEV_BRANCH else "latest"
-    return tag, branch
+class SSHAccessRequest(SSHCreds):
+    """Разовые SSH-креды поверх сохранённых у сервера. Ими же ставится нода
+    Remnawave, когда сервер качает всё через панель."""
+    ssh_host: Optional[str] = None
 
 
-class ImageDeliverySettings(BaseModel):
+class ImageDeliverySettings(SSHAccessRequest):
     image_delivery: Optional[str] = None  # auto | ssh
-    ssh_host: Optional[str] = None
-    ssh_port: Optional[int] = None
-    ssh_user: Optional[str] = None
-    ssh_password: Optional[str] = None
-    ssh_private_key: Optional[str] = None
-    ssh_passphrase: Optional[str] = None
 
 
-class DeliverImageRequest(BaseModel):
-    """Разовые SSH-креды, если у сервера не сохранены."""
-    ssh_host: Optional[str] = None
-    ssh_port: Optional[int] = None
-    ssh_user: Optional[str] = None
-    ssh_password: Optional[str] = None
-    ssh_private_key: Optional[str] = None
-    ssh_passphrase: Optional[str] = None
+class BulkDeliverRequest(SSHCreds):
+    """Креды из запроса идут только серверам без сохранённых — у остальных свои."""
+    server_ids: list[int] = Field(min_length=1, max_length=MAX_BULK_SERVERS)
+    save_creds: bool = False
+
+
+def _store_creds(server: Server, req: SSHAccessRequest) -> None:
+    """Write-only: обновляем только переданные поля; пустая строка — очистить."""
+    if req.ssh_host is not None:
+        server.ssh_host = req.ssh_host.strip() or None
+    if req.ssh_port is not None:
+        server.ssh_port = req.ssh_port or None
+    if req.ssh_user is not None:
+        server.ssh_user = req.ssh_user.strip() or None
+    if req.ssh_password is not None:
+        server.ssh_password = req.ssh_password or None
+    if req.ssh_private_key is not None:
+        server.ssh_private_key = req.ssh_private_key or None
+    if req.ssh_passphrase is not None:
+        server.ssh_passphrase = req.ssh_passphrase or None
 
 
 async def _get_server(server_id: int, db: AsyncSession) -> Server:
@@ -76,7 +95,7 @@ async def get_image_delivery(
     server = await _get_server(server_id, db)
     return {
         "image_delivery": server.image_delivery or "auto",
-        "ssh_host": server.ssh_host or _host_from_url(server.url),
+        "ssh_host": server.ssh_host or host_from_url(server.url),
         "ssh_port": server.ssh_port or 22,
         "ssh_user": server.ssh_user or "root",
         # секреты не отдаём — только факт наличия
@@ -99,19 +118,7 @@ async def set_image_delivery(
             raise HTTPException(400, "image_delivery: auto | ssh")
         server.image_delivery = req.image_delivery
 
-    # Write-only: обновляем только переданные поля; пустая строка — очистить
-    if req.ssh_host is not None:
-        server.ssh_host = req.ssh_host.strip() or None
-    if req.ssh_port is not None:
-        server.ssh_port = req.ssh_port or None
-    if req.ssh_user is not None:
-        server.ssh_user = req.ssh_user.strip() or None
-    if req.ssh_password is not None:
-        server.ssh_password = req.ssh_password or None
-    if req.ssh_private_key is not None:
-        server.ssh_private_key = req.ssh_private_key or None
-    if req.ssh_passphrase is not None:
-        server.ssh_passphrase = req.ssh_passphrase or None
+    _store_creds(server, req)
 
     await db.commit()
     return {"success": True}
@@ -120,34 +127,67 @@ async def set_image_delivery(
 @router.post("/{server_id}/deliver-image")
 async def deliver_image_to_server(
     server_id: int,
-    req: DeliverImageRequest,
+    req: SSHAccessRequest,
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth),
 ):
     """Доставить образ ноды по SSH и обновить её. Возвращает job_id — лог в стриме."""
     server = await _get_server(server_id, db)
+    try:
+        target = resolve_ssh_target(server, **req.model_dump())
+    except SSHTargetError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
-    host = (req.ssh_host or server.ssh_host or _host_from_url(server.url)).strip()
-    port = req.ssh_port or server.ssh_port or 22
-    user = (req.ssh_user or server.ssh_user or "root").strip()
-    password = req.ssh_password if req.ssh_password is not None else server.ssh_password
-    private_key = req.ssh_private_key if req.ssh_private_key is not None else server.ssh_private_key
-    passphrase = req.ssh_passphrase if req.ssh_passphrase is not None else server.ssh_passphrase
-
-    if not host:
-        raise HTTPException(400, "Не удалось определить SSH-хост ноды")
-    if user != "root":
-        raise HTTPException(400, "Доставка образа поддерживает только root-доступ по SSH")
-    if not password and not private_key:
-        raise HTTPException(400, "Нет SSH-кредов: сохраните их у сервера или укажите в запросе")
-
-    tag, _ = _target_tag_ref()
-    target = SSHTarget(
-        host=host, port=port, user=user,
-        password=password, private_key=private_key, passphrase=passphrase,
-    )
-    job_id = get_image_delivery_manager().start(server.name, target, tag)
+    job_id = get_image_delivery_manager().start(server.id, server.name, target, update_channel.current_image_tag())
     return {"job_id": job_id}
+
+
+@router.post("/deliver-image/bulk")
+async def deliver_image_bulk(
+    req: BulkDeliverRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    """Запустить доставку на несколько серверов. Серверы без кредов пропускаются с причиной."""
+    servers = (await db.execute(
+        select(Server).where(Server.id.in_(req.server_ids)).order_by(Server.position)
+    )).scalars().all()
+    found_ids = {s.id for s in servers}
+
+    fallback = SSHAccessRequest(**req.model_dump(include=set(SSHCreds.model_fields)))
+    targets: list[tuple[Server, SSHTarget]] = []
+    skipped = [
+        {"server_id": sid, "name": None, "reason": "not_found"}
+        for sid in req.server_ids if sid not in found_ids
+    ]
+    for server in servers:
+        uses_fallback = not has_stored_creds(server)
+        try:
+            target = resolve_ssh_target(server, **fallback.model_dump()) if uses_fallback else resolve_ssh_target(server)
+        except SSHTargetError as exc:
+            skipped.append({"server_id": server.id, "name": server.name, "reason": exc.reason})
+            continue
+        if uses_fallback and req.save_creds:
+            _store_creds(server, fallback)
+        targets.append((server, target))
+
+    if req.save_creds:
+        await db.commit()
+
+    tag = update_channel.current_image_tag()
+    manager = get_image_delivery_manager()
+    started = [
+        {"server_id": server.id, "job_id": manager.start(server.id, server.name, target, tag)}
+        for server, target in targets
+    ]
+    logger.info("Bulk image delivery: started=%d skipped=%d", len(started), len(skipped))
+    return {"started": started, "skipped": skipped}
+
+
+@router.get("/deliver-image/jobs")
+async def list_delivery_jobs(_: dict = Depends(verify_auth)):
+    """Идущие и недавно завершённые доставки — статусы на странице обновлений."""
+    return {"jobs": get_image_delivery_manager().list_jobs()}
 
 
 @router.get("/deliver-image/{job_id}/stream")

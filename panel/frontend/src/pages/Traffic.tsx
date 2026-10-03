@@ -25,6 +25,7 @@ import { nodeAllows } from '../utils/nodeCapabilities'
 import { useTranslation } from 'react-i18next'
 import { useSmartRefresh } from '../hooks/useAutoRefresh'
 import { useChartDisplay } from '../hooks/useChartDisplay'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { RAW_DISPLAY } from '../config/chartDisplay'
 import { formatBytes, createBitsFormatter } from '../utils/format'
 import type { ChartGap } from '../utils/chartUtils'
@@ -62,8 +63,8 @@ export default function Traffic() {
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [period, setPeriod] = useState('24h')
-  const [speedPeriod, setSpeedPeriod] = useState('1h')
+  const [period, setPeriod] = useRememberedState('traffic.period', '24h')
+  const [speedPeriod, setSpeedPeriod] = useRememberedState('traffic.speed-period', '1h')
   const [newPort, setNewPort] = useState('')
   const [isAddingPort, setIsAddingPort] = useState(false)
 
@@ -325,7 +326,7 @@ export default function Traffic() {
     return (
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
         <div className="flex items-center gap-4 mb-6">
-          <div className="p-2.5"><ArrowLeft className="w-5 h-5 text-dark-600" /></div>
+          <div className="p-2.5"><ArrowLeft className="w-5 h-5 text-dark-500" /></div>
           <div className="flex-1 space-y-2">
             <div className="h-6 w-48 bg-dark-700/50 rounded-lg animate-pulse" />
             <div className="h-4 w-32 bg-dark-700/30 rounded-lg animate-pulse" />

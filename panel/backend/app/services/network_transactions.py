@@ -8,6 +8,10 @@ TCP-соединению (одноразовый клиент без keepalive):
 Вся цепочка — фоновая задача: apply на ноде может идти до минуты, а nginx
 панели режет /api/ на 60 с. HTTP-ответ на apply ждёт задачу не дольше
 INLINE_WAIT_SECONDS и отдаёт снимок; дальше UI поллит состояние.
+
+Удаление адреса хостера нода делает поверх его конфига: адрес снимается с
+интерфейса и снимается снова, когда конфиг хостера его вернёт. Такой адрес
+можно вернуть (`restore`) — нода перестаёт его снимать.
 """
 
 import asyncio
@@ -36,6 +40,10 @@ from app.services.reserved_ports_sync import _version_tuple
 logger = logging.getLogger(__name__)
 
 MIN_NODE_VERSION_NETWORK = "10.29.0"
+# Старая нода молча проигнорировала бы поле gateway и поставила адрес без шлюза
+MIN_NODE_VERSION_NETWORK_GATEWAY = "10.31.0"
+# Старая нода отказывает в удалении адреса, который добавила не панель
+MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL = "10.31.0"
 ROLLBACK_TIMEOUT_SEC = 120
 STATE_TIMEOUT_SECONDS = 10.0
 # Не больше proxy_read_timeout у location /api/system/network/ на ноде (тест-инвариант)
@@ -105,6 +113,18 @@ class ProtectedIpUnknownError(Exception):
     pass
 
 
+class GatewayConflictError(Exception):
+    def __init__(self, problems: list[str]):
+        super().__init__("; ".join(problems))
+        self.problems = problems
+
+
+class HosterRemovalUnsupportedError(Exception):
+    def __init__(self, node_version: Optional[str]):
+        super().__init__(f"node {node_version or 'unknown'} cannot remove hoster addresses")
+        self.node_version = node_version
+
+
 @dataclass
 class NetworkJob:
     id: str
@@ -113,6 +133,7 @@ class NetworkJob:
     add: list[AddressSpec]
     remove: list[AddressSpec]
     started_at: float
+    restore: list[AddressSpec] = field(default_factory=list)
     phase: JobPhase = JobPhase.APPLYING
     status: TransactionStatus = TransactionStatus.PENDING
     transaction_id: Optional[str] = None
@@ -136,6 +157,7 @@ class NetworkJob:
             "interface": self.interface,
             "added": [spec.payload() for spec in self.add],
             "removed": [spec.payload() for spec in self.remove],
+            "restored": [spec.payload() for spec in self.restore],
             "started_at": _iso(datetime.fromtimestamp(self.started_at, timezone.utc)),
             "deadline_at": _iso(self.deadline_at),
             "attempts": self.attempts,
@@ -165,6 +187,18 @@ def node_supports_network(node_version: Optional[str]) -> bool:
     if not node_version:
         return False
     return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_NETWORK)
+
+
+def node_supports_network_gateway(node_version: Optional[str]) -> bool:
+    if not node_version:
+        return False
+    return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_NETWORK_GATEWAY)
+
+
+def node_supports_hoster_removal(node_version: Optional[str]) -> bool:
+    if not node_version:
+        return False
+    return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL)
 
 
 def node_host(server_url: str) -> Optional[str]:
@@ -202,13 +236,51 @@ def missing_on_interface(specs: list[AddressSpec], iface_state: dict) -> list[Ad
     return [spec for spec in specs if (spec.address, spec.prefix) not in present]
 
 
-def managed_on_interface(specs: list[AddressSpec], iface_state: dict) -> list[AddressSpec]:
-    managed = {
+def present_on_interface(specs: list[AddressSpec], iface_state: dict) -> list[AddressSpec]:
+    present = {(addr.get("address"), addr.get("prefix")) for addr in iface_state.get("addresses") or []}
+    return [spec for spec in specs if (spec.address, spec.prefix) in present]
+
+
+def hoster_on_interface(specs: list[AddressSpec], iface_state: dict) -> list[AddressSpec]:
+    """Адреса, которые стоят на интерфейсе, но добавлены не панелью."""
+    hoster = {
         (addr.get("address"), addr.get("prefix"))
         for addr in iface_state.get("addresses") or []
-        if addr.get("managed")
+        if not addr.get("managed")
     }
-    return [spec for spec in specs if (spec.address, spec.prefix) in managed]
+    return [spec for spec in specs if (spec.address, spec.prefix) in hoster]
+
+
+def suppressed_on_interface(specs: list[AddressSpec], state: dict, interface: str) -> list[AddressSpec]:
+    suppressed = {
+        (entry.get("address"), entry.get("prefix"))
+        for entry in state.get("suppressed") or []
+        if entry.get("interface") == interface
+    }
+    return [spec for spec in specs if (spec.address, spec.prefix) in suppressed]
+
+
+def gateway_conflicts(specs: list[AddressSpec], iface_state: dict, default_gateway: dict) -> list[str]:
+    """Уже стоящий адрес пропускается молча — но не когда для него просят другой
+    шлюз: тихий пропуск выглядел бы как «шлюз задан». Шлюз основного адреса
+    нода приравнивает к отсутствию своего шлюза — здесь так же."""
+    main = {gateway for gateway in (default_gateway or {}).values() if gateway}
+    present = {(addr.get("address"), addr.get("prefix")): addr for addr in iface_state.get("addresses") or []}
+    problems: list[str] = []
+    for spec in specs:
+        addr = present.get((spec.address, spec.prefix))
+        if addr is None:
+            continue
+        wanted = None if spec.gateway in main else spec.gateway
+        if not addr.get("managed"):
+            if wanted:
+                problems.append(f"{spec.cidr} настроен не панелью — задать ему шлюз нельзя")
+            continue
+        current = addr.get("gateway") or None
+        if current != wanted:
+            was = f"через шлюз {current}" if current else "без своего шлюза"
+            problems.append(f"{spec.cidr} уже добавлен {was} — чтобы сменить шлюз, удалите адрес и добавьте заново")
+    return problems
 
 
 def _status_from(value: Optional[str]) -> Optional[TransactionStatus]:
@@ -268,8 +340,13 @@ async def send_rollback(server: Server, transaction_id: str) -> dict:
                           json_data={"transaction_id": transaction_id})
 
 
+async def access_address(server: Server) -> Optional[str]:
+    """Адрес, по которому панель ходит на ноду: его нельзя ни удалить, ни снять."""
+    return await host_to_ip(node_host(server.url) or "")
+
+
 async def resolve_protected_ip(server: Server) -> str:
-    ip = await host_to_ip(node_host(server.url) or "")
+    ip = await access_address(server)
     if not ip:
         raise ProtectedIpUnknownError()
     return ip
@@ -308,7 +385,7 @@ def _finish(job: NetworkJob, status: TransactionStatus, *, message: Optional[str
 
 
 async def start_apply(server: Server, *, interface: str, add: list[AddressSpec],
-                      remove: list[AddressSpec]) -> NetworkJob:
+                      remove: list[AddressSpec], restore: list[AddressSpec]) -> NetworkJob:
     lock = _locks.setdefault(server.id, asyncio.Lock())
     if lock.locked():
         raise PendingTransactionError(None)
@@ -323,21 +400,28 @@ async def start_apply(server: Server, *, interface: str, add: list[AddressSpec],
         iface_state = next((i for i in state.get("interfaces") or [] if i.get("name") == interface), None)
         if iface_state is None:
             raise InterfaceNotFoundError(interface)
+        conflicts = gateway_conflicts(add, iface_state, state.get("default_gateway") or {})
+        if conflicts:
+            raise GatewayConflictError(conflicts)
         add = missing_on_interface(add, iface_state)
-        remove = managed_on_interface(remove, iface_state)
-        if not add and not remove:
+        remove = present_on_interface(remove, iface_state)
+        if hoster_on_interface(remove, iface_state) and not node_supports_hoster_removal(server.node_version):
+            raise HosterRemovalUnsupportedError(server.node_version)
+        restore = suppressed_on_interface(restore, state, interface)
+        if not add and not remove and not restore:
             raise NothingToApplyError()
         protected = await resolve_protected_ip(server)
 
         job = NetworkJob(
             id=f"{server.id}-{int(time.time())}", server_id=server.id, interface=interface,
-            add=add, remove=remove, started_at=time.time(),
+            add=add, remove=remove, restore=restore, started_at=time.time(),
         )
         _jobs[server.id] = job
         payload = {
             "interface": interface,
             "add": [spec.payload() for spec in add],
             "remove": [spec.payload() for spec in remove],
+            "restore": [spec.payload() for spec in restore],
             "protected": [protected],
             "rollback_timeout_sec": ROLLBACK_TIMEOUT_SEC,
         }
@@ -381,8 +465,8 @@ async def _run_job(server: Server, job: NetworkJob, payload: dict) -> None:
         if job.status == TransactionStatus.CONFIRMED:
             job.reachability = await _reachability(server, job)
         logger.info(
-            "network_apply_finished server_id=%s status=%s added=%d removed=%d attempts=%d",
-            server.id, job.status.value, len(job.add), len(job.remove), job.attempts,
+            "network_apply_finished server_id=%s status=%s added=%d removed=%d restored=%d attempts=%d",
+            server.id, job.status.value, len(job.add), len(job.remove), len(job.restore), job.attempts,
         )
     except asyncio.CancelledError:
         raise

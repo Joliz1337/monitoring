@@ -52,6 +52,8 @@ _mtls_ctx: ssl.SSLContext | None = None
 # Ключ: (raw-строка прокси, mtls, apply). Старые записи живут до shutdown — рост ограничен
 # числом уникальных прокси, keepalive-соединения гаснут через 30с.
 _proxy_clients: dict[tuple[str, bool, bool], httpx.AsyncClient] = {}
+# Внешние запросы через SOCKS5 (облачные биллинги с прокси у проекта). Ключ — raw-строка прокси
+_external_proxy_clients: dict[str, httpx.AsyncClient] = {}
 
 # Формат ввода прокси: "ip:port" или "ip:port@login:pass".
 # Логин без ':' и '@'; пароль — любые непробельные символы (включая ':' и '@').
@@ -211,9 +213,10 @@ async def close_http_clients() -> None:
     global _node_apply_client_mtls, _node_apply_client_legacy, _mtls_ctx
     # Прокси-клиенты держат ссылку на mTLS-контекст — закрываем до его сброса
     # (restore бэкапа делает close+init, старый контекст не должен пережить рестарт клиентов)
-    for client in _proxy_clients.values():
+    for client in (*_proxy_clients.values(), *_external_proxy_clients.values()):
         await client.aclose()
     _proxy_clients.clear()
+    _external_proxy_clients.clear()
     _mtls_ctx = None
     if _node_client_mtls:
         await _node_client_mtls.aclose()
@@ -302,7 +305,28 @@ def node_auth_headers(server: "Server") -> dict[str, str]:
     return {"X-API-Key": server.api_key or ""}
 
 
-def get_external_client() -> httpx.AsyncClient:
+def get_external_client(proxy: str | None = None) -> httpx.AsyncClient:
+    """Клиент для внешних API; с proxy ('ip:port[@login:pass]') — через SOCKS5."""
+    if proxy:
+        return _get_external_proxy_client(proxy)
     if _external_client is None:
         raise RuntimeError("HTTP clients not initialized — call init_http_clients() first")
     return _external_client
+
+
+def _get_external_proxy_client(raw: str) -> httpx.AsyncClient:
+    client = _external_proxy_clients.get(raw)
+    if client is not None:
+        return client
+
+    client = httpx.AsyncClient(
+        proxy=_proxy_raw_to_url(raw),
+        timeout=_EXTERNAL_TIMEOUT,
+        limits=_EXTERNAL_LIMITS,
+        follow_redirects=True,
+        http2=True,
+        trust_env=False,
+    )
+    _external_proxy_clients[raw] = client
+    logger.info("External SOCKS5 client created via %s", sanitize_proxy(raw))
+    return client

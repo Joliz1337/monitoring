@@ -94,7 +94,8 @@ class Server(Base):
 
     # Доставка образа ноды с панели (для нод под ТСПУ, без доступа к GHCR).
     # image_delivery: auto — нода тянет GHCR, при провале доставка по SSH; ssh — сразу SSH.
-    # SSH-креды для доставки хранятся зашифрованными (EncryptedString), заполняются опционально.
+    # SSH-креды для доставки хранятся зашифрованными (EncryptedString), заполняются опционально;
+    # ими же ставится нода Remnawave, когда сервер качает всё через панель.
     image_delivery = Column(String(10), nullable=False, server_default="auto")
     ssh_host = Column(String(255), nullable=True)
     ssh_port = Column(Integer, nullable=True)
@@ -121,6 +122,10 @@ class Server(Base):
     active_haproxy_profile_id = Column(Integer, ForeignKey("haproxy_config_profiles.id", ondelete="SET NULL"), nullable=True)
     haproxy_config_hash = Column(String(64), nullable=True)
     haproxy_last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    # Адреса сервера для профиля (JSON-списки IPv4): входные — в bind правил,
+    # выходные — source к бэкендам; пусто = все адреса / выбор системы
+    haproxy_listen_ips = Column(Text, nullable=True)
+    haproxy_source_ips = Column(Text, nullable=True)
 
     # Firewall (UFW) profile binding
     active_firewall_profile_id = Column(Integer, ForeignKey("firewall_profiles.id", ondelete="SET NULL"), nullable=True)
@@ -218,6 +223,36 @@ class NodePendingSync(Base):
     next_attempt_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     attempts = Column(Integer, default=0, server_default="0", nullable=False)
     last_error = Column(String(500), nullable=True)
+
+
+class NodeUpdateAttempt(Base):
+    """Обновление ноды через её агента, за итогом которого следит панель.
+
+    Агент обновляет себя в фоне: ответ на запуск значит лишь «апдейтер стартовал»,
+    а скачать код или образы нода за ТСПУ может и не суметь. Строка живёт, пока
+    панель не узнает итог, и переживает её перезапуск — в том числе собственное
+    обновление панели сразу после рассылки «Обновить всё». При провале панель
+    обновляет ноду по SSH, а без SSH-доступа пишет уведомление.
+    """
+    __tablename__ = "node_update_attempts"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    # Идентификатор попытки от агента; None — старый агент, итог которого
+    # приходится выводить из версии
+    attempt_id = Column(String(64), nullable=True)
+    target_ref = Column(String(100), nullable=False)
+    from_version = Column(String(20), nullable=True)
+    # Заодно метка версии строки: повторный запуск переписывает её, и наблюдатель
+    # не закроет чужую, более свежую попытку
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    last_contact_at = Column(DateTime(timezone=True), nullable=True)
+    stage = Column(String(10), nullable=False, server_default="agent")  # agent | ssh
+    # Этап обновления на самой ноде (download | files | images | restart) — для
+    # статуса на странице «Обновления»; None — агент этапы не сообщает
+    step = Column(String(20), nullable=True)
+    delivery_job_id = Column(String(64), nullable=True)
+    failure_reason = Column(String(30), nullable=True)
+    failure_detail = Column(String(500), nullable=True)
 
 
 class PanelHostMetric(Base):
@@ -705,6 +740,15 @@ class AlertSettings(Base):
     conntrack_enabled = Column(Boolean, default=True)
     conntrack_threshold = Column(Float, default=80.0)
 
+    # Потери с релея до его адресов назначения (проверка на ноде, % неответов)
+    packet_loss_enabled = Column(Boolean, default=True)
+    packet_loss_threshold = Column(Float, default=20.0)
+    packet_loss_sustained_seconds = Column(Integer, default=300)
+    # «Снизились» — только после стольких секунд затишья у всех релеев
+    packet_loss_calm_seconds = Column(Integer, default=900)
+    # Напоминание об открытых эпизодах; 0 — выключено
+    packet_loss_reminder_hours = Column(Integer, default=0)
+
     # Excluded servers (JSON array of server IDs)
     excluded_server_ids = Column(Text, nullable=True)
 
@@ -716,6 +760,34 @@ class AlertSettings(Base):
     tcp_excluded_server_ids = Column(Text, nullable=True)
     load_avg_excluded_server_ids = Column(Text, nullable=True)
     conntrack_excluded_server_ids = Column(Text, nullable=True)
+    packet_loss_excluded_server_ids = Column(Text, nullable=True)
+
+
+class PacketLossEpisode(Base):
+    """Открытый эпизод потерь до адреса назначения релеев (см. loss_alerts).
+
+    Хранится, чтобы перезапуск панели не присылал уже известные потери заново.
+    Время — unix epoch, как в состоянии алертера."""
+    __tablename__ = "packet_loss_episodes"
+
+    target = Column(String(64), primary_key=True)  # ip:port
+    level = Column(Integer, nullable=False)
+    opened_at = Column(Float, nullable=False)
+    last_data_at = Column(Float, nullable=False)
+    notified_at = Column(Float, nullable=False)
+    calm_since = Column(Float, nullable=True)
+    blamed_relay_id = Column(Integer, nullable=True)  # адрес теряет только этот релей
+
+
+class PacketLossRelayIncident(Base):
+    """Открытая проблема на релее: он один теряет несколько адресов (см. loss_alerts)."""
+    __tablename__ = "packet_loss_relay_incidents"
+
+    relay_id = Column(Integer, primary_key=True)
+    relay_name = Column(String(100), nullable=False)
+    opened_at = Column(Float, nullable=False)
+    notified_at = Column(Float, nullable=False)
+    reported = Column(Integer, nullable=False)
 
 
 class AlertHistory(Base):
@@ -768,6 +840,8 @@ class BillingServer(Base):
     cloud_provider = Column(String(30), nullable=True)
     cloud_credential = Column(EncryptedString, nullable=True)
     cloud_account_id = Column(String(100), nullable=True)
+    # SOCKS5 для запросов к API провайдера: "ip:port" или "ip:port@login:pass"
+    cloud_proxy = Column(EncryptedString, nullable=True)
     cloud_balance_threshold = Column(Float, nullable=True, default=0)
     cloud_daily_cost = Column(Float, nullable=True)
     cloud_last_sync_at = Column(DateTime(timezone=True), nullable=True)
@@ -831,6 +905,21 @@ class InfraProjectServer(Base):
     )
 
 
+class InfraAccountServer(Base):
+    """Привязка сервера прямо к аккаунту, без проекта"""
+    __tablename__ = "infra_account_servers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("infra_accounts.id", ondelete="CASCADE"), nullable=False)
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
+    position = Column(Integer, default=0)
+
+    __table_args__ = (
+        Index('idx_infra_as_account', 'account_id'),
+        Index('idx_infra_as_server', 'server_id'),
+    )
+
+
 # ==================== Shared Notes ====================
 
 class SharedNote(Base):
@@ -863,6 +952,9 @@ class HAProxyConfigProfile(Base):
     name = Column(String(200), nullable=False, unique=True)
     description = Column(Text, nullable=True)
     config_content = Column(Text, nullable=False)
+    # Настройки уровня профиля (фильтр SNI) — JSON. Генератор вписывает их в
+    # каждое правило, из конфига они не восстанавливаются
+    options = Column(Text, nullable=True)
     position = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -1252,14 +1344,16 @@ class ExitProxyEvent(Base):
 # ==================== Пул исходящих адресов ====================
 
 class SourcePoolNode(Base):
-    """Нода, на которой исходящий TCP раскладывается по всем её IPv4 через метки
-    fwmark: исключённые адреса и последнее состояние раскладки с ноды. Строка
-    остаётся после выключения — список исключений не теряется."""
+    """Нода, на которой исходящий TCP раскладывается по её IPv4 через метки
+    fwmark: режим раскладки, исключённые адреса, ручная раскладка и последнее
+    состояние с ноды. Строка остаётся после выключения — настройки не теряются."""
     __tablename__ = "source_pool_nodes"
 
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
     enabled = Column(Boolean, default=True)
+    mode = Column(String(10), default="auto")  # auto — по кругу | manual — по assignments
     excluded = Column(Text, nullable=True)     # JSON list адресов
+    assignments = Column(Text, nullable=True)  # JSON {метка: адрес}; хранится и в авто — не теряется при переключении
     node_state = Column(Text, nullable=True)   # JSON — последний ответ /state ноды
     config_hash = Column(String(64), nullable=True)
     sync_status = Column(String(20), default="pending")  # pending | synced | failed | denied | unsupported

@@ -7,6 +7,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
+import httpx
+
 
 class CloudBillingError(Exception):
     """Провайдер не отдал данные: сеть, неверный ответ, отказ сервиса."""
@@ -36,8 +38,18 @@ class CloudProvider(ABC):
     uses_balance_history: bool = False
 
     @abstractmethod
-    async def fetch(self, credential: str, account_id: Optional[str]) -> CloudSnapshot:
-        """Снимок аккаунта. Бросает CloudBillingError при любой неудаче."""
+    async def fetch(
+        self, client: httpx.AsyncClient, credential: str, account_id: Optional[str]
+    ) -> CloudSnapshot:
+        """Снимок аккаунта. Бросает CloudBillingError при любой неудаче.
+
+        Все запросы — через переданный клиент: в нём уже выбран прокси проекта."""
+
+
+def describe_request_error(error: Exception) -> str:
+    # Оборванный SOCKS-туннель даёт ConnectError('') — без имени типа
+    # в cloud_last_error осталась бы пустая строка
+    return str(error) or type(error).__name__
 
 
 def compute_days_left(

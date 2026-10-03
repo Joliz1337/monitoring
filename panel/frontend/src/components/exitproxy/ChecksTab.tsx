@@ -132,7 +132,7 @@ export default function ChecksTab() {
               {t('exit_proxy.check_cancel')}
             </button>
           )}
-          <span className="text-[11px] text-dark-500">{t('exit_proxy.check_form_hint')}</span>
+          <span className="text-2xs text-dark-500">{t('exit_proxy.check_form_hint')}</span>
         </div>
 
         {!checks || checks.custom.length === 0 ? (
@@ -144,7 +144,7 @@ export default function ChecksTab() {
                 <div className="flex-1 min-w-[220px]">
                   <p className="text-sm text-dark-200">{check.name}</p>
                   <p className="text-xs text-dark-500 font-mono break-all">{check.url}</p>
-                  <p className="text-[11px] text-dark-500">
+                  <p className="text-2xs text-dark-500">
                     {check.block_status.length > 0 && <>{t('exit_proxy.check_block_status_label')}: {check.block_status.join(', ')} · </>}
                     {check.block_url_regex && <>{t('exit_proxy.check_url_regex_label')}: <span className="font-mono">{check.block_url_regex}</span> · </>}
                     {check.block_regex && <>{t('exit_proxy.check_regex_label')}: <span className="font-mono">{check.block_regex}</span> · </>}

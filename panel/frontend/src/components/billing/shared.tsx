@@ -179,7 +179,7 @@ export function PaidTotalHint({ totalDays, t, formatDateTime, labelKey = 'billin
   const paidUntil = new Date(Date.now() + totalDays * MS_PER_DAY).toISOString()
   return (
     <div className="flex items-center gap-1 flex-wrap">
-      <CalendarClock className="w-3 h-3" />
+      <CalendarClock className="w-3.5 h-3.5" />
       {t(labelKey)}: <span className="font-semibold">{formatDays(totalDays, t)}</span>
       <span className="opacity-70">· {t('billing.until')} {formatDateTime(paidUntil)}</span>
     </div>

@@ -35,9 +35,11 @@ The **"One-time (personal) key"** checkbox in auto-install does the same thing o
 
 If a server is behind heavy DPI (e.g. Russia's TSPU) and cannot pull the node image from the registry, the panel ships the image over SSH itself.
 
+**Install a node via auto-install.** Turn on **"Download everything through the panel"** in the auto-install form: the server gets the installer, code, Docker, images and packages through the panel. The panel forwards a proxy inside the SSH session for the duration of the install only, and the installer removes it afterwards. SSH port forwarding must be allowed on the server — on Ubuntu it is by default.
+
 **Update an already installed node.** On the **Updates** page each node has a **"Deliver image over SSH"** button: the panel pulls the fresh image to itself, uploads it to the node over SSH and brings it up — nothing is downloaded on the node itself. Requires root access; SSH credentials can be saved (stored encrypted) or entered each time. Progress is shown as a live log.
 
-**Install a node on a bare/blocked server:**
+**Install a node manually on a bare/blocked server:**
 
 1. Copy the NODE_SECRET (the "Add server" button).
 2. On the server, run the installer in blocked mode — it installs Docker, files, certificates and `.env`, then stops quickly at the image instead of hanging on the download:
@@ -94,6 +96,7 @@ Here is what it looks like in the panel: the server card gets a **Restricted** b
 - The **SOCKS5 proxy** field is for nodes behind NAT or blocked by IP. Everything goes through it: metrics, commands, blocklist sync, even SSH during auto-install. Format `ip:port` or `ip:port@login:password`. If the proxy dies, the node shows offline with a "Proxy connection error" — that distinguishes a dead proxy from a dead node.
 - The **Old key** badge means the node still uses a per-server certificate: migrate it with the button. Very old nodes on `X-API-Key` need a reinstall.
 - The **Restricted** badge means the node did not hand the panel everything. The badge tooltip lists what is still allowed. It is changed on the node itself; there is no such setting in the panel.
+- The list is grouped by the **dashboard folders**, servers without a folder come last. Folders work the same as on the dashboard: drag a new server by its handle straight into the right folder, reorder folders, and create a new one with the button next to "Add server". The order is shared by both pages. The folder header shows how many of its servers are online, offline and disabled. Dragging is off while searching.
 - The **"Account → Project → Servers" tree** is a second, independent way to organise nodes by cloud account and cluster. Deleting an account or project never deletes servers.
 - Disabling monitoring keeps the server in the list but stops polling and alerts for it.
 - Deleting a server erases its history and rules in the panel but doesn't touch the node itself — its containers keep running.

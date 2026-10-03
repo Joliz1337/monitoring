@@ -301,7 +301,7 @@ export default function Login() {
           animate={{ opacity: 1 }}
           transition={{ delay: 0.6 }}
         >
-          <Lock className="w-3 h-3" />
+          <Lock className="w-3.5 h-3.5" />
           {t('login.secure_dashboard')}
         </motion.p>
       </motion.div>

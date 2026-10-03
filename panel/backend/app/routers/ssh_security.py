@@ -63,9 +63,16 @@ async def _get_server(server_id: int, db: AsyncSession) -> Server:
     return server
 
 
-async def _safe_proxy(server, method: str, path: str, json_data: dict | None = None) -> dict:
+# Чтение с ноды укладывается в секунды; потолок ниже таймаута браузера (30с),
+# чтобы на ноду со сбоящей связью панель успевала ответить «не ответила»
+_READ_TIMEOUT = 15.0
+
+
+async def _safe_proxy(
+    server, method: str, path: str, json_data: dict | None = None, timeout: float = 30.0,
+) -> dict:
     try:
-        return await proxy_to_node(server, method, path, json_data)
+        return await proxy_to_node(server, method, path, json_data, timeout=timeout)
     except NodeCapabilityError as e:
         # 409, а не 503: раздел закрыт владельцем ноды, связь при этом в порядке
         raise HTTPException(
@@ -144,7 +151,7 @@ async def _apply_steps(server, steps: list[Step]) -> dict:
 async def _fetch_ssh_status(server) -> dict:
     """Собрать SSH-статус одной ноды для обзор-таблицы."""
     try:
-        status = await proxy_to_node(server, "GET", "/api/ssh/status", timeout=15.0)
+        status = await proxy_to_node(server, "GET", "/api/ssh/status", timeout=_READ_TIMEOUT)
         if isinstance(status, dict):
             await _cache_sshd_port(server.id, _valid_port(status.get("sshd_port")))
         return {"server_id": server.id, "server_name": server.name, "reachable": True, "status": status}
@@ -175,7 +182,7 @@ async def get_ssh_config(
     _: dict = Depends(verify_auth),
 ):
     server = await _get_server(server_id, db)
-    return await _safe_proxy(server, "GET", "/api/ssh/config")
+    return await _safe_proxy(server, "GET", "/api/ssh/config", timeout=_READ_TIMEOUT)
 
 
 @router.post("/server/{server_id}/config")
@@ -201,7 +208,7 @@ async def get_fail2ban_status(
     _: dict = Depends(verify_auth),
 ):
     server = await _get_server(server_id, db)
-    return await _safe_proxy(server, "GET", "/api/ssh/fail2ban/status")
+    return await _safe_proxy(server, "GET", "/api/ssh/fail2ban/status", timeout=_READ_TIMEOUT)
 
 
 @router.post("/server/{server_id}/fail2ban/config")
@@ -222,7 +229,7 @@ async def get_fail2ban_banned(
     _: dict = Depends(verify_auth),
 ):
     server = await _get_server(server_id, db)
-    return await _safe_proxy(server, "GET", "/api/ssh/fail2ban/banned")
+    return await _safe_proxy(server, "GET", "/api/ssh/fail2ban/banned", timeout=_READ_TIMEOUT)
 
 
 @router.post("/server/{server_id}/fail2ban/unban")
@@ -255,7 +262,7 @@ async def get_ssh_keys(
     _: dict = Depends(verify_auth),
 ):
     server = await _get_server(server_id, db)
-    return await _safe_proxy(server, "GET", "/api/ssh/keys")
+    return await _safe_proxy(server, "GET", "/api/ssh/keys", timeout=_READ_TIMEOUT)
 
 
 @router.post("/server/{server_id}/keys")
@@ -302,7 +309,7 @@ async def get_ssh_status(
     _: dict = Depends(verify_auth),
 ):
     server = await _get_server(server_id, db)
-    status = await _safe_proxy(server, "GET", "/api/ssh/status")
+    status = await _safe_proxy(server, "GET", "/api/ssh/status", timeout=_READ_TIMEOUT)
     if isinstance(status, dict):
         await _cache_sshd_port(server.id, _valid_port(status.get("sshd_port")))
     return status

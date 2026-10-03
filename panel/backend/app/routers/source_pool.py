@@ -1,4 +1,5 @@
-"""Пул исходящих адресов: включение на ноде, исключения, состояние раскладки, сниппет Xray.
+"""Пул исходящих адресов: включение на ноде, режим, исключения, ручная раскладка,
+состояние раскладки, сниппет Xray.
 
 Роутер тонкий: раскладку меток по адресам делает нода, доставка и состояние — в
 services/source_pool. Здесь только приём значений от UI и взаимоисключение с
@@ -23,9 +24,11 @@ from app.services.node_capabilities import Capability
 from app.services.source_pool.node_client import (
     MIN_NODE_VERSION_SOURCE_POOL,
     SourcePoolNodeError,
+    manual_marks_unsupported_message,
+    node_supports_manual_marks,
     node_supports_source_pool,
 )
-from app.services.source_pool.render import xray_snippet
+from app.services.source_pool.render import SourcePoolMode, mark_range, xray_snippet
 from app.services.source_pool.service import SYNC_PENDING, get_source_pool_service
 from app.services.source_pool.views import node_view
 
@@ -35,22 +38,37 @@ MAX_EXCLUDED = 64
 EXIT_PROXY_CONFLICT = "на этой ноде включён exit-прокси — он сам выбирает исходящий адрес; выключите его в разделе Exit-прокси"
 
 
+def _ipv4(item: str) -> str:
+    try:
+        return str(ipaddress.IPv4Address(item.strip()))
+    except ValueError:
+        raise ValueError(f"'{item}' is not an IPv4 address")
+
+
 class NodeUpdate(BaseModel):
     enabled: Optional[bool] = None
+    mode: Optional[SourcePoolMode] = None
     excluded: Optional[list[str]] = Field(None, max_length=MAX_EXCLUDED)
+    # Метка → адрес; метки без адреса в словарь не попадают
+    assignments: Optional[dict[int, str]] = None
 
     @field_validator("excluded")
     @classmethod
     def _ipv4_only(cls, value: Optional[list[str]]) -> Optional[list[str]]:
         if value is None:
             return None
-        cleaned = set()
-        for item in value:
-            try:
-                cleaned.add(str(ipaddress.IPv4Address(item.strip())))
-            except ValueError:
-                raise ValueError(f"'{item}' is not an IPv4 address")
-        return sorted(cleaned)
+        return sorted({_ipv4(item) for item in value})
+
+    @field_validator("assignments")
+    @classmethod
+    def _marks_in_pool(cls, value: Optional[dict[int, str]]) -> Optional[dict[int, str]]:
+        if value is None:
+            return None
+        marks = mark_range()
+        for mark in value:
+            if mark not in marks:
+                raise ValueError(f"метка {mark} вне диапазона {marks.start}–{marks.stop - 1}")
+        return {mark: _ipv4(address) for mark, address in sorted(value.items())}
 
 
 async def _view_for(db: AsyncSession, server_id: int) -> dict:
@@ -108,6 +126,8 @@ async def update_node(
         require_capability(server, Capability.SYSTEM, write=True)
         if await exit_proxy_enabled_on(db, server_id):
             raise HTTPException(status_code=409, detail=EXIT_PROXY_CONFLICT)
+    if body.mode == SourcePoolMode.MANUAL and not node_supports_manual_marks(server.node_version):
+        raise HTTPException(status_code=409, detail=manual_marks_unsupported_message(server.node_version))
 
     if node is None:
         if body.enabled is not True:
@@ -116,8 +136,12 @@ async def update_node(
         db.add(node)
     if body.enabled is not None:
         node.enabled = body.enabled
+    if body.mode is not None:
+        node.mode = body.mode.value
     if body.excluded is not None:
         node.excluded = json.dumps(body.excluded)
+    if body.assignments is not None:
+        node.assignments = json.dumps({str(mark): address for mark, address in body.assignments.items()})
     node.sync_status = SYNC_PENDING
     await db.commit()
 

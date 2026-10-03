@@ -17,6 +17,7 @@ from typing import Optional
 import httpx
 from sqlalchemy import select, delete, update, bindparam, func, ColumnElement
 from app.services.http_client import get_node_client, node_auth_headers
+from app.services.loss_registry import get_loss_registry
 from app.services.node_capabilities import (
     Capability,
     normalize_map as normalize_capabilities_map,
@@ -303,6 +304,7 @@ class MetricsCollector:
                     self._open_downtime.discard(server.id)
                     downtime_over.append(server.id)
                 snapshot_data = self._build_snapshot(server.id, metrics, now_utc)
+                get_loss_registry().update(server.id, server.name, metrics)
                 if snapshot_data:
                     snapshots.append(snapshot_data)
                 node_version = metrics.get("agent_version")

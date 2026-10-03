@@ -3,11 +3,13 @@
 Число меток и их номера зашиты константами и совпадают с нодой
 (`node/app/models/source_pool.py`): конфиг Xray один на весь парк, а раскладку
 меток по своим адресам каждая нода делает сама — по кругу, поэтому 30 меток
-делятся ровно на любое число адресов.
+делятся ровно на любое число адресов. В ручном режиме раскладку задаёт оператор,
+и нода ставит правила только на назначенные метки.
 """
 
 import hashlib
 import json
+from enum import Enum
 from typing import Optional
 
 from app.models import SourcePoolNode
@@ -19,13 +21,46 @@ OUTBOUND_TAG_PREFIX = "pool-"
 BALANCER_TAG = "source-pool"
 
 
+class SourcePoolMode(str, Enum):
+    AUTO = "auto"
+    MANUAL = "manual"
+
+
+def mark_range() -> range:
+    return range(MARK_BASE, MARK_BASE + MARK_COUNT)
+
+
+def node_mode(row: Optional[SourcePoolNode]) -> SourcePoolMode:
+    if row is not None and row.mode == SourcePoolMode.MANUAL.value:
+        return SourcePoolMode.MANUAL
+    return SourcePoolMode.AUTO
+
+
+def load_assignments(row: Optional[SourcePoolNode]) -> dict[int, str]:
+    """{метка: адрес} из JSON строки; мусор и метки вне пула отбрасываются."""
+    raw = load_json(row.assignments, {}) if row is not None else {}
+    if not isinstance(raw, dict):
+        return {}
+    assignments: dict[int, str] = {}
+    for key, address in raw.items():
+        try:
+            mark = int(key)
+        except (TypeError, ValueError):
+            continue
+        if mark in mark_range() and isinstance(address, str):
+            assignments[mark] = address
+    return dict(sorted(assignments.items()))
+
+
 def build_node_config(row: Optional[SourcePoolNode]) -> dict:
     """Схема SourcePoolConfig агента."""
     if row is None:
-        return {"enabled": False, "excluded": []}
+        return {"enabled": False, "excluded": [], "mode": SourcePoolMode.AUTO.value, "assignments": {}}
     return {
         "enabled": bool(row.enabled),
         "excluded": sorted(set(load_json(row.excluded, []))),
+        "mode": node_mode(row).value,
+        "assignments": {str(mark): address for mark, address in load_assignments(row).items()},
     }
 
 
@@ -73,7 +108,7 @@ def xray_snippet() -> dict:
         "метки на UDP не действуют, а потолок портов касается только TCP.\n\n"
         f"Метки {MARK_BASE}–{MARK_BASE + MARK_COUNT - 1} одинаковы на всех нодах, поэтому кусок конфига общий. "
         "Какой метке какой адрес — решает сама нода: 30 меток раскладываются по её адресам по кругу, "
-        "на ноде с одним адресом всё идёт как раньше. Включать пул на нодах — на странице сервера, "
-        "«Исходящие адреса»."
+        "на ноде с одним адресом всё идёт как раньше. Включать пул на нодах и при желании назначать "
+        "адрес каждой метке вручную — на странице сервера, «Исходящие адреса»."
     )
     return {"outbounds_json": outbounds, "routing_json": routing, "text": text}

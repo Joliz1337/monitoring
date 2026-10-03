@@ -67,6 +67,13 @@ UPSTREAMS_END_MARKER = "# === UPSTREAMS END ==="
 LOOPBACK_SOURCES = tuple(f"127.0.0.{octet}" for octet in range(1, 17))
 LOOPBACK_SOURCE_VAR = "$xray_source"
 
+# Очередь клиентских listen. Без параметра nginx просит у ядра 511 — самую
+# узкую SYN-очередь на ноде (Xray берёт somaxconn): при потерях на пути от
+# релеев недоделанные рукопожатия переполняют её, ядро переходит на
+# SYN-cookies, и анти-DDoS вотчдог видит «SYN-флуд». Ядро само урезает
+# значение до net.core.somaxconn хоста
+LISTEN_BACKLOG = 65535
+
 # Строки с этим маркером нода пересчитывает под свой хост при применении
 # (потолок дескрипторов контейнера и RAM у нод разные). Значения ниже —
 # безопасный минимум, который работает даже на самом маленьком сервере
@@ -116,9 +123,13 @@ CLOUDFLARE_RANGES = [
 ]
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
-_SERVICE_PATH_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-# Путь XHTTP-инбаунда — многосегментный (`/api/v2/upload/<hex>`), в отличие
-# от serviceName gRPC; пустой хвост запрещён, иначе локация перехватила бы всё
+_SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# serviceName со слэшем в начале — свой путь gRPC: последний сегмент Xray
+# берёт именем метода, остальное — именем сервиса, и запрос идёт ровно на
+# этот путь без /Tun. Из одного сегмента Xray собрал бы путь «//метод»
+_GRPC_CUSTOM_PATH_RE = re.compile(r"^(?=.{1,128}$)(?:/[A-Za-z0-9._-]+){2,}$")
+# Путь XHTTP-инбаунда — многосегментный (`/api/v2/upload/<hex>`); пустой
+# хвост запрещён, иначе локация перехватила бы всё
 _XHTTP_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{1,128}$")
 _PROXY_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
 _TARGET_URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-\[\]:]+(?::\d{1,5})?(?:/[^\s]*)?$")
@@ -133,7 +144,7 @@ DOMAIN_RE = re.compile(
 
 _GRPC_BLOCK_RE = re.compile(
     r"# rule: (?P<name>\S+) type=grpc\n"
-    r"\s*location \^~ /(?P<service_path>[^\s{]+) \{\n"
+    r"\s*location \^~ (?P<location>/[^\s{]+) \{\n"
     r"(?P<body>.*?)\n\s*\}",
     re.DOTALL,
 )
@@ -288,8 +299,12 @@ def validate_rule(rule) -> None:
     if not _NAME_RE.match(rule.name):
         raise RuleValidationError(f"Недопустимое имя правила: {rule.name!r}")
     if isinstance(rule, GrpcRule):
-        if not _SERVICE_PATH_RE.match(rule.service_path):
-            raise RuleValidationError(f"Недопустимый serviceName: {rule.service_path!r}")
+        if not (_SERVICE_NAME_RE.match(rule.service_path)
+                or _GRPC_CUSTOM_PATH_RE.match(rule.service_path)):
+            raise RuleValidationError(
+                f"Недопустимый serviceName: {rule.service_path!r} — ожидается имя "
+                "(trgrpc) или свой путь минимум из двух сегментов (/api/v1/Stream)"
+            )
         if not 1 <= rule.port <= 65535:
             raise RuleValidationError(f"Недопустимый порт: {rule.port}")
     elif isinstance(rule, XhttpRule):
@@ -306,8 +321,20 @@ def validate_rule(rule) -> None:
         raise RuleValidationError(f"Неизвестный тип правила: {type(rule).__name__}")
 
 
+def _grpc_location_path(service_path: str) -> str:
+    """Классическому имени Xray дописывает /Tun или /TunMulti — локация ловит
+    его префиксом `/{имя}`; свой путь уже полный и идёт в локацию как есть."""
+    return service_path if service_path.startswith("/") else f"/{service_path}"
+
+
+def _service_path_from_location(location: str) -> str:
+    # Классическое имя — один сегмент, свой путь — не меньше двух
+    name = location[1:]
+    return location if "/" in name else name
+
+
 def rule_location_path(rule: Rule) -> str:
-    return f"/{rule.service_path}" if isinstance(rule, GrpcRule) else rule.path
+    return _grpc_location_path(rule.service_path) if isinstance(rule, GrpcRule) else rule.path
 
 
 def xhttp_upstream_name(rule: XhttpRule) -> str:
@@ -398,7 +425,7 @@ def _grpc_block(rule: GrpcRule, ip_var: str, has_fallback: bool, has_upstreams: 
     else:
         guard = f"            {not_grpc} {{ return 444; }}\n"
     return f"""        # rule: {rule.name} type=grpc
-        location ^~ /{rule.service_path} {{
+        location ^~ {_grpc_location_path(rule.service_path)} {{
 {guard}            {_grpc_pass_lines(rule, has_upstreams)}
             grpc_set_header Host $host;
             grpc_set_header X-Forwarded-For {ip_var};
@@ -698,9 +725,12 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     }}
 """)
 
+    # Параметры сокета nginx принимает один раз на адрес:порт — поэтому только
+    # здесь, а у блока default_server на том же 443 их нет
     so_keepalive = (f" so_keepalive={options.client_tcp_keepalive}"
                     if options.client_tcp_keepalive else "")
-    pp_listen = (f"        listen {options.proxy_protocol_port} ssl proxy_protocol{so_keepalive};\n"
+    socket_params = f" backlog={LISTEN_BACKLOG}{so_keepalive}"
+    pp_listen = (f"        listen {options.proxy_protocol_port} ssl proxy_protocol{socket_params};\n"
                  if options.proxy_protocol_enabled else "")
     pp_realip = (f"        set_real_ip_from {options.haproxy_ip or '0.0.0.0/0'};\n"
                  f"        real_ip_header proxy_protocol;\n\n"
@@ -712,7 +742,7 @@ def generate_full_config(options: ProfileOptions, rules: list[Rule]) -> str:
     # что отдала бы заглушка при прямом обращении — любой лишний или
     # продублированный заголовок выдаёт, что перед сайтом стоит прокси
     http_parts.append(f"""    server {{
-        listen 443 ssl{so_keepalive};
+        listen 443 ssl{socket_params};
 {pp_listen}        http2 on;
         server_name {options.server_names};
 
@@ -848,7 +878,7 @@ def parse_rules_from_config(config: str) -> list[Rule]:
             continue
         found.append((match.start(), GrpcRule(
             name=match.group("name"),
-            service_path=match.group("service_path"),
+            service_path=_service_path_from_location(match.group("location")),
             port=int(pass_match.group(1)),
         )))
 

@@ -1,5 +1,6 @@
 """Транзакции доп. IP: гейт версии ноды, адрес и порт ноды из URL, дедлайн с
-запасом на расхождение часов, вычитание уже стоящих адресов, снимок задачи.
+запасом на расхождение часов, вычитание уже стоящих адресов, отбор адресов
+хостера для удаления и снятых — для возврата, снимок задачи.
 
 Запуск из panel/backend:  python -m unittest discover -s tests -p "test_*.py"
 """
@@ -16,17 +17,24 @@ try:
     from app.services.network_transactions import (
         DEADLINE_GRACE_SECONDS,
         MIN_NODE_VERSION_NETWORK,
+        MIN_NODE_VERSION_NETWORK_GATEWAY,
+        MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL,
         ROLLBACK_TIMEOUT_SEC,
         JobPhase,
         NetworkJob,
         TransactionStatus,
         deadline_passed,
-        managed_on_interface,
+        gateway_conflicts,
+        hoster_on_interface,
         missing_on_interface,
         node_api_port,
         node_host,
+        node_supports_hoster_removal,
         node_supports_network,
+        node_supports_network_gateway,
         parse_deadline,
+        present_on_interface,
+        suppressed_on_interface,
     )
 except ImportError as e:  # pragma: no cover
     raise unittest.SkipTest(f"network_transactions requires the panel runtime: {e}")
@@ -75,22 +83,73 @@ class InterfaceFilterTests(unittest.TestCase):
         {"address": "1.2.3.5", "prefix": 32, "managed": True},
     ]}
 
-    def test_missing_and_managed(self):
+    def test_missing_present_and_hoster(self):
         specs = [AddressSpec("1.2.3.4", 24), AddressSpec("1.2.3.5", 32), AddressSpec("1.2.3.6", 32)]
         self.assertEqual([s.cidr for s in missing_on_interface(specs, self.IFACE)], ["1.2.3.6/32"])
-        self.assertEqual([s.cidr for s in managed_on_interface(specs, self.IFACE)], ["1.2.3.5/32"])
+        self.assertEqual([s.cidr for s in present_on_interface(specs, self.IFACE)], ["1.2.3.4/24", "1.2.3.5/32"])
+        self.assertEqual([s.cidr for s in hoster_on_interface(specs, self.IFACE)], ["1.2.3.4/24"])
         self.assertEqual(missing_on_interface(specs, {"name": "eth0"}), specs)
+
+    def test_restore_only_what_the_node_suppressed_on_this_interface(self):
+        state = {"suppressed": [{"interface": "eth0", "address": "1.2.3.7", "prefix": 32},
+                                {"interface": "eth1", "address": "1.2.3.8", "prefix": 32}]}
+        specs = [AddressSpec("1.2.3.7", 32), AddressSpec("1.2.3.8", 32), AddressSpec("1.2.3.7", 24)]
+        self.assertEqual([s.cidr for s in suppressed_on_interface(specs, state, "eth0")], ["1.2.3.7/32"])
+        self.assertEqual(suppressed_on_interface(specs, {}, "eth0"), [])
+
+    def test_hoster_removal_gate(self):
+        self.assertTrue(node_supports_hoster_removal(MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL))
+        self.assertFalse(node_supports_hoster_removal("10.30.9"))
+        self.assertFalse(node_supports_hoster_removal(None))
+
+
+class GatewayTests(unittest.TestCase):
+    IFACE = {"name": "eth0", "addresses": [
+        {"address": "1.2.3.4", "prefix": 24, "managed": False},
+        {"address": "5.6.7.8", "prefix": 32, "managed": True, "gateway": "5.6.7.1"},
+        {"address": "1.2.3.9", "prefix": 32, "managed": True},
+    ]}
+    DEFAULTS = {"ipv4": "1.2.3.1"}
+
+    def conflicts(self, *specs: AddressSpec) -> list[str]:
+        return gateway_conflicts(list(specs), self.IFACE, self.DEFAULTS)
+
+    def test_same_gateway_or_new_address_is_fine(self):
+        self.assertEqual(self.conflicts(AddressSpec("5.6.7.8", 32, "5.6.7.1"), AddressSpec("9.9.9.9", 32, "9.9.9.1")), [])
+        # Шлюз основного адреса — то же самое, что без шлюза
+        self.assertEqual(self.conflicts(AddressSpec("1.2.3.9", 32, "1.2.3.1"), AddressSpec("1.2.3.4", 24)), [])
+
+    def test_changing_gateway_of_a_present_address_is_refused(self):
+        problems = self.conflicts(AddressSpec("5.6.7.8", 32, "5.6.7.9"), AddressSpec("5.6.7.8", 32),
+                                  AddressSpec("1.2.3.9", 32, "1.2.3.254"))
+        self.assertEqual(len(problems), 3)
+        self.assertIn("через шлюз 5.6.7.1", problems[0])
+        self.assertIn("без своего шлюза", problems[2])
+
+    def test_hoster_address_cannot_get_a_gateway(self):
+        problems = self.conflicts(AddressSpec("1.2.3.4", 24, "1.2.3.254"))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("не панелью", problems[0])
+
+    def test_version_gate_and_payload(self):
+        self.assertTrue(node_supports_network_gateway(MIN_NODE_VERSION_NETWORK_GATEWAY))
+        self.assertFalse(node_supports_network_gateway("10.30.0"))
+        self.assertFalse(node_supports_network_gateway(None))
+        self.assertEqual(AddressSpec("5.6.7.8", 32, "5.6.7.1").payload(),
+                         {"address": "5.6.7.8", "prefix": 32, "gateway": "5.6.7.1"})
+        self.assertEqual(AddressSpec("5.6.7.8", 32).payload(), {"address": "5.6.7.8", "prefix": 32})
 
 
 class SnapshotTests(unittest.TestCase):
     def test_snapshot_is_serialisable(self):
         job = NetworkJob(id="1-1", server_id=1, interface="eth0", add=[AddressSpec("1.2.3.6", 32)], remove=[],
-                         started_at=1788000000.0)
+                         restore=[AddressSpec("1.2.3.7", 32)], started_at=1788000000.0)
         job.deadline_at = datetime(2026, 9, 2, 12, 2, tzinfo=timezone.utc)
         snapshot = job.snapshot()
         self.assertEqual(snapshot["phase"], JobPhase.APPLYING.value)
         self.assertEqual(snapshot["status"], TransactionStatus.PENDING.value)
         self.assertEqual(snapshot["added"], [{"address": "1.2.3.6", "prefix": 32}])
+        self.assertEqual(snapshot["restored"], [{"address": "1.2.3.7", "prefix": 32}])
         self.assertEqual(snapshot["deadline_at"], "2026-09-02T12:02:00Z")
         self.assertTrue(snapshot["started_at"].endswith("Z"))
         self.assertIsNone(snapshot["reachability"])

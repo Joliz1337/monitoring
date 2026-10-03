@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services.cloud_billing import (  # noqa: E402
@@ -28,6 +30,16 @@ from app.services.cloud_billing.selectel import (  # noqa: E402
     _pick_prediction_days,
 )
 from app.services.cloud_billing.timeweb import TimewebProvider, _tariff_daily_cost  # noqa: E402
+from app.services.cloud_billing.yandex import (  # noqa: E402
+    YC_USAGE_URL,
+    YandexCloudProvider,
+    _grpc_frame,
+    _grpc_unframe,
+    _pb_string,
+    _pb_submessage,
+)
+from app.services.http_client import close_http_clients, get_external_client  # noqa: E402
+from app.services.yc_token_manager import YC_IAM_ENDPOINT, get_yc_token_manager  # noqa: E402
 
 
 class FakeResponse:
@@ -80,6 +92,7 @@ def billing_server(**overrides):
         cloud_provider="selectel",
         cloud_credential="token",
         cloud_account_id=None,
+        cloud_proxy=None,
         cloud_balance_threshold=0,
         cloud_daily_cost=None,
         cloud_last_sync_at=None,
@@ -144,8 +157,7 @@ class SelectelParsingTests(unittest.TestCase):
 
 class SelectelProviderTests(unittest.TestCase):
     def _fetch(self, client):
-        with patch("app.services.cloud_billing.selectel.get_external_client", return_value=client):
-            return asyncio.run(SelectelProvider().fetch("static-token", None))
+        return asyncio.run(SelectelProvider().fetch(client, "static-token", None))
 
     def test_balance_and_forecast_come_from_selectel(self):
         # Форма реального ответа аккаунта: остаток 17 824,41 ₽, хватит на 46 дней
@@ -177,7 +189,7 @@ class SelectelProviderTests(unittest.TestCase):
             "/v2/billing/prediction": prediction_response(primary=46),
         })
 
-        with patch("app.services.cloud_billing.selectel.get_external_client", return_value=client):
+        with patch("app.services.cloud_billing.get_external_client", return_value=client):
             asyncio.run(sync_cloud_balance(server, now))
 
         # Срок в панели — ровно прогноз Selectel, расход в день выведен из него
@@ -232,8 +244,7 @@ def finances_response(**finances):
 
 class TimewebProviderTests(unittest.TestCase):
     def _fetch(self, client):
-        with patch("app.services.cloud_billing.timeweb.get_external_client", return_value=client):
-            return asyncio.run(TimewebProvider().fetch("bearer-token", None))
+        return asyncio.run(TimewebProvider().fetch(client, "bearer-token", None))
 
     def test_balance_and_tariff_estimate(self):
         # Форма реального ответа: /account/finances → finances
@@ -428,11 +439,35 @@ class SyncCloudBalanceTests(unittest.TestCase):
         server = billing_server()
         client = FakeClient({"/v3/balances": FakeResponse(403, None, "forbidden")})
 
-        with patch("app.services.cloud_billing.selectel.get_external_client", return_value=client):
+        with patch("app.services.cloud_billing.get_external_client", return_value=client):
             with self.assertRaises(CloudAuthError):
                 asyncio.run(sync_cloud_balance(server, datetime.now(timezone.utc)))
 
         self.assertIn("Forbidden", server.cloud_last_error)
+
+    def test_requests_go_through_the_project_proxy(self):
+        server = billing_server(cloud_proxy="10.0.0.1:1080@user:pass")
+        client = FakeClient({
+            "/v3/balances": balances_response(100000),
+            "/v2/billing/prediction": prediction_response(primary=10),
+        })
+
+        with patch("app.services.cloud_billing.get_external_client", return_value=client) as pick:
+            asyncio.run(sync_cloud_balance(server, datetime.now(timezone.utc)))
+
+        pick.assert_called_once_with("10.0.0.1:1080@user:pass")
+
+    def test_failure_through_proxy_names_the_proxy_without_password(self):
+        server = billing_server(cloud_proxy="10.0.0.1:1080@user:secret")
+        client = FakeClient({"/v3/balances": FakeResponse(403, None, "forbidden")})
+
+        with patch("app.services.cloud_billing.get_external_client", return_value=client):
+            with self.assertRaises(CloudAuthError) as ctx:
+                asyncio.run(sync_cloud_balance(server, datetime.now(timezone.utc)))
+
+        self.assertIn("via proxy 10.0.0.1:1080", str(ctx.exception))
+        self.assertEqual(server.cloud_last_error, str(ctx.exception))
+        self.assertNotIn("secret", server.cloud_last_error)
 
     def test_registry_exposes_all_providers(self):
         self.assertTrue(get_provider("selectel").id == "selectel")
@@ -440,6 +475,129 @@ class SyncCloudBalanceTests(unittest.TestCase):
         self.assertFalse(get_provider("selectel").requires_account_id)
         self.assertFalse(get_provider("timeweb").requires_account_id)
         self.assertTrue(get_provider("timeweb").uses_balance_history)
+
+
+def grpc_response(content: bytes = b"", headers: dict | None = None, http_version: str = "HTTP/2"):
+    return SimpleNamespace(
+        status_code=200,
+        http_version=http_version,
+        headers=headers or {},
+        content=content,
+        text="",
+    )
+
+
+def usage_report(expense: str) -> bytes:
+    """BillingAccountUsageReportResponse с одним полем expense (StringDecimal)."""
+    return _grpc_frame(_pb_submessage(4, _pb_string(1, expense)))
+
+
+class FakeYandexClient:
+    """IAM-обмен и gRPC-отчёт — POST, баланс — GET; ответы фиксированные."""
+
+    def __init__(self, consumption=None, iam=None):
+        self.consumption = consumption
+        self.iam = iam or FakeResponse(200, {"iamToken": "iam-token"})
+        self.posts: list[tuple[str, dict]] = []
+
+    async def post(self, url, json=None, content=None, headers=None, timeout=None):
+        self.posts.append((url, headers or {}))
+        response = self.iam if url == YC_IAM_ENDPOINT else self.consumption
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    async def get(self, url, headers=None, timeout=None):
+        return FakeResponse(200, {"balance": "900.00", "currency": "RUB"})
+
+
+class YandexProviderTests(unittest.TestCase):
+    def setUp(self):
+        get_yc_token_manager()._cache.clear()
+
+    def _fetch(self, client):
+        return asyncio.run(YandexCloudProvider().fetch(client, "oauth-token", "account-1"))
+
+    def test_daily_cost_from_grpc_usage_report(self):
+        client = FakeYandexClient(consumption=grpc_response(usage_report("-90.00")))
+
+        snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.balance, 900.0)
+        self.assertEqual(snapshot.daily_cost, 30.0)
+        self.assertIsNone(snapshot.warning)
+        url, headers = client.posts[-1]
+        self.assertEqual(url, YC_USAGE_URL)
+        self.assertEqual(headers["content-type"], "application/grpc")
+        self.assertEqual(headers["authorization"], "Bearer iam-token")
+
+    def test_grpc_error_keeps_balance_and_becomes_warning(self):
+        # Trailers-Only: статус и percent-encoded сообщение приходят заголовками, тела нет
+        client = FakeYandexClient(consumption=grpc_response(headers={
+            "grpc-status": "7", "grpc-message": "need%20billing.accounts.viewer",
+        }))
+
+        snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.balance, 900.0)
+        self.assertIsNone(snapshot.daily_cost)
+        self.assertEqual(snapshot.warning, "gRPC PERMISSION_DENIED: need billing.accounts.viewer")
+
+    def test_http1_answer_is_not_taken_for_grpc(self):
+        client = FakeYandexClient(consumption=grpc_response(
+            usage_report("90"), http_version="HTTP/1.1",
+        ))
+
+        self.assertIn("HTTP/2", self._fetch(client).warning)
+
+    def test_dead_proxy_is_named_in_the_error(self):
+        # Мёртвый SOCKS-туннель даёт ConnectError с пустым текстом
+        client = FakeYandexClient(iam=httpx.ConnectError(""))
+
+        with self.assertRaises(CloudBillingError) as ctx:
+            self._fetch(client)
+
+        self.assertNotIsInstance(ctx.exception, CloudAuthError)
+        self.assertIn("ConnectError", str(ctx.exception))
+
+    def test_rejected_oauth_token_is_an_auth_error(self):
+        client = FakeYandexClient(iam=FakeResponse(401, None, "unauthorized"))
+        with self.assertRaises(CloudAuthError):
+            self._fetch(client)
+
+
+class GrpcFramingTests(unittest.TestCase):
+    def test_frame_roundtrip(self):
+        self.assertEqual(_grpc_unframe(_grpc_frame(b"payload")), b"payload")
+
+    def test_empty_body_is_an_error(self):
+        with self.assertRaises(CloudBillingError):
+            _grpc_unframe(b"")
+
+    def test_truncated_message_is_an_error(self):
+        with self.assertRaises(CloudBillingError):
+            _grpc_unframe(_grpc_frame(b"payload")[:-2])
+
+    def test_compressed_message_is_rejected(self):
+        frame = bytearray(_grpc_frame(b"payload"))
+        frame[0] = 1
+        with self.assertRaises(CloudBillingError):
+            _grpc_unframe(bytes(frame))
+
+
+class ExternalProxyClientTests(unittest.TestCase):
+    def test_one_client_per_proxy(self):
+        async def scenario():
+            first = get_external_client("10.0.0.1:1080@user:p@ss")
+            again = get_external_client("10.0.0.1:1080@user:p@ss")
+            other = get_external_client("10.0.0.2:1080")
+            await close_http_clients()
+            return first, again, other
+
+        first, again, other = asyncio.run(scenario())
+
+        self.assertIs(first, again)
+        self.assertIsNot(first, other)
 
 
 if __name__ == "__main__":

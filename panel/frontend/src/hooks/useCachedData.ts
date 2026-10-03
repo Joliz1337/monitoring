@@ -15,6 +15,31 @@ interface UseCachedDataReturn<T> {
   setCachedAt: (date: Date | null) => void
 }
 
+const CACHE_PREFIX = 'cache_'
+const CACHE_INDEX_KEY = 'data_cache_index'
+// Запись страницы сервера — метрики с часовой историей, около 250 КБ. Без предела
+// кэш за пару десятков открытых серверов выбрал бы всю квоту localStorage (~5 МБ),
+// и на ошибке квоты споткнулись бы чужие записи — например, история терминала
+const MAX_CACHE_ENTRIES = 8
+
+function readCacheIndex(): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CACHE_INDEX_KEY) ?? '[]')
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+/** Оставляет только последние записи; ключи вне индекса (в том числе прежних версий кэша) удаляет */
+function evictStaleEntries(currentKey: string): void {
+  const recent = [currentKey, ...readCacheIndex().filter(key => key !== currentKey)].slice(0, MAX_CACHE_ENTRIES)
+  for (const key of Object.keys(localStorage)) {
+    if (key.startsWith(CACHE_PREFIX) && !recent.includes(key)) localStorage.removeItem(key)
+  }
+  localStorage.setItem(CACHE_INDEX_KEY, JSON.stringify(recent))
+}
+
 /**
  * Hook for managing cached data in localStorage
  * Used to show last known data when server is unavailable
@@ -23,7 +48,7 @@ export function useCachedData<T>(cacheKey: string): UseCachedDataReturn<T> {
   const [isCached, setIsCached] = useState(false)
   const [cachedAt, setCachedAt] = useState<Date | null>(null)
 
-  const getFullKey = useCallback(() => `cache_${cacheKey}`, [cacheKey])
+  const getFullKey = useCallback(() => `${CACHE_PREFIX}${cacheKey}`, [cacheKey])
 
   const saveToCache = useCallback((data: T) => {
     try {
@@ -31,6 +56,7 @@ export function useCachedData<T>(cacheKey: string): UseCachedDataReturn<T> {
         data,
         cachedAt: new Date().toISOString()
       }
+      evictStaleEntries(getFullKey())
       localStorage.setItem(getFullKey(), JSON.stringify(entry))
       setIsCached(false)
       setCachedAt(null)

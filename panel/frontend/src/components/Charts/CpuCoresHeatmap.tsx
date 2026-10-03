@@ -222,7 +222,7 @@ export default function CpuCoresHeatmap({ perCpu, period, isLoading = false }: C
 
       <div className="flex mt-1">
         <div className="shrink-0" style={{ width: CORE_LABEL_WIDTH }} />
-        <div className="relative flex-1 h-4 text-[10px] font-mono text-dark-500">
+        <div className="relative flex-1 h-4 text-2xs font-mono text-dark-500">
           {labelColumns.map((col, index) => (
             <span
               key={col}

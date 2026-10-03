@@ -51,6 +51,11 @@ def installer_url() -> str:
     return f"{github_raw_base()}/install.sh"
 
 
+def current_image_tag() -> str:
+    """Тег Docker-образов канала: dev → :dev, иначе :latest."""
+    return "dev" if _current_branch == DEV_BRANCH else "latest"
+
+
 async def load_branch_from_db(db: AsyncSession) -> str:
     """Прочитать сохранённый канал из БД в кэш (вызывается на старте панели)."""
     result = await db.execute(

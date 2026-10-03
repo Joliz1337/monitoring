@@ -48,7 +48,8 @@ class HostExecutor:
         self,
         command: str,
         timeout: int = DEFAULT_TIMEOUT,
-        shell: str = "sh"
+        shell: str = "sh",
+        log_label: Optional[str] = None,
     ) -> ExecuteResult:
         """
         Execute command on host system.
@@ -57,6 +58,7 @@ class HostExecutor:
             command: Shell command to execute
             timeout: Timeout in seconds (max 600)
             shell: Shell to use (sh or bash)
+            log_label: в лог вместо текста команды — для команд с секретами внутри
         
         Returns:
             ExecuteResult with stdout, stderr, exit_code and timing
@@ -87,7 +89,8 @@ class HostExecutor:
         start_time = time.time()
         
         try:
-            logger.info(f"Executing on host: {command[:100]}{'...' if len(command) > 100 else ''}")
+            shown = log_label or f"{command[:100]}{'...' if len(command) > 100 else ''}"
+            logger.info(f"Executing on host: {shown}")
             
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -104,7 +107,7 @@ class HostExecutor:
                 process.kill()
                 await process.wait()
                 execution_time = int((time.time() - start_time) * 1000)
-                logger.warning(f"Command timed out after {timeout}s: {command[:50]}")
+                logger.warning(f"Command timed out after {timeout}s: {log_label or command[:50]}")
                 return ExecuteResult(
                     success=False,
                     exit_code=-1,

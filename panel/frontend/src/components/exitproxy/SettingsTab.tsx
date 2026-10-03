@@ -108,7 +108,7 @@ export default function SettingsTab() {
             <span key={code} className="inline-flex items-center gap-1.5 bg-dark-800 rounded px-2 py-1 text-xs font-mono text-dark-200">
               {getFlag(code)} {code}
               <button onClick={() => setForm({ ...form, blocked_countries: form.blocked_countries.filter(c => c !== code) })} className="text-dark-500 hover:text-red-400">
-                <Trash2 className="w-3 h-3" />
+                <Trash2 className="w-4 h-4" />
               </button>
             </span>
           ))}

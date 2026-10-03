@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Clock, Loader2, Wallet, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { billingApi, BillingServerData } from '../../api/client'
+import { isValidProxyInput } from '../../utils/proxy'
 import { CloudProviderId, PROVIDER_IDS, PROVIDERS, getProvider } from './providers'
 import {
   Field, INPUT_CLASS, Overlay, PaidTotalHint, QUICK_DAYS, Translate,
@@ -18,11 +19,13 @@ interface FormValues {
   paidDays: number
   paidUntil: string
   dailyCost: string
+  monthlyCost: string
   balance: string
   currency: string
   notes: string
   folder: string
   threshold: string
+  proxy: string
   credentials: Record<string, string>
 }
 
@@ -37,11 +40,13 @@ function emptyValues(): FormValues {
     paidDays: 30,
     paidUntil: '',
     dailyCost: '',
+    monthlyCost: '',
     balance: '',
     currency: 'RUB',
     notes: '',
     folder: '',
     threshold: '0',
+    proxy: '',
     credentials: {},
   }
 }
@@ -58,13 +63,22 @@ function valuesFromServer(server: BillingServerData): FormValues {
       ? new Date(server.paid_until).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' })
       : '',
     dailyCost: currentDaily ? currentDaily.toFixed(2) : '',
+    monthlyCost: server.monthly_cost?.toString() || '',
     balance: server.account_balance?.toString() || '',
     currency: server.currency,
     notes: server.notes || '',
     folder: server.folder || '',
     threshold: server.cloud_balance_threshold?.toString() || '0',
+    proxy: server.cloud_proxy || '',
     credentials: { cloud_account_id: server.cloud_account_id || '' },
   }
+}
+
+// Проект задаётся расходом в день, сервер — необязательной ценой за 30 дней
+function monthlyCostFromForm(values: FormValues): number | null {
+  if (values.billingType === 'resource') return (parseFloat(values.dailyCost) || 0) * 30
+  if (values.billingType === 'monthly') return parseFloat(values.monthlyCost) || null
+  return null
 }
 
 function ModalHeader({ title, onClose }: { title: string; onClose: () => void }) {
@@ -108,7 +122,7 @@ function CredentialFields({ values, setValues, t, server }: {
               placeholder={field.secret && stored ? '••••••••' : field.placeholder}
               className={INPUT_CLASS}
             />
-            <p className="text-[10px] text-dark-500 mt-1">
+            <p className="text-2xs text-dark-500 mt-1">
               {t(field.hintKey)}{' '}
               {field.link && (
                 <a href={field.link.url} target="_blank" rel="noopener noreferrer"
@@ -129,10 +143,27 @@ function CredentialFields({ values, setValues, t, server }: {
           placeholder="0"
           className={INPUT_CLASS}
         />
-        <p className="text-[10px] text-dark-500 mt-1">{t('billing.cloud_threshold_hint')}</p>
+        <p className="text-2xs text-dark-500 mt-1">{t('billing.cloud_threshold_hint')}</p>
+      </Field>
+      <Field label={`${t('billing.cloud_proxy')} (${t('common.optional')})`}>
+        <input
+          value={values.proxy}
+          onChange={e => setValues({ proxy: e.target.value })}
+          placeholder="ip:port@login:pass"
+          className={INPUT_CLASS}
+          autoComplete="off"
+        />
+        <p className="text-2xs text-dark-500 mt-1">{t('billing.cloud_proxy_hint')}</p>
       </Field>
     </>
   )
+}
+
+// Пустое поле — без прокси; иначе формат как у прокси серверов
+function proxyInputError(values: FormValues, t: Translate): string | null {
+  const proxy = values.proxy.trim()
+  if (values.billingType !== 'cloud' || !proxy || isValidProxyInput(proxy)) return null
+  return t('billing.cloud_proxy_invalid')
 }
 
 function ServerForm({ values, setValues, t, folders, mode, server }: {
@@ -164,7 +195,7 @@ function ServerForm({ values, setValues, t, folders, mode, server }: {
                 }`}
               >
                 <div>{t(`billing.type_${bt}`)}</div>
-                <div className={`text-[10px] mt-0.5 ${values.billingType === bt ? 'text-accent-400/60' : 'text-dark-500'}`}>
+                <div className={`text-2xs mt-0.5 ${values.billingType === bt ? 'text-accent-400/60' : 'text-dark-500'}`}>
                   {t(`billing.type_${bt}_hint`)}
                 </div>
               </button>
@@ -246,6 +277,21 @@ function ServerForm({ values, setValues, t, folders, mode, server }: {
               <p className="text-xs text-dark-500 mt-1">{t('billing.paid_until_hint')}</p>
             </>
           )}
+        </Field>
+      )}
+
+      {values.billingType === 'monthly' && (
+        <Field label={`${t('billing.monthly_price')} (${t('common.optional')})`}>
+          <input
+            type="number"
+            step="0.01"
+            min={0}
+            value={values.monthlyCost}
+            onChange={e => setValues({ monthlyCost: e.target.value })}
+            placeholder="0.00"
+            className={INPUT_CLASS}
+          />
+          <p className="text-2xs text-dark-500 mt-1">{t('billing.monthly_price_hint')}</p>
         </Field>
       )}
 
@@ -348,15 +394,19 @@ export function AddModal({ t, folders, onClose, onCreated }: {
 
   const submit = async () => {
     if (!values.name.trim()) return
+    const proxyError = proxyInputError(values, t)
+    if (proxyError) {
+      toast.error(proxyError)
+      return
+    }
     setSaving(true)
     try {
-      const dailyNum = parseFloat(values.dailyCost) || 0
       const res = await billingApi.createServer({
         name: values.name.trim(),
         billing_type: values.billingType,
         paid_days: values.billingType === 'monthly' && values.paidMode === 'days' ? values.paidDays : undefined,
         paid_until: values.billingType === 'monthly' && values.paidMode === 'date' ? values.paidUntil : undefined,
-        monthly_cost: values.billingType === 'resource' ? dailyNum * 30 : undefined,
+        monthly_cost: monthlyCostFromForm(values) ?? undefined,
         account_balance: values.billingType === 'resource' ? parseFloat(values.balance) || 0 : undefined,
         currency: values.currency,
         notes: values.notes.trim() || undefined,
@@ -364,6 +414,7 @@ export function AddModal({ t, folders, onClose, onCreated }: {
         cloud_provider: isCloud ? values.provider : undefined,
         cloud_credential: isCloud ? values.credentials.cloud_credential : undefined,
         cloud_account_id: isCloud ? values.credentials.cloud_account_id : undefined,
+        cloud_proxy: isCloud ? values.proxy.trim() || undefined : undefined,
         cloud_balance_threshold: isCloud ? parseFloat(values.threshold) || 0 : undefined,
       })
       onCreated(res.data.server)
@@ -411,6 +462,11 @@ export function EditModal({ t, server, folders, onClose, onSaved }: {
   const setValues = (patch: Partial<FormValues>) => setAll(prev => ({ ...prev, ...patch }))
 
   const submit = async () => {
+    const proxyError = proxyInputError(values, t)
+    if (proxyError) {
+      toast.error(proxyError)
+      return
+    }
     setSaving(true)
     try {
       const payload: Record<string, unknown> = {
@@ -421,9 +477,10 @@ export function EditModal({ t, server, folders, onClose, onSaved }: {
       }
       if (server.billing_type === 'monthly') {
         payload.paid_until = values.paidUntil || null
+        payload.monthly_cost = monthlyCostFromForm(values)
       }
       if (server.billing_type === 'resource') {
-        payload.monthly_cost = (parseFloat(values.dailyCost) || 0) * 30
+        payload.monthly_cost = monthlyCostFromForm(values)
         payload.account_balance = parseFloat(values.balance) || 0
       }
       if (server.billing_type === 'cloud') {
@@ -432,6 +489,7 @@ export function EditModal({ t, server, folders, onClose, onSaved }: {
           payload.cloud_credential = values.credentials.cloud_credential
         }
         payload.cloud_balance_threshold = parseFloat(values.threshold) || 0
+        payload.cloud_proxy = values.proxy.trim() || null
       }
       const res = await billingApi.updateServer(server.id, payload as never)
       onSaved(res.data)
@@ -638,7 +696,7 @@ export function TopupModal({ t, server, onClose, onDone }: {
           {numAmount > 0 && monthlyCost > 0 && (
             <div className="text-xs text-emerald-400/80 bg-emerald-500/10 rounded-lg px-3 py-2 space-y-1">
               <div className="flex items-center gap-1">
-                <Clock className="w-3 h-3" />
+                <Clock className="w-3.5 h-3.5" />
                 ≈ +{Math.round(addedDays)} {t('common.days')}
               </div>
               <PaidTotalHint totalDays={totalDays} t={t} formatDateTime={formatDateTime} />
@@ -767,7 +825,7 @@ export function CloudPlanModal({ t, server, onClose }: {
                 <div className={`text-xs rounded-lg px-3 py-2 space-y-1 ${accent.hintBox}`}>
                   {requiredAmount > 0 ? (
                     <div className="flex items-center gap-1">
-                      <Wallet className="w-3 h-3" />
+                      <Wallet className="w-3.5 h-3.5" />
                       {t('billing.plan_topup')}: <span className="font-semibold">{requiredAmount.toFixed(2)} {currency}</span>
                     </div>
                   ) : (
@@ -776,7 +834,7 @@ export function CloudPlanModal({ t, server, onClose }: {
                   <PaidTotalHint totalDays={lastsDays} labelKey="billing.plan_lasts" t={t} formatDateTime={formatDateTime} />
                 </div>
               )}
-              <p className="text-[11px] text-dark-500">{t('billing.plan_hint')}</p>
+              <p className="text-2xs text-dark-500">{t('billing.plan_hint')}</p>
             </>
           )}
         </div>

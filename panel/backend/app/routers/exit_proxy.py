@@ -41,6 +41,7 @@ from app.services.exit_proxy.views import node_view
 from app.services.exit_proxy.warp_install import get_warp_install_manager
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.node_capabilities import Capability
+from app.services.remnawave_node_install import run_install_on_node
 from app.services.reserved_ports_sync import apply_reserved_ports
 
 router = APIRouter(prefix="/exit-proxy", tags=["exit-proxy"])
@@ -396,7 +397,7 @@ async def install_warp(server_id: int, db: AsyncSession = Depends(get_db), _: di
     """Поставить Cloudflare WARP через агента: после установки он станет кандидатом-выходом."""
     server = await get_server_by_id(server_id, db)
     require_capability(server, Capability.EXEC, write=True)
-    job_id = get_warp_install_manager().start(server, build_warp_install_command())
+    job_id = get_warp_install_manager().start(server, run_install_on_node(server, build_warp_install_command()))
     return {"job_id": job_id}
 
 

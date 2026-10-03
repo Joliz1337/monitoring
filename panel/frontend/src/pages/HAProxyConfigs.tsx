@@ -1,21 +1,29 @@
 import { useEffect, useState, useCallback, useRef, forwardRef, type ForwardedRef, type ReactNode } from 'react'
+import { useOpenIds } from '../hooks/useOpenIds'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu, Lock, GripVertical } from 'lucide-react'
+import { FileCode2, Plus, Play, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Scale, Cpu, Lock, GripVertical, ShieldCheck, Copy, ClipboardPaste, ArrowRightLeft } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { formatBitsPerSec } from '../utils/format'
+import { uniqueCopyName } from '../utils/ruleClone'
+import { copyToClipboard } from '../utils/clipboard'
+import { formatServerLines } from '../utils/haproxyServerLines'
 import {
   haproxyProfilesApi,
   proxyApi,
   HAProxyConfigProfile,
   HAProxyProfileDetail,
+  HAProxyProfileOptions,
   HAProxyProfileRule,
+  HAProxySniMode,
   HAProxySyncResult,
   HAProxySyncLogEntry,
   HAProxyAvailableServer,
+  HAProxyIpOwner,
+  HAProxyIpOwners,
   HAProxyServerStatus,
   BackendServer,
   BalancerOptions,
@@ -23,6 +31,10 @@ import {
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import FolderedServerPicker from '../components/servers/FolderedServerPicker'
+import ServerAddressesEditor from '../components/haproxy/ServerAddressesEditor'
+import ServersPasteBox, { type ServersMergeMode } from '../components/haproxy/ServersPasteBox'
+import ServersFromNodesBox from '../components/haproxy/ServersFromNodesBox'
+import ServersPortBox from '../components/haproxy/ServersPortBox'
 
 
 function SyncStatusBadge({ status, online }: { status: string | null; online?: boolean }) {
@@ -33,16 +45,16 @@ function SyncStatusBadge({ status, online }: { status: string | null; online?: b
   if (status === 'pending' && online === false) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-dark-300 bg-dark-700/40 border-dark-600/40">
-        <Clock className="w-3 h-3" /> {t('haproxy_configs.waiting_server')}
+        <Clock className="w-3.5 h-3.5" /> {t('haproxy_configs.waiting_server')}
       </span>
     )
   }
 
   const map: Record<string, { color: string; icon: React.ReactNode; label: string }> = {
-    synced: { color: 'text-green-400 bg-green-500/10 border-green-500/20', icon: <CheckCircle2 className="w-3 h-3" />, label: t('haproxy_configs.synced') },
-    pending: { color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20', icon: <Clock className="w-3 h-3" />, label: t('haproxy_configs.pending') },
-    failed: { color: 'text-red-400 bg-red-500/10 border-red-500/20', icon: <XCircle className="w-3 h-3" />, label: t('haproxy_configs.failed') },
-    denied: { color: 'text-purple bg-purple/10 border-purple/20', icon: <Lock className="w-3 h-3" />, label: t('node_caps.status_denied') },
+    synced: { color: 'text-green-400 bg-green-500/10 border-green-500/20', icon: <CheckCircle2 className="w-3.5 h-3.5" />, label: t('haproxy_configs.synced') },
+    pending: { color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20', icon: <Clock className="w-3.5 h-3.5" />, label: t('haproxy_configs.pending') },
+    failed: { color: 'text-red-400 bg-red-500/10 border-red-500/20', icon: <XCircle className="w-3.5 h-3.5" />, label: t('haproxy_configs.failed') },
+    denied: { color: 'text-purple bg-purple/10 border-purple/20', icon: <Lock className="w-3.5 h-3.5" />, label: t('node_caps.status_denied') },
   }
   const s = map[status] || map.pending
   return (
@@ -63,12 +75,58 @@ const ALGO_NEEDS_HASH = new Set(['source'])
 
 // maxconn 60000: к одному адресу:порту бэкенда физически не открыть больше
 // ~64k соединений (лимит исходящих портов балансера), запас оставлен на
-// TIME_WAIT и зарезервированные порты
+// TIME_WAIT и зарезервированные порты.
+// Вес 100, а не единица HAProxy: доля задаётся с шагом в процент (120 — на 20% больше),
+// и в той же шкале, что выдают авто-веса по CPU
 const DEFAULT_SERVER: BackendServer = {
-  name: 'srv1', address: '', port: 0, weight: 1,
+  name: 'srv1', address: '', port: 0, weight: 100,
   maxconn: 60000, check: true, inter: '5s', fall: 3, rise: 2,
   send_proxy: false, send_proxy_v2: true,
   backup: false, slowstart: '60s', disabled: false,
+}
+
+const SERVER_NAME_PATTERN = /^srv(\d+)$/
+
+// Номер после самого большого srvN: по длине списка выходило занятое имя, стоило удалить сервер из середины
+function nextServerName(servers: BackendServer[]): string {
+  const numbers = servers.map(s => Number(SERVER_NAME_PATTERN.exec(s.name)?.[1] ?? 0))
+  return `srv${Math.max(0, ...numbers) + 1}`
+}
+
+function sharedValue(values: number[]): number | undefined {
+  return values.length > 0 && values.every(v => v === values[0]) ? values[0] : undefined
+}
+
+// Порт и вес нового сервера — как у остальных, если у них они одинаковые
+function newBackendServer(servers: BackendServer[]): BackendServer {
+  return {
+    ...DEFAULT_SERVER,
+    name: nextServerName(servers),
+    port: sharedValue(servers.map(s => s.port).filter(port => port > 0)) ?? DEFAULT_SERVER.port,
+    weight: sharedValue(servers.map(s => s.weight ?? 1)) ?? DEFAULT_SERVER.weight,
+  }
+}
+
+// Новый сервер без имени или с уже занятым именем получает следующий srvN;
+// при добавлении пустые строки формы (без адреса) уступают место новым
+function mergeServers(current: BackendServer[], incoming: BackendServer[], mode: ServersMergeMode): BackendServer[] {
+  const merged = mode === 'append' ? current.filter(s => s.address.trim()) : []
+  for (const srv of incoming) {
+    const nameTaken = !srv.name || merged.some(s => s.name === srv.name)
+    merged.push(nameTaken ? { ...srv, name: nextServerName(merged) } : srv)
+  }
+  return merged
+}
+
+type ServersToolbox = 'paste' | 'nodes' | 'port'
+
+function duplicateServerName(servers: BackendServer[]): string | undefined {
+  const seen = new Set<string>()
+  for (const { name } of servers) {
+    if (seen.has(name)) return name
+    seen.add(name)
+  }
+  return undefined
 }
 
 const DEFAULT_BALANCER_OPTIONS: BalancerOptions = {
@@ -79,14 +137,65 @@ const DEFAULT_BALANCER_OPTIONS: BalancerOptions = {
   fullconn: 100000, timeout_queue: '30s',
 }
 
+// ==================== Target owners ====================
+
+const BALANCER_TARGETS_SHOWN = 2
+
+type AddressRole = (owner: HAProxyIpOwner) => string
+
+interface BalancerTarget {
+  label: string
+  roles: string[]
+}
+
+function findOwner(owners: HAProxyIpOwners, address: string): HAProxyIpOwner | undefined {
+  return owners[address.trim().toLowerCase()]
+}
+
+function useAddressRole(): AddressRole {
+  const { t } = useTranslation()
+  return owner => owner.extra_number === null
+    ? t('haproxy_configs.addresses_primary')
+    : t('haproxy_configs.target_extra', { number: owner.extra_number })
+}
+
+function ownerLabel(owner: HAProxyIpOwner | undefined, addressRole: AddressRole): string | undefined {
+  return owner && `${owner.name} · ${addressRole(owner)}`
+}
+
+// Несколько IP одного сервера дают одну цель с перечнем ролей, неизвестный адрес остаётся адресом
+function balancerTargets(owners: HAProxyIpOwners, servers: BackendServer[], addressRole: AddressRole): BalancerTarget[] {
+  const targets = new Map<string, BalancerTarget>()
+  for (const { address } of servers) {
+    if (!address) continue
+    const owner = findOwner(owners, address)
+    const key = owner ? `server:${owner.id}` : `address:${address}`
+    const target = targets.get(key) ?? { label: owner?.name ?? address, roles: [] }
+    const role = owner && addressRole(owner)
+    if (role && !target.roles.includes(role)) target.roles.push(role)
+    targets.set(key, target)
+  }
+  return [...targets.values()]
+}
+
+function summarizeTargets(targets: BalancerTarget[]): string {
+  const shown = targets.slice(0, BALANCER_TARGETS_SHOWN).map(target => target.label).join(', ')
+  const hidden = targets.length - BALANCER_TARGETS_SHOWN
+  return hidden > 0 ? `${shown} +${hidden}` : shown
+}
+
+function describeTarget(target: BalancerTarget): string {
+  return target.roles.length > 0 ? `${target.label} — ${target.roles.join(', ')}` : target.label
+}
+
 // ==================== Toggle Component ====================
 
 function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label?: string }) {
   return (
-    <div className="flex items-center justify-between">
+    <div className="flex items-center justify-between gap-3">
       {label && <span className="text-xs text-dark-300">{label}</span>}
       <button type="button" onClick={() => onChange(!value)}
-        className={`relative w-9 h-5 rounded-full transition-colors duration-200 ${value ? 'bg-green-500' : 'bg-dark-600'}`}>
+        className={`relative w-9 h-5 shrink-0 rounded-full transition-colors duration-200 ${value ? 'bg-green-500' : 'bg-dark-600'}`}>
         <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${value ? 'translate-x-4' : 'translate-x-0'}`} />
       </button>
     </div>
@@ -96,9 +205,10 @@ function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: bool
 // ==================== Backend Server Row ====================
 
 function BackendServerRow({
-  srv, index, onChange, onRemove, canRemove, t,
+  srv, index, owner, onChange, onRemove, canRemove, t,
 }: {
   srv: BackendServer; index: number
+  owner?: string
   onChange: (i: number, s: BackendServer) => void
   onRemove: (i: number) => void
   canRemove: boolean
@@ -130,14 +240,14 @@ function BackendServerRow({
           </Tooltip>
         </div>
         <button type="button" onClick={() => setExpanded(e => !e)}
-          className="p-1 text-dark-400 hover:text-dark-200 transition-colors">
-          {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          className="p-1.5 text-dark-400 hover:text-dark-200 transition-colors">
+          {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         </button>
         {canRemove && (
           <Tooltip label={t('common.delete')}>
             <button type="button" onClick={() => onRemove(index)}
-              className="p-1 text-dark-400 hover:text-red-400 transition-colors">
-              <Trash2 className="w-3.5 h-3.5" />
+              className="p-1.5 text-dark-400 hover:text-red-400 transition-colors">
+              <Trash2 className="w-4 h-4" />
             </button>
           </Tooltip>
         )}
@@ -146,10 +256,12 @@ function BackendServerRow({
       {/* Labels row */}
       {!expanded && (
         <div className="grid grid-cols-4 gap-2 -mt-1">
-          <span className="text-[10px] text-dark-500">{t('balancer.server_name')}</span>
-          <span className="text-[10px] text-dark-500">{t('balancer.address')}</span>
-          <span className="text-[10px] text-dark-500">{t('haproxy.target_port')}</span>
-          <span className="text-[10px] text-dark-500">{t('balancer.weight')}</span>
+          <span className="text-2xs text-dark-500">{t('balancer.server_name')}</span>
+          {owner
+            ? <span className="text-2xs text-accent-400 truncate" title={owner}>{owner}</span>
+            : <span className="text-2xs text-dark-500">{t('balancer.address')}</span>}
+          <span className="text-2xs text-dark-500">{t('haproxy.target_port')}</span>
+          <span className="text-2xs text-dark-500">{t('balancer.weight')}</span>
         </div>
       )}
 
@@ -157,32 +269,32 @@ function BackendServerRow({
         <div className="space-y-2 pt-1 border-t border-dark-700/30">
           <div className="grid grid-cols-3 gap-2">
             <div>
-              <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.maxconn')}</label>
+              <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.maxconn')}</label>
               <input type="number" value={srv.maxconn ?? ''} onChange={e => upd({ maxconn: e.target.value ? parseInt(e.target.value) : undefined })}
                 placeholder="60000" className={inp} />
               {srv.maxconn != null && srv.maxconn > 64000 && (
-                <p className="text-[10px] text-amber-400 mt-0.5">{t('balancer.maxconn_warning')}</p>
+                <p className="text-2xs text-amber-400 mt-0.5">{t('balancer.maxconn_warning')}</p>
               )}
             </div>
             <div>
-              <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.slowstart')}</label>
+              <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.slowstart')}</label>
               <input type="text" value={srv.slowstart ?? ''} onChange={e => upd({ slowstart: e.target.value || undefined })}
                 placeholder="60s" className={inp} />
             </div>
             <div>
-              <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.inter')}</label>
+              <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.inter')}</label>
               <input type="text" value={srv.inter ?? '5s'} onChange={e => upd({ inter: e.target.value || '5s' })}
                 placeholder="5s" className={inp} />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="block text-[10px] text-dark-500 mb-0.5">Fall</label>
+              <label className="block text-2xs text-dark-500 mb-0.5">Fall</label>
               <input type="number" value={srv.fall ?? 3} onChange={e => upd({ fall: parseInt(e.target.value) || 3 })}
                 className={inp} min={1} />
             </div>
             <div>
-              <label className="block text-[10px] text-dark-500 mb-0.5">Rise</label>
+              <label className="block text-2xs text-dark-500 mb-0.5">Rise</label>
               <input type="number" value={srv.rise ?? 2} onChange={e => upd({ rise: parseInt(e.target.value) || 2 })}
                 className={inp} min={1} />
             </div>
@@ -224,7 +336,7 @@ function BalancerSettingsSection({
             <option key={a} value={a}>{t(`balancer.alg.${a.replace('-', '_')}`)}</option>
           ))}
         </select>
-        <p className="text-[10px] text-dark-500 mt-0.5">{t(`balancer.alg.${opts.algorithm.replace('-', '_')}_hint`)}</p>
+        <p className="text-2xs text-dark-500 mt-0.5">{t(`balancer.alg.${opts.algorithm.replace('-', '_')}_hint`)}</p>
       </div>
 
       {ALGO_NEEDS_HASH.has(opts.algorithm) && (
@@ -239,9 +351,8 @@ function BalancerSettingsSection({
       )}
 
       {/* Advanced toggle */}
-      <button type="button" onClick={() => setExpanded(e => !e)}
-        className="flex items-center gap-1.5 text-xs text-dark-400 hover:text-dark-200 transition-colors">
-        {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+      <button type="button" onClick={() => setExpanded(e => !e)} className="btn-disclosure">
+        {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         {t('balancer.advanced')}
       </button>
 
@@ -263,18 +374,18 @@ function BalancerSettingsSection({
           {opts.health_check_type === 'httpchk' && (
             <div className="grid grid-cols-3 gap-2">
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_method')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.httpchk_method')}</label>
                 <select value={opts.httpchk_method ?? 'GET'} onChange={e => upd({ httpchk_method: e.target.value })} className={inp}>
                   <option>GET</option><option>HEAD</option><option>OPTIONS</option>
                 </select>
               </div>
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_uri')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.httpchk_uri')}</label>
                 <input type="text" value={opts.httpchk_uri ?? ''} onChange={e => upd({ httpchk_uri: e.target.value || undefined })}
                   placeholder="/health" className={inp} />
               </div>
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_expect')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.httpchk_expect')}</label>
                 <input type="text" value={opts.httpchk_expect ?? ''} onChange={e => upd({ httpchk_expect: e.target.value || undefined })}
                   placeholder="status 200" className={inp} />
               </div>
@@ -297,12 +408,12 @@ function BalancerSettingsSection({
           {opts.sticky_type === 'cookie' && (
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.cookie_name')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.cookie_name')}</label>
                 <input type="text" value={opts.cookie_name ?? ''} onChange={e => upd({ cookie_name: e.target.value || undefined })}
                   placeholder="SERVERID" className={inp} />
               </div>
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">Options</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">Options</label>
                 <input type="text" value={opts.cookie_options ?? ''} onChange={e => upd({ cookie_options: e.target.value || undefined })}
                   placeholder="insert indirect nocache" className={inp} />
               </div>
@@ -312,18 +423,18 @@ function BalancerSettingsSection({
           {opts.sticky_type === 'stick-table' && (
             <div className="grid grid-cols-3 gap-2">
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">Type</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">Type</label>
                 <select value={opts.stick_table_type ?? 'ip'} onChange={e => upd({ stick_table_type: e.target.value })} className={inp}>
                   <option value="ip">ip</option><option value="string">string</option>
                 </select>
               </div>
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.stick_table_size')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.stick_table_size')}</label>
                 <input type="text" value={opts.stick_table_size ?? ''} onChange={e => upd({ stick_table_size: e.target.value || undefined })}
                   placeholder="200k" className={inp} />
               </div>
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.stick_table_expire')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.stick_table_expire')}</label>
                 <input type="text" value={opts.stick_table_expire ?? ''} onChange={e => upd({ stick_table_expire: e.target.value || undefined })}
                   placeholder="30m" className={inp} />
               </div>
@@ -360,6 +471,77 @@ function BalancerSettingsSection({
   )
 }
 
+// ==================== SNI Filter ====================
+
+const SNI_MODES: HAProxySniMode[] = ['profile', 'custom', 'off']
+const SNI_PREVIEW_COUNT = 5
+
+function parseSniList(text: string): string[] {
+  return text.split(/[\s,]+/).filter(Boolean)
+}
+
+function sniPreview(domains: string[]): string {
+  const shown = domains.slice(0, SNI_PREVIEW_COUNT).join(', ')
+  return domains.length > SNI_PREVIEW_COUNT ? `${shown} +${domains.length - SNI_PREVIEW_COUNT}` : shown
+}
+
+function SniDomainsInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const { t } = useTranslation()
+  return (
+    <div className="pl-2 border-l-2 border-dark-700/40 space-y-1">
+      <label className="block text-xs text-dark-400">{t('haproxy_configs.sni_domains')}</label>
+      <textarea value={value} onChange={e => onChange(e.target.value)} spellCheck={false} rows={4}
+        placeholder={'www.google.com\n*.example.com'}
+        className="w-full px-3 py-2 rounded-lg bg-dark-950 border border-dark-700 text-dark-200 text-xs font-mono focus:outline-none focus:border-accent-500/50 resize-y" />
+      <p className="text-2xs text-dark-500">{t('haproxy_configs.sni_domains_hint')}</p>
+    </div>
+  )
+}
+
+function SniFilterSection({
+  profileId, initial, onSaved,
+}: {
+  profileId: number
+  initial: HAProxyProfileOptions
+  onSaved: () => void
+}) {
+  const { t } = useTranslation()
+  const [enabled, setEnabled] = useState(initial.sni_filter_enabled)
+  const [domainsText, setDomainsText] = useState(initial.sni_filter_domains.join('\n'))
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    const domains = parseSniList(domainsText)
+    if (enabled && domains.length === 0) {
+      toast.error(t('haproxy_configs.sni_domains_required')); return
+    }
+    setSaving(true)
+    try {
+      const res = await haproxyProfilesApi.updateOptions(profileId, { sni_filter_enabled: enabled, sni_filter_domains: domains })
+      setDomainsText(res.data.options.sni_filter_domains.join('\n'))
+      toast.success(t('haproxy_configs.sni_saved'))
+      onSaved()
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || t('haproxy_configs.sni_save_error'))
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <div className="p-4 bg-dark-900/40 rounded-xl border border-dark-700/40 space-y-3">
+      <p className="text-xs text-dark-500">{t('haproxy_configs.sni_filter_hint')}</p>
+      <Toggle value={enabled} onChange={setEnabled} label={t('haproxy_configs.sni_filter_enable')} />
+      {enabled && <SniDomainsInput value={domainsText} onChange={setDomainsText} />}
+      <div className="flex justify-end">
+        <button onClick={handleSave} disabled={saving}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5">
+          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+          {t('common.save')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ==================== Rule Form ====================
 
 interface RuleFormData {
@@ -372,31 +554,63 @@ interface RuleFormData {
   is_balancer: boolean
   servers: BackendServer[]
   balancer_options: BalancerOptions
+  sni_mode: HAProxySniMode
+  sni_domains: string
 }
 
 const EMPTY_RULE_FORM: RuleFormData = {
   name: '', listen_port: '', target_ip: '', target_port: '',
   send_proxy: false, accept_proxy: false,
   is_balancer: false, servers: [], balancer_options: { ...DEFAULT_BALANCER_OPTIONS },
+  sni_mode: 'profile', sni_domains: '',
+}
+
+function ruleToForm(r: HAProxyProfileRule): RuleFormData {
+  return {
+    name: r.name, listen_port: String(r.listen_port),
+    target_ip: r.target_ip, target_port: String(r.target_port),
+    send_proxy: r.send_proxy, accept_proxy: r.accept_proxy ?? false,
+    is_balancer: r.is_balancer ?? false,
+    servers: r.servers ?? [],
+    balancer_options: r.balancer_options ? { ...DEFAULT_BALANCER_OPTIONS, ...r.balancer_options } : { ...DEFAULT_BALANCER_OPTIONS },
+    sni_mode: r.sni_mode ?? 'profile',
+    sni_domains: (r.sni_domains ?? []).join('\n'),
+  }
+}
+
+// Порт копии пустой: два правила на одном порту конфликтуют, а занятость порта при добавлении никто не проверяет
+function cloneRuleForm(r: HAProxyProfileRule, takenNames: string[]): RuleFormData {
+  return { ...ruleToForm(r), name: uniqueCopyName(r.name, takenNames), listen_port: '' }
 }
 
 function RuleForm({
   initial,
   isEdit,
+  cloneOf,
   saving,
   onSave,
   onCancel,
   profileId,
+  profileOptions,
+  ipOwners,
+  nodes,
 }: {
   initial: RuleFormData
   isEdit: boolean
+  cloneOf?: string
   saving: boolean
   onSave: (data: RuleFormData) => void
   onCancel: () => void
   profileId: number
+  profileOptions: HAProxyProfileOptions
+  ipOwners: HAProxyIpOwners
+  nodes: HAProxyAvailableServer[]
 }) {
   const { t } = useTranslation()
   const [form, setForm] = useState(initial)
+  const [toolbox, setToolbox] = useState<ServersToolbox | null>(null)
+  const addressRole = useAddressRole()
+  const singleTargetLabel = ownerLabel(findOwner(ipOwners, form.target_ip), addressRole)
 
   const toggleBalancer = (enabled: boolean) => {
     if (enabled && form.servers.length === 0) {
@@ -423,9 +637,38 @@ function RuleForm({
   }
 
   const addServer = () => {
-    const num = form.servers.length + 1
-    setForm(f => ({ ...f, servers: [...f.servers, { ...DEFAULT_SERVER, name: `srv${num}` }] }))
+    setForm(f => ({ ...f, servers: [...f.servers, newBackendServer(f.servers)] }))
   }
+
+  const copyableServers = form.servers.filter(s => s.address.trim())
+
+  const copyServers = async () => {
+    await copyToClipboard(formatServerLines(copyableServers))
+    toast.success(t('balancer.servers_copied', { count: copyableServers.length }))
+  }
+
+  const pasteServers = (pasted: BackendServer[], mode: ServersMergeMode) => {
+    setForm(f => ({ ...f, servers: mergeServers(f.servers, pasted, mode) }))
+    setToolbox(null)
+  }
+
+  // Повторный выбор той же ноды не должен дублировать адреса, которые уже в списке
+  const addNodeServers = (incoming: BackendServer[], mode: ServersMergeMode) => {
+    setForm(f => {
+      const isListed = (srv: BackendServer) => f.servers.some(s => s.address.trim() === srv.address && s.port === srv.port)
+      const fresh = mode === 'append' ? incoming.filter(srv => !isListed(srv)) : incoming
+      return { ...f, servers: mergeServers(f.servers, fresh, mode) }
+    })
+    setToolbox(null)
+  }
+
+  const changeServersPort = (servers: BackendServer[], changed: number) => {
+    setForm(f => ({ ...f, servers }))
+    setToolbox(null)
+    toast.success(t('balancer.port_changed', { count: changed }))
+  }
+
+  const toggleToolbox = (box: ServersToolbox) => setToolbox(open => open === box ? null : box)
 
   const autoWeights = async () => {
     if (form.servers.length === 0) return
@@ -464,6 +707,14 @@ function RuleForm({
 
   const inp = "w-full px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm focus:outline-none focus:border-accent-500/50"
 
+  const sniHint = {
+    profile: profileOptions.sni_filter_enabled
+      ? t('haproxy_configs.sni_profile_on', { domains: sniPreview(profileOptions.sni_filter_domains) })
+      : t('haproxy_configs.sni_profile_off'),
+    custom: t('haproxy_configs.sni_custom_hint'),
+    off: t('haproxy_configs.sni_off_hint'),
+  }[form.sni_mode]
+
   return (
     <motion.div
       className="p-4 bg-dark-800/50 rounded-xl border border-dark-700/50"
@@ -473,9 +724,13 @@ function RuleForm({
     >
       <div className="flex items-center justify-between mb-3">
         <h4 className="text-sm font-medium text-dark-200 flex items-center gap-2">
-          {isEdit ? <><Edit3 className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.edit_rule')}</> : <><Plus className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.new_rule')}</>}
+          {isEdit
+            ? <><Edit3 className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.edit_rule')}</>
+            : cloneOf
+              ? <><Copy className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.clone_rule_title', { name: cloneOf })}</>
+              : <><Plus className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.new_rule')}</>}
         </h4>
-        <button onClick={onCancel} className="p-1 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
+        <button onClick={onCancel} className="p-1.5 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
           <X className="w-4 h-4" />
         </button>
       </div>
@@ -512,6 +767,12 @@ function RuleForm({
                 <label className="block text-xs text-dark-400 mb-1">{t('haproxy.target_ip')}</label>
                 <input type="text" value={form.target_ip} onChange={e => setForm(f => ({ ...f, target_ip: e.target.value }))}
                   placeholder="192.168.1.10" className={inp} />
+                {singleTargetLabel && (
+                  <p className="flex items-center gap-1 mt-1 text-2xs text-accent-400 min-w-0">
+                    <Server className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">{singleTargetLabel}</span>
+                  </p>
+                )}
               </div>
               <div>
                 <label className="block text-xs text-dark-400 mb-1">{t('haproxy.target_port')}</label>
@@ -538,32 +799,84 @@ function RuleForm({
 
             {/* Servers */}
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-dark-400 font-medium">{t('balancer.servers')}</span>
-                <div className="flex items-center gap-3">
-                  {form.servers.length > 1 && (
-                    <Tooltip label={t('balancer.auto_weight')}>
-                      <button type="button" onClick={autoWeights}
-                        className="flex items-center gap-1 text-xs text-dark-400 hover:text-dark-200 transition-colors">
-                        <Cpu className="w-3 h-3" /> {t('balancer.auto_weight')}
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                <span className="text-sm text-dark-200 font-medium">{t('balancer.servers')}</span>
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  {copyableServers.length > 0 && (
+                    <Tooltip label={t('balancer.copy_servers_hint')}>
+                      <button type="button" onClick={copyServers} className="btn-tool">
+                        <Copy className="w-4 h-4" /> {t('common.copy')}
                       </button>
                     </Tooltip>
                   )}
-                  <button type="button" onClick={addServer}
-                    className="flex items-center gap-1 text-xs text-accent-400 hover:text-accent-300 transition-colors">
-                    <Plus className="w-3 h-3" /> {t('balancer.add_server')}
+                  <Tooltip label={t('balancer.paste_servers_hint')}>
+                    <button type="button" onClick={() => toggleToolbox('paste')}
+                      className={`btn-tool ${toolbox === 'paste' ? 'btn-tool-active' : ''}`}>
+                      <ClipboardPaste className="w-4 h-4" /> {t('balancer.paste_servers')}
+                    </button>
+                  </Tooltip>
+                  <Tooltip label={t('balancer.from_nodes_hint')}>
+                    <button type="button" onClick={() => toggleToolbox('nodes')}
+                      className={`btn-tool ${toolbox === 'nodes' ? 'btn-tool-active' : ''}`}>
+                      <Server className="w-4 h-4" /> {t('balancer.from_nodes')}
+                    </button>
+                  </Tooltip>
+                  <Tooltip label={t('balancer.port_change_tooltip')}>
+                    <button type="button" onClick={() => toggleToolbox('port')}
+                      className={`btn-tool ${toolbox === 'port' ? 'btn-tool-active' : ''}`}>
+                      <ArrowRightLeft className="w-4 h-4" /> {t('balancer.port_change')}
+                    </button>
+                  </Tooltip>
+                  {form.servers.length > 1 && (
+                    <Tooltip label={t('balancer.auto_weight')}>
+                      <button type="button" onClick={autoWeights} className="btn-tool">
+                        <Cpu className="w-4 h-4" /> {t('balancer.auto_weight')}
+                      </button>
+                    </Tooltip>
+                  )}
+                  <button type="button" onClick={addServer} className="btn-tool btn-tool-accent">
+                    <Plus className="w-4 h-4" /> {t('balancer.add_server')}
                   </button>
                 </div>
               </div>
+              {toolbox === 'paste' && (
+                <ServersPasteBox defaults={newBackendServer(form.servers)} onApply={pasteServers} onClose={() => setToolbox(null)} />
+              )}
+              {toolbox === 'nodes' && (
+                <ServersFromNodesBox nodes={nodes} ipOwners={ipOwners} defaults={newBackendServer(form.servers)}
+                  onApply={addNodeServers} onClose={() => setToolbox(null)} />
+              )}
+              {toolbox === 'port' && (
+                <ServersPortBox servers={form.servers} onApply={changeServersPort} onClose={() => setToolbox(null)} />
+              )}
               <div className="space-y-2">
                 {form.servers.map((srv, i) => (
-                  <BackendServerRow key={i} srv={srv} index={i} onChange={updateServer}
+                  <BackendServerRow key={i} srv={srv} index={i} owner={ownerLabel(findOwner(ipOwners, srv.address), addressRole)} onChange={updateServer}
                     onRemove={removeServer} canRemove={form.servers.length > 1} t={t} />
                 ))}
               </div>
             </div>
           </>
         )}
+
+        {/* SNI filter: свой режим правила перекрывает настройку профиля */}
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-dark-300">{t('haproxy_configs.sni_filter')}</span>
+            <div className="inline-flex rounded-lg border border-dark-700 overflow-hidden">
+              {SNI_MODES.map(mode => (
+                <button key={mode} type="button" onClick={() => setForm(f => ({ ...f, sni_mode: mode }))}
+                  className={`px-2.5 py-1 text-xs transition-colors ${form.sni_mode === mode ? 'bg-accent-600 text-white' : 'bg-dark-800 text-dark-400 hover:text-dark-200'}`}>
+                  {t(`haproxy_configs.sni_mode_${mode}`)}
+                </button>
+              ))}
+            </div>
+          </div>
+          {form.sni_mode === 'custom' && (
+            <SniDomainsInput value={form.sni_domains} onChange={v => setForm(f => ({ ...f, sni_domains: v }))} />
+          )}
+          <p className="text-2xs text-dark-500 break-words">{sniHint}</p>
+        </div>
 
         {/* Actions */}
         <div className="flex justify-end gap-2 pt-1">
@@ -572,7 +885,7 @@ function RuleForm({
           </button>
           <button onClick={() => onSave(form)} disabled={saving}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5">
-            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             {isEdit ? t('common.save') : t('haproxy_configs.add_rule')}
           </button>
         </div>
@@ -610,7 +923,7 @@ function ProfileCard({
         <div className="flex items-center gap-3 min-w-0">
           <Tooltip label={t('haproxy_configs.drag_to_reorder')}>
             <div ref={dragHandle.ref} {...dragHandle.listeners} {...dragHandle.attributes} onClick={e => e.stopPropagation()}
-              className="p-1 -ml-2 rounded text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing transition-colors shrink-0">
+              className="p-1 -ml-2 rounded text-dark-500 hover:text-dark-400 cursor-grab active:cursor-grabbing transition-colors shrink-0">
               <GripVertical className="w-4 h-4" />
             </div>
           </Tooltip>
@@ -631,12 +944,12 @@ function ProfileCard({
           )}
           {allSynced && profile.linked_servers_count > 0 && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-green-400 bg-green-500/10 border-green-500/20">
-              <CheckCircle2 className="w-3 h-3" /> {t('haproxy_configs.all_synced')}
+              <CheckCircle2 className="w-3.5 h-3.5" /> {t('haproxy_configs.all_synced')}
             </span>
           )}
           {hasUnsync && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-yellow-400 bg-yellow-500/10 border-yellow-500/20">
-              <AlertCircle className="w-3 h-3" /> {profile.linked_servers_count - profile.synced_servers_count} {t('haproxy_configs.out_of_sync')}
+              <AlertCircle className="w-3.5 h-3.5" /> {profile.linked_servers_count - profile.synced_servers_count} {t('haproxy_configs.out_of_sync')}
             </span>
           )}
           <Tooltip label={t('common.edit')}>
@@ -682,6 +995,8 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [detail, setDetail] = useState<HAProxyProfileDetail | null>(null)
   const [rules, setRules] = useState<HAProxyProfileRule[]>([])
   const [availableServers, setAvailableServers] = useState<HAProxyAvailableServer[]>([])
+  const [ipOwners, setIpOwners] = useState<HAProxyIpOwners>({})
+  const addressRole = useAddressRole()
   const [serversStatus, setServersStatus] = useState<HAProxyServerStatus[]>([])
   const [syncLog, setSyncLog] = useState<HAProxySyncLogEntry[]>([])
   const [loading, setLoading] = useState(true)
@@ -691,8 +1006,11 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [startingAll, setStartingAll] = useState(false)
   const [showLog, setShowLog] = useState(false)
   const [showAddServer, setShowAddServer] = useState(false)
+  const [expandedServers, setExpandedServers] = useState<Set<number>>(new Set())
   const [showRuleForm, setShowRuleForm] = useState(false)
+  const [showSni, setShowSni] = useState(false)
   const [editingRules, setEditingRules] = useState<Set<string>>(new Set())
+  const [cloningRule, setCloningRule] = useState<string | null>(null)
   const [ruleSaving, setRuleSaving] = useState(false)
   const [showConfig, setShowConfig] = useState(false)
   const [configEdit, setConfigEdit] = useState('')
@@ -737,6 +1055,11 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
 
   useEffect(() => { fetchDetail() }, [fetchDetail])
 
+  // Имена серверов у целей — только подсказка: без них правила показываются голыми адресами
+  useEffect(() => {
+    haproxyProfilesApi.getIpOwners().then(res => setIpOwners(res.data)).catch(() => {})
+  }, [])
+
   // Автообновление статусов серверов каждые 3 секунды
   // (пропускаем, когда вкладка скрыта — не долбим бэкенд в фоне)
   useEffect(() => {
@@ -746,6 +1069,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
 
   // ---- Rules CRUD ----
   const buildRulePayload = (form: RuleFormData): Omit<HAProxyProfileRule, 'name'> & { name: string } => {
+    const sni = { sni_mode: form.sni_mode, sni_domains: form.sni_mode === 'custom' ? parseSniList(form.sni_domains) : [] }
     if (form.is_balancer) {
       const first = form.servers[0]
       return {
@@ -754,6 +1078,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
         target_ip: first?.address || '', target_port: first?.port || 0,
         send_proxy: false, accept_proxy: form.accept_proxy, is_balancer: true,
         servers: form.servers, balancer_options: form.balancer_options,
+        ...sni,
       }
     }
     return {
@@ -761,33 +1086,52 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
       listen_port: parseInt(form.listen_port) || 0,
       target_ip: form.target_ip, target_port: parseInt(form.target_port) || 0,
       send_proxy: form.send_proxy, accept_proxy: form.accept_proxy, is_balancer: false,
+      ...sni,
     }
   }
 
-  const handleAddRule = async (form: RuleFormData) => {
+  const sniListMissing = (form: RuleFormData) => form.sni_mode === 'custom' && parseSniList(form.sni_domains).length === 0
+
+  // HAProxy не примет конфиг с двумя серверами одного имени в бэкенде — раскатка упала бы на всех нодах
+  const reportDuplicateServer = (form: RuleFormData): boolean => {
+    const name = form.is_balancer ? duplicateServerName(form.servers) : undefined
+    if (name) toast.error(t('balancer.duplicate_server_name', { name }))
+    return name !== undefined
+  }
+
+  const handleAddRule = async (form: RuleFormData): Promise<boolean> => {
     if (!form.name || !form.listen_port) {
-      toast.error(t('haproxy_configs.rule_fields_required')); return
+      toast.error(t('haproxy_configs.rule_fields_required')); return false
     }
     if (!form.is_balancer && (!form.target_ip || !form.target_port)) {
-      toast.error(t('haproxy_configs.rule_fields_required')); return
+      toast.error(t('haproxy_configs.rule_fields_required')); return false
     }
     if (form.is_balancer && form.servers.length === 0) {
-      toast.error(t('balancer.min_one_server')); return
+      toast.error(t('balancer.min_one_server')); return false
+    }
+    if (reportDuplicateServer(form)) return false
+    if (sniListMissing(form)) {
+      toast.error(t('haproxy_configs.sni_domains_required')); return false
     }
     setRuleSaving(true)
     try {
       const res = await haproxyProfilesApi.addRule(profileId, buildRulePayload(form))
       setRules(res.data.rules)
-      setShowRuleForm(false)
       toast.success(t('haproxy_configs.rule_added'))
       fetchDetail()
       onRefreshList()
+      return true
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || t('haproxy_configs.rule_error'))
+      return false
     } finally { setRuleSaving(false) }
   }
 
   const handleUpdateRule = async (form: RuleFormData) => {
+    if (reportDuplicateServer(form)) return
+    if (sniListMissing(form)) {
+      toast.error(t('haproxy_configs.sni_domains_required')); return
+    }
     setRuleSaving(true)
     try {
       const res = await haproxyProfilesApi.updateRule(profileId, form.name, buildRulePayload(form))
@@ -820,6 +1164,12 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
       else next.add(rule.name)
       return next
     })
+    setCloningRule(prev => (prev === rule.name ? null : prev))
+  }
+
+  const startCloneRule = (rule: HAProxyProfileRule) => {
+    setEditingRules(prev => { const next = new Set(prev); next.delete(rule.name); return next })
+    setCloningRule(rule.name)
   }
 
   // ---- Config raw edit ----
@@ -918,6 +1268,23 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
     } catch { toast.error(t('haproxy_configs.link_error')) }
   }
 
+  const toggleServerExpanded = (serverId: number) => {
+    setExpandedServers(prev => {
+      const next = new Set(prev)
+      if (next.has(serverId)) next.delete(serverId)
+      else next.add(serverId)
+      return next
+    })
+  }
+
+  // Кнопки строки (запуск, синхронизация, отвязка) делают своё и строку не раскрывают
+  const handleServerRowClick = (e: React.MouseEvent, serverId: number) => {
+    if ((e.target as HTMLElement).closest('button')) return
+    toggleServerExpanded(serverId)
+  }
+
+  const handleAddressesSaved = () => { fetchServersStatus(); onRefreshList() }
+
   const handleUnlinkServer = async (serverId: number) => {
     if (!confirm(t('haproxy_configs.unlink_confirm'))) return
     try {
@@ -954,9 +1321,13 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
 
         {/* ===== Rules Section ===== */}
         <div>
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
             <h3 className="text-sm font-medium text-dark-200">{t('haproxy_configs.rules')}</h3>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button onClick={() => setShowSni(!showSni)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border transition-colors ${showSni ? 'text-accent-400 bg-accent-500/10 border-accent-500/30' : 'text-dark-300 hover:text-dark-100 bg-dark-800/50 hover:bg-dark-700/50 border-dark-700/50'}`}>
+                <ShieldCheck className={`w-3.5 h-3.5 ${detail.options.sni_filter_enabled ? 'text-green-400' : ''}`} /> {t('haproxy_configs.sni_filter')}
+              </button>
               <button onClick={() => { setShowConfig(!showConfig); if (!showConfig) setConfigEdit(detail.config_content) }}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-dark-300 hover:text-dark-100 bg-dark-800/50 hover:bg-dark-700/50 border border-dark-700/50 transition-colors">
                 <Code className="w-3.5 h-3.5" /> {t('haproxy_configs.show_config')}
@@ -970,6 +1341,19 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
             </div>
           </div>
 
+          {/* Profile-wide SNI filter */}
+          <AnimatePresence>
+            {showSni && (
+              <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="mb-3 overflow-hidden">
+                <SniFilterSection
+                  profileId={profileId}
+                  initial={detail.options}
+                  onSaved={() => { fetchDetail(); onRefreshList() }}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Add Rule Form (for new rules only) */}
           <AnimatePresence>
             {showRuleForm && (
@@ -978,9 +1362,12 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                   initial={EMPTY_RULE_FORM}
                   isEdit={false}
                   saving={ruleSaving}
-                  onSave={handleAddRule}
+                  onSave={async form => { if (await handleAddRule(form)) setShowRuleForm(false) }}
                   onCancel={() => { setShowRuleForm(false) }}
                   profileId={profileId}
+                  profileOptions={detail.options}
+                  ipOwners={ipOwners}
+                  nodes={availableServers}
                 />
               </div>
             )}
@@ -995,14 +1382,10 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
             <div className="space-y-1.5">
               {rules.map(r => {
                 const isEditing = editingRules.has(r.name)
-                const editInitial: RuleFormData = {
-                  name: r.name, listen_port: String(r.listen_port),
-                  target_ip: r.target_ip, target_port: String(r.target_port),
-                  send_proxy: r.send_proxy, accept_proxy: r.accept_proxy ?? false,
-                  is_balancer: r.is_balancer ?? false,
-                  servers: r.servers ?? [],
-                  balancer_options: r.balancer_options ? { ...DEFAULT_BALANCER_OPTIONS, ...r.balancer_options } : { ...DEFAULT_BALANCER_OPTIONS },
-                }
+                const sniActive = r.sni_mode === 'custom' || (r.sni_mode !== 'off' && detail.options.sni_filter_enabled)
+                const targets = r.is_balancer ? balancerTargets(ipOwners, r.servers ?? [], addressRole) : []
+                const targetsTooltip = targets.length > BALANCER_TARGETS_SHOWN || targets.some(target => target.roles.length > 0)
+                const singleTargetLabel = r.is_balancer ? undefined : ownerLabel(findOwner(ipOwners, r.target_ip), addressRole)
                 return (
                   <div key={r.name}>
                     <div
@@ -1013,44 +1396,78 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         <span className="text-sm text-dark-200 font-medium">{r.name}</span>
                         {r.is_balancer ? (
                           <>
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">
-                              <Scale className="w-2.5 h-2.5" /> LB
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-2xs font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">
+                              <Scale className="w-3.5 h-3.5" /> LB
                             </span>
-                            <span className="text-xs text-dark-500">
-                              :{r.listen_port} → {r.servers?.length ?? 0} {t('balancer.servers').toLowerCase()}
-                            </span>
-                            <span className="text-[10px] text-dark-500 hidden sm:block">{r.balancer_options?.algorithm}</span>
-                            {r.accept_proxy && <span className="text-[10px] text-cyan-400/60 hidden sm:block">ACCEPT</span>}
+                            <Tooltip
+                              label={<div className="space-y-0.5">{targets.map((target, i) => <div key={i}>{describeTarget(target)}</div>)}</div>}
+                              disabled={!targetsTooltip}
+                            >
+                              <span className="text-xs text-dark-500 truncate">
+                                :{r.listen_port} → {targets.length > 0
+                                  ? summarizeTargets(targets)
+                                  : `${r.servers?.length ?? 0} ${t('balancer.servers').toLowerCase()}`}
+                              </span>
+                            </Tooltip>
+                            <span className="text-2xs text-dark-500 hidden sm:block">{r.balancer_options?.algorithm}</span>
+                            {r.accept_proxy && <span className="text-2xs text-cyan-400/60 hidden sm:block">ACCEPT</span>}
                           </>
                         ) : (
                           <>
-                            <span className="text-xs text-dark-500">
-                              :{r.listen_port} → {r.target_ip}:{r.target_port}
+                            <span className="text-xs text-dark-500 truncate">
+                              :{r.listen_port} → {singleTargetLabel && <span className="text-dark-300">{singleTargetLabel} · </span>}{r.target_ip}:{r.target_port}
                             </span>
-                            {r.accept_proxy && <span className="text-[10px] text-cyan-400/60 hidden sm:block">ACCEPT</span>}
-                            {r.send_proxy && <span className="text-[10px] text-yellow-400/60 hidden sm:block">PROXY</span>}
+                            {r.accept_proxy && <span className="text-2xs text-cyan-400/60 hidden sm:block">ACCEPT</span>}
+                            {r.send_proxy && <span className="text-2xs text-yellow-400/60 hidden sm:block">PROXY</span>}
                           </>
                         )}
+                        {sniActive && <span className="text-2xs text-green-400/60 hidden sm:block">SNI</span>}
                       </div>
-                      <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex items-center gap-1 shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
+                        <Tooltip label={t('haproxy_configs.clone_rule')}>
+                          <button onClick={e => { e.stopPropagation(); startCloneRule(r) }} className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors">
+                            <Copy className="w-4 h-4" />
+                          </button>
+                        </Tooltip>
                         <Tooltip label={t('common.delete')}>
                           <button onClick={e => { e.stopPropagation(); handleDeleteRule(r.name) }} className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors">
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </Tooltip>
                       </div>
                     </div>
                     <AnimatePresence>
                       {isEditing && (
-                        <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                        <motion.div key="edit" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
                           <div className="mt-1">
                             <RuleForm
-                              initial={editInitial}
+                              initial={ruleToForm(r)}
                               isEdit={true}
                               saving={ruleSaving}
                               onSave={handleUpdateRule}
                               onCancel={() => setEditingRules(prev => { const next = new Set(prev); next.delete(r.name); return next })}
                               profileId={profileId}
+                              profileOptions={detail.options}
+                              ipOwners={ipOwners}
+                              nodes={availableServers}
+                            />
+                          </div>
+                        </motion.div>
+                      )}
+                      {cloningRule === r.name && (
+                        <motion.div key="clone" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                          <div className="mt-1">
+                            <RuleForm
+                              initial={cloneRuleForm(r, rules.map(rule => rule.name))}
+                              isEdit={false}
+                              cloneOf={r.name}
+                              saving={ruleSaving}
+                              onSave={async form => { if (await handleAddRule(form)) setCloningRule(null) }}
+                              onCancel={() => setCloningRule(null)}
+                              profileId={profileId}
+                              profileOptions={detail.options}
+                              ipOwners={ipOwners}
+                              nodes={availableServers}
                             />
                           </div>
                         </motion.div>
@@ -1185,60 +1602,85 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                   return formatBitsPerSec(v)
                 }
                 const laPercent = m?.la1 != null && m?.cores ? (m.la1 / m.cores * 100) : null
+                const expanded = expandedServers.has(s.server_id)
+                const hasAddresses = s.listen_ips.length > 0 || s.source_ips.length > 0
                 return (
-                  <div key={s.server_id} className={`flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50 ${s.online ? '' : 'opacity-60'}`}>
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      {/* Сигнализатор сервера: живой / мёртвый */}
-                      <Tooltip label={s.online ? t('haproxy_configs.server_online') : t('haproxy_configs.server_offline')}>
-                        <span className="relative flex w-2.5 h-2.5 shrink-0">
-                          {s.online && <span className="absolute inline-flex w-full h-full rounded-full bg-green-400/60 animate-ping" />}
-                          <span className={`relative inline-flex w-2.5 h-2.5 rounded-full ${s.online ? 'bg-green-400' : 'bg-red-500'}`} />
-                        </span>
-                      </Tooltip>
-                      <span className="text-sm text-dark-200 truncate">{s.server_name}</span>
-                      {/* Состояние службы HAProxy на ноде */}
-                      {s.online && s.haproxy_running != null && (
-                        <Tooltip label={s.haproxy_running ? t('haproxy_configs.haproxy_running') : t('haproxy_configs.haproxy_stopped')}>
-                          <Activity className={`w-3.5 h-3.5 shrink-0 ${s.haproxy_running ? 'text-green-400/70' : 'text-red-400/70'}`} />
+                  <div key={s.server_id}>
+                    <div onClick={e => handleServerRowClick(e, s.server_id)}
+                      className={`flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50 hover:border-dark-700 cursor-pointer transition-colors ${s.online ? '' : 'opacity-60'}`}>
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Tooltip label={t('haproxy_configs.addresses_toggle')}>
+                          <button onClick={() => toggleServerExpanded(s.server_id)}
+                            className="-ml-1 p-1 rounded text-dark-500 hover:text-dark-200 transition-colors">
+                            {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                          </button>
                         </Tooltip>
-                      )}
-                      <SyncStatusBadge status={s.sync_status} online={s.online} />
-                    </div>
-                    <div className="flex items-center gap-3 shrink-0">
-                      {m && (() => {
-                        const pctColor = (v: number) => v < 50 ? 'text-green-400' : v < 80 ? 'text-yellow-400' : 'text-red-400'
-                        return (
-                          <div className="hidden sm:flex items-center gap-3 text-xs font-mono">
-                            {m.cpu != null && <span><span className="text-dark-500 mr-1">CPU</span><span className={pctColor(m.cpu)}>{m.cpu.toFixed(0)}%</span></span>}
-                            {m.ram != null && <span><span className="text-dark-500 mr-1">RAM</span><span className={pctColor(m.ram)}>{m.ram.toFixed(0)}%</span></span>}
-                            {laPercent != null && <span><span className="text-dark-500 mr-1">LA</span><span className={pctColor(laPercent)}>{m.la1!.toFixed(2)}</span></span>}
-                            {(m.net_rx != null || m.net_tx != null) && <span><span className="text-dark-500 mr-1">NET</span><span className="text-dark-200">↓{fmtSpeed(m.net_rx)} ↑{fmtSpeed(m.net_tx)}</span></span>}
-                          </div>
-                        )
-                      })()}
-                      <div className="flex items-center gap-1">
-                        {s.online && s.haproxy_running === false && (
-                          <Tooltip label={t('haproxy_configs.start_haproxy')}>
-                            <button onClick={() => handleStartHaproxy(s.server_id)} disabled={startingServerId === s.server_id}
-                              className="p-1.5 rounded-lg text-dark-400 hover:text-green-400 hover:bg-green-500/10 transition-colors disabled:opacity-50">
-                              {startingServerId === s.server_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                            </button>
+                        {/* Сигнализатор сервера: живой / мёртвый */}
+                        <Tooltip label={s.online ? t('haproxy_configs.server_online') : t('haproxy_configs.server_offline')}>
+                          <span className="relative flex w-2.5 h-2.5 shrink-0">
+                            {s.online && <span className="absolute inline-flex w-full h-full rounded-full bg-green-400/60 animate-ping" />}
+                            <span className={`relative inline-flex w-2.5 h-2.5 rounded-full ${s.online ? 'bg-green-400' : 'bg-red-500'}`} />
+                          </span>
+                        </Tooltip>
+                        <span className="text-sm text-dark-200 truncate">{s.server_name}</span>
+                        {/* Состояние службы HAProxy на ноде */}
+                        {s.online && s.haproxy_running != null && (
+                          <Tooltip label={s.haproxy_running ? t('haproxy_configs.haproxy_running') : t('haproxy_configs.haproxy_stopped')}>
+                            <Activity className={`w-3.5 h-3.5 shrink-0 ${s.haproxy_running ? 'text-green-400/70' : 'text-red-400/70'}`} />
                           </Tooltip>
                         )}
-                        <Tooltip label={t('haproxy_configs.sync_server')}>
-                          <button onClick={() => handleSyncOne(s.server_id)} disabled={syncingServerId === s.server_id}
-                            className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors">
-                            {syncingServerId === s.server_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                          </button>
-                        </Tooltip>
-                        <Tooltip label={t('haproxy_configs.unlink_server')}>
-                          <button onClick={() => handleUnlinkServer(s.server_id)}
-                            className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors">
-                            <Unlink className="w-3.5 h-3.5" />
-                          </button>
-                        </Tooltip>
+                        <SyncStatusBadge status={s.sync_status} online={s.online} />
+                        {hasAddresses && (
+                          <span className="hidden md:inline text-xs font-mono text-dark-400 truncate">
+                            {s.listen_ips.length > 0 && `${t('haproxy_configs.addresses_in')} ${s.listen_ips.join(', ')}`}
+                            {s.listen_ips.length > 0 && s.source_ips.length > 0 && ' · '}
+                            {s.source_ips.length > 0 && `${t('haproxy_configs.addresses_out')} ${s.source_ips.join(', ')}`}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3 shrink-0">
+                        {m && (() => {
+                          const pctColor = (v: number) => v < 50 ? 'text-green-400' : v < 80 ? 'text-yellow-400' : 'text-red-400'
+                          return (
+                            <div className="hidden sm:flex items-center gap-3 text-xs font-mono">
+                              {m.cpu != null && <span><span className="text-dark-500 mr-1">CPU</span><span className={pctColor(m.cpu)}>{m.cpu.toFixed(0)}%</span></span>}
+                              {m.ram != null && <span><span className="text-dark-500 mr-1">RAM</span><span className={pctColor(m.ram)}>{m.ram.toFixed(0)}%</span></span>}
+                              {laPercent != null && <span><span className="text-dark-500 mr-1">LA</span><span className={pctColor(laPercent)}>{m.la1!.toFixed(2)}</span></span>}
+                              {(m.net_rx != null || m.net_tx != null) && <span><span className="text-dark-500 mr-1">NET</span><span className="text-dark-200">↓{fmtSpeed(m.net_rx)} ↑{fmtSpeed(m.net_tx)}</span></span>}
+                            </div>
+                          )
+                        })()}
+                        <div className="flex items-center gap-1">
+                          {s.online && s.haproxy_running === false && (
+                            <Tooltip label={t('haproxy_configs.start_haproxy')}>
+                              <button onClick={() => handleStartHaproxy(s.server_id)} disabled={startingServerId === s.server_id}
+                                className="p-1.5 rounded-lg text-dark-400 hover:text-green-400 hover:bg-green-500/10 transition-colors disabled:opacity-50">
+                                {startingServerId === s.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                              </button>
+                            </Tooltip>
+                          )}
+                          <Tooltip label={t('haproxy_configs.sync_server')}>
+                            <button onClick={() => handleSyncOne(s.server_id)} disabled={syncingServerId === s.server_id}
+                              className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors">
+                              {syncingServerId === s.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                            </button>
+                          </Tooltip>
+                          <Tooltip label={t('haproxy_configs.unlink_server')}>
+                            <button onClick={() => handleUnlinkServer(s.server_id)}
+                              className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors">
+                              <Unlink className="w-4 h-4" />
+                            </button>
+                          </Tooltip>
+                        </div>
                       </div>
                     </div>
+                    <AnimatePresence initial={false}>
+                      {expanded && (
+                        <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                          <ServerAddressesEditor profileId={profileId} server={s} onSaved={handleAddressesSaved} />
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
                 )
               })}
@@ -1259,7 +1701,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                     {syncLog.map(entry => (
                       <div key={entry.id} className="flex items-center justify-between text-xs px-2 py-1.5 rounded bg-dark-800/50">
                         <div className="flex items-center gap-2 min-w-0">
-                          {entry.status === 'success' ? <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" /> : <XCircle className="w-3 h-3 text-red-400 shrink-0" />}
+                          {entry.status === 'success' ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" /> : <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />}
                           <span className="text-dark-300 truncate">{entry.server_name}</span>
                           {entry.message && <span className="text-dark-500 truncate hidden sm:block">— {entry.message}</span>}
                         </div>
@@ -1346,7 +1788,7 @@ export default function HAProxyConfigs() {
   const { t } = useTranslation()
   const [profiles, setProfiles] = useState<HAProxyConfigProfile[]>([])
   const [loading, setLoading] = useState(true)
-  const [expandedId, setExpandedId] = useState<number | null>(null)
+  const { openIds, close: collapseProfile, toggle: toggleProfile } = useOpenIds<number>('haproxy-configs.open')
   const [modalProfile, setModalProfile] = useState<HAProxyConfigProfile | null | 'new'>(null)
 
   const initialLoadDone = useRef(false)
@@ -1379,8 +1821,6 @@ export default function HAProxyConfigs() {
     return () => clearInterval(id)
   }, [fetchProfiles])
 
-  const handleExpand = (id: number) => setExpandedId(prev => prev === id ? null : id)
-
   const handleDragEnd = async ({ active, over }: DragEndEvent) => {
     if (!over || active.id === over.id) return
     const oldIndex = profiles.findIndex(p => p.id === active.id)
@@ -1403,7 +1843,7 @@ export default function HAProxyConfigs() {
     try {
       await haproxyProfilesApi.deleteProfile(id)
       toast.success(t('haproxy_configs.profile_deleted'))
-      if (expandedId === id) setExpandedId(null)
+      collapseProfile(id)
       await fetchProfiles()
     } catch { toast.error(t('haproxy_configs.delete_error')) }
   }
@@ -1450,9 +1890,9 @@ export default function HAProxyConfigs() {
                   <SortableProfileItem key={p.id} profileId={p.id}>
                     {dragHandle => (
                       <>
-                        <ProfileCard profile={p} expanded={expandedId === p.id} dragHandle={dragHandle} onExpand={handleExpand} onEdit={setModalProfile} onDelete={handleDelete} />
+                        <ProfileCard profile={p} expanded={openIds.includes(p.id)} dragHandle={dragHandle} onExpand={toggleProfile} onEdit={setModalProfile} onDelete={handleDelete} />
                         <AnimatePresence>
-                          {expandedId === p.id && <ProfileDetailPanel profileId={p.id} onRefreshList={fetchProfiles} />}
+                          {openIds.includes(p.id) && <ProfileDetailPanel profileId={p.id} onRefreshList={fetchProfiles} />}
                         </AnimatePresence>
                       </>
                     )}

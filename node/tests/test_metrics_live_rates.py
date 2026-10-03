@@ -152,6 +152,14 @@ class ResponseModelTests(unittest.TestCase):
 
         self.assertEqual(serialized["window"], WINDOW_BLOCK)
 
+    def test_loss_probe_survives_the_response_model(self):
+        from app.models.metrics import AllMetrics
+
+        entry = {"ip": "10.0.0.5", "port": 443, "loss_pct": 40.0, "rtt_ms": 45.0, "samples": 60}
+        serialized = AllMetrics.model_validate({**MINIMAL_PAYLOAD, "loss_probe": [entry]}).model_dump()
+
+        self.assertEqual(serialized["loss_probe"], [entry])
+
     def test_window_is_null_unless_requested(self):
         from app.models.metrics import AllMetrics
 

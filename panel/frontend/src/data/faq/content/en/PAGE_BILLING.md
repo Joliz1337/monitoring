@@ -6,7 +6,7 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 
 | Type | How the deadline is derived |
 |---|---|
-| Monthly | You set the paid-until date or the number of paid days |
+| Monthly | You set the paid-until date or the number of paid days. Optionally add the monthly price, and the server counts toward monthly spend |
 | Resource | There's a balance and a daily cost — the panel works out how long it lasts |
 | Cloud | Balance and remaining time come from the provider's API: Yandex Cloud, Selectel or Timeweb Cloud |
 
@@ -26,6 +26,8 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 - **Timeweb Cloud** — an API token from the “API & Terraform” section of the Timeweb Cloud panel.
 
 Keys are stored encrypted and never returned to the interface: the field in the edit form stays empty — leave it empty to keep the current key.
+
+If the provider API is unreachable from the panel's address, or accounts shouldn't reach the provider from the same IP, a cloud project can use a SOCKS5 proxy in the `ip:port` or `ip:port@login:pass` format. All panel requests for that project go through it. If the proxy is down, the error on the card says so: “via proxy ip:port”.
 
 ## Good to know
 

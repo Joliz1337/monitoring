@@ -4,6 +4,7 @@ import { Monitor, Search, Server, ChevronDown, Folder, FolderOpen } from 'lucide
 import type { ServerWithMetrics } from '../../api/client'
 import { Checkbox } from '../ui/Checkbox'
 import { nodeAllows } from '../../utils/nodeCapabilities'
+import { writeStorage } from '../../utils/storage'
 
 const NO_FOLDER = '__no_folder__'
 const EXPANDED_KEY = 'xray_test_expanded_folders'
@@ -75,11 +76,7 @@ export function LocationPicker({ servers, value, onChange }: Props) {
       const next = new Set(prev)
       if (next.has(name)) next.delete(name)
       else next.add(name)
-      try {
-        localStorage.setItem(EXPANDED_KEY, JSON.stringify([...next]))
-      } catch {
-        // приватный режим — просто не запомним раскрытые папки
-      }
+      writeStorage(EXPANDED_KEY, JSON.stringify([...next]))
       return next
     })
   }
@@ -154,7 +151,7 @@ export function LocationPicker({ servers, value, onChange }: Props) {
                           ? <FolderOpen className="w-4 h-4" />
                           : <Folder className="w-4 h-4" />}
                         {folder}
-                        <span className="text-dark-600">({list.length})</span>
+                        <span className="text-dark-500">({list.length})</span>
                         <ChevronDown
                           className={`w-3.5 h-3.5 transition-transform ${isOpen ? '' : '-rotate-90'}`}
                         />

@@ -38,6 +38,24 @@ MAXCONN_MAX = 500000
 # поэтому размер ступенчатый от RAM, а не константа.
 PIPESIZE_RAM_TIERS_MB = ((4096, 262144), (2048, 131072))
 
+# silent-drop без rst-ttl закрывает соединение через TCP_REPAIR: в сеть не уходит
+# ни FIN, ни RST, и conntrack ноды держит запись ESTABLISHED весь таймаут (час на
+# vpn-профиле). Фильтр SNI бросает так сканеры — сотня в секунду забивала таблицу
+# до отказа в новых соединениях. С rst-ttl ядро шлёт RST: conntrack закрывает по
+# нему запись, а наружу RST не выпускает правило в mangle OUTPUT — хук conntrack
+# в ядре стоит раньше mangle. Для сканера это та же тишина, что и с TCP_REPAIR.
+# mangle, а не filter: `ufw reset` из профилей фаервола чистит только filter.
+SILENT_DROP_RST_TTL = 1
+MIN_HAPROXY_VERSION_RST_TTL = (2, 7)
+SILENT_DROP_GUARD_MATCH = f"-p tcp --tcp-flags RST RST -m ttl --ttl-eq {SILENT_DROP_RST_TTL} -j DROP"
+XTABLES_LOCK_WAIT_SEC = 5
+_SILENT_DROP_WITHOUT_TTL = re.compile(
+    r"^([ \t]*(?:tcp-request|http-request|http-response)\s[^#\n]*?\bsilent-drop\b)(?![ \t]+rst-ttl\b)",
+    re.MULTILINE,
+)
+_HAPROXY_VERSION = re.compile(r"version (\d+\.\d+\S*)")
+_HAPROXY_BRANCH = re.compile(r"(\d+)\.(\d+)")
+
 OPENSSL_TIMEOUT_SEC = 10
 CERTBOT_ISSUE_TIMEOUT_SEC = 120
 CERTBOT_RENEW_TIMEOUT_SEC = 300
@@ -288,6 +306,58 @@ class HAProxyManager:
             return content
         insert_pos = global_match.start(1)
         return content[:insert_pos] + f"    {line}\n" + content[insert_pos:]
+
+    def installed_version(self) -> Optional[str]:
+        """Версия из `haproxy -v` целиком, например 2.8.16-0ubuntu0.24.04.3."""
+        result = self._executor.execute_sync("haproxy -v", timeout=10)
+        match = _HAPROXY_VERSION.search(result.stdout or "") if result.success else None
+        return match.group(1) if match else None
+
+    def _haproxy_version(self) -> Optional[tuple[int, int]]:
+        match = _HAPROXY_BRANCH.match(self.installed_version() or "")
+        return (int(match.group(1)), int(match.group(2))) if match else None
+
+    def _add_silent_drop_rst_ttl(self, content: str) -> str:
+        """Дописывает rst-ttl к silent-drop, если здешний HAProxy его понимает.
+
+        Профиль один на серверы с разными версиями HAProxy, а с rst-ttl конфиг
+        на версии до 2.7 не прошёл бы проверку — поэтому решает нода."""
+        if not _SILENT_DROP_WITHOUT_TTL.search(content):
+            return content
+        version = self._haproxy_version()
+        if version is None or version < MIN_HAPROXY_VERSION_RST_TTL:
+            logger.warning(
+                "HAProxy %s has no silent-drop rst-ttl: dropped connections stay in conntrack until timeout",
+                ".".join(map(str, version)) if version else "(version unknown)",
+            )
+            return content
+        return _SILENT_DROP_WITHOUT_TTL.sub(rf"\1 rst-ttl {SILENT_DROP_RST_TTL}", content)
+
+    def _sync_silent_drop_guard(self, content: str) -> None:
+        """Правило в mangle OUTPUT стоит, пока в конфиге есть silent-drop с rst-ttl."""
+        needed = f"silent-drop rst-ttl {SILENT_DROP_RST_TTL}" in content
+        iptables = f"iptables -w {XTABLES_LOCK_WAIT_SEC} -t mangle"
+        exists = self._executor.execute_sync(f"{iptables} -C OUTPUT {SILENT_DROP_GUARD_MATCH}", timeout=10).success
+        if needed == exists:
+            return
+        verb = "-I" if needed else "-D"
+        result = self._executor.execute_sync(f"{iptables} {verb} OUTPUT {SILENT_DROP_GUARD_MATCH}", timeout=10)
+        if result.success:
+            logger.info("Silent-drop RST guard %s", "installed" if needed else "removed")
+        else:
+            logger.error("Silent-drop RST guard %s failed: %s", verb, result.stderr or result.stdout)
+
+    def restore_silent_drop_guard(self) -> None:
+        """Старт агента: правило в mangle не переживает перезагрузку, а конфиг,
+        записанный до обновления ноды, получает rst-ttl без пересинхронизации из панели."""
+        current = self._read_config()
+        hardened = self._add_silent_drop_rst_ttl(current)
+        if hardened == current:
+            self._sync_silent_drop_guard(current)
+            return
+        success, message, _ = self.apply_config(hardened)
+        log = logger.info if success else logger.error
+        log("Silent-drop rst-ttl applied to existing config: %s", message)
 
     def _generate_base_config(self) -> str:
         """Generate base HAProxy config for high-speed TCP relay"""
@@ -919,7 +989,8 @@ resolvers mydns
         frontends = {}
         for match in frontend_pattern.finditer(content):
             rule_type, name, block = match.groups()
-            port_match = re.search(r'bind\s+\*:(\d+)', block)
+            # Панель может привязать правило к IP сервера: `bind 1.1.1.1:443,1.1.1.2:443`
+            port_match = re.search(r'^\s*bind\s+[^\s:,]*:(\d+)', block, re.MULTILINE)
             cert_match = re.search(r'ssl\s+crt\s+/etc/letsencrypt/live/([^/]+)/combined\.pem', block) if rule_type == "https" else None
             bind_line_match = re.search(r'^\s*bind\s+.+$', block, re.MULTILINE)
             accept_proxy = bool(bind_line_match and 'accept-proxy' in bind_line_match.group(0))
@@ -1321,6 +1392,7 @@ backend {backend_name}
                 config_content = self._ensure_global_maxconn(config_content)
                 config_content = self._ensure_global_pipesize(config_content)
                 config_content = cpu_affinity.apply(config_content, psutil.cpu_count() or 1)
+                config_content = self._add_silent_drop_rst_ttl(config_content)
                 self._write_config(config_content)
             except Exception as e:
                 rollback()
@@ -1331,6 +1403,9 @@ backend {backend_name}
             if not is_valid:
                 rollback()
                 return False, f"Config validation failed: {error}", False
+
+            # До reload: иначе новые воркеры успели бы выпустить RST наружу
+            self._sync_silent_drop_guard(config_content)
 
             if not reload_after:
                 return True, "Config applied (reload skipped)", False

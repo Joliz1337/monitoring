@@ -37,9 +37,11 @@ import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatUptime } from '../utils/format'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useModuleEnabled } from '../hooks/useModuleEnabled'
+import { useOpenIds } from '../hooks/useOpenIds'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
 import CachedDataBanner from '../components/ui/CachedDataBanner'
 import { Tooltip } from '../components/ui/Tooltip'
+import LossProbeBadge from '../components/ui/LossProbeBadge'
 import { FAQIcon } from '../components/FAQ'
 
 // Статусы show stat с суффиксами вида "UP 1/3" — сравниваем по префиксу
@@ -106,8 +108,7 @@ export default function HAProxy() {
   const [renewLog, setRenewLog] = useState<{ domain: string; success: boolean; message: string; log?: string } | null>(null)
   const [renewLogExpanded, setRenewLogExpanded] = useState(false)
   
-  // Certificate details expanded state
-  const [expandedCert, setExpandedCert] = useState<string | null>(null)
+  const { openIds: expandedCerts, toggle: toggleCertExpanded } = useOpenIds<string>('haproxy.open-certs')
   
   // Config editor states
   const [showConfigModal, setShowConfigModal] = useState(false)
@@ -791,7 +792,7 @@ export default function HAProxy() {
     return (
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
         <div className="flex items-center gap-4 mb-6">
-          <div className="p-2.5"><ArrowLeft className="w-5 h-5 text-dark-600" /></div>
+          <div className="p-2.5"><ArrowLeft className="w-5 h-5 text-dark-500" /></div>
           <div className="flex-1 space-y-2">
             <div className="h-6 w-48 bg-dark-700/50 rounded-lg animate-pulse" />
             <div className="h-4 w-32 bg-dark-700/30 rounded-lg animate-pulse" />
@@ -1161,10 +1162,10 @@ export default function HAProxy() {
                       : stats.message || t('haproxy.stats_unavailable')}
                   </p>
                   {stats.reason === 'socket_not_configured' && (
-                    <p className="text-sm mt-2 text-dark-600">{t('haproxy.stats_socket_not_configured_hint')}</p>
+                    <p className="text-sm mt-2 text-dark-500">{t('haproxy.stats_socket_not_configured_hint')}</p>
                   )}
                   {stats.reason === 'socket_unavailable' && (
-                    <p className="text-sm mt-2 text-dark-600">{t('haproxy.stats_socket_unavailable_hint')}</p>
+                    <p className="text-sm mt-2 text-dark-500">{t('haproxy.stats_socket_unavailable_hint')}</p>
                   )}
                 </div>
               ) : statsGroups.length === 0 ? (
@@ -1202,6 +1203,7 @@ export default function HAProxy() {
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_server')}</th>
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_status')}</th>
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_check')}</th>
+                                <th className="px-4 py-2 font-medium">{t('loss_probe.column')}</th>
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_sessions')}</th>
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_rate')}</th>
                                 <th className="px-4 py-2 font-medium">{t('haproxy.stats_col_in')}</th>
@@ -1218,7 +1220,7 @@ export default function HAProxy() {
                                       {row.kind === 'backend' ? t('haproxy.stats_backend_total') : row.name}
                                     </span>
                                     {row.backup && (
-                                      <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-warning/10 text-warning border border-warning/20">
+                                      <span className="ml-2 px-1.5 py-0.5 rounded text-2xs font-medium bg-warning/10 text-warning border border-warning/20">
                                         {t('haproxy.stats_backup_badge')}
                                       </span>
                                     )}
@@ -1230,6 +1232,9 @@ export default function HAProxy() {
                                     </span>
                                   </td>
                                   <td className="px-4 py-2 text-xs text-dark-400">{row.check_status || '—'}</td>
+                                  <td className="px-4 py-2">
+                                    {row.kind === 'server' && <LossProbeBadge probe={row.probe} />}
+                                  </td>
                                   <td className="px-4 py-2 text-dark-200">
                                     {row.scur}<span className="text-dark-500"> / {row.smax}</span>
                                   </td>
@@ -1342,7 +1347,7 @@ export default function HAProxy() {
                             <p className="text-sm text-dark-500 font-mono">
                               :{rule.listen_port} → {rule.target_ip}:{rule.target_port}
                               {rule.cert_domain && (
-                                <span className="text-dark-600"> ({rule.cert_domain})</span>
+                                <span className="text-dark-500"> ({rule.cert_domain})</span>
                               )}
                             </p>
                           </div>
@@ -1500,7 +1505,7 @@ export default function HAProxy() {
                                 whileHover={{ scale: 1.05 }}
                                 whileTap={{ scale: 0.95 }}
                               >
-                                {certErrorExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                                {certErrorExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                                 {certErrorExpanded ? t('common.hide') : t('common.details')}
                               </motion.button>
                             )}
@@ -1667,7 +1672,7 @@ export default function HAProxy() {
                     const cert = certDetails[domain]
                     const isExpiringSoon = cert && cert.days_left < 30
                     const isExpired = cert && cert.expired
-                    const isExpanded = expandedCert === domain
+                    const isExpanded = expandedCerts.includes(domain)
                     
                     const copyToClipboard = (text: string) => {
                       navigator.clipboard.writeText(text)
@@ -1684,7 +1689,7 @@ export default function HAProxy() {
                       >
                         <div 
                           className="flex items-center justify-between p-4 cursor-pointer"
-                          onClick={() => setExpandedCert(isExpanded ? null : domain)}
+                          onClick={() => toggleCertExpanded(domain)}
                         >
                           <div className="flex items-center gap-4">
                             <motion.div 
@@ -1711,7 +1716,7 @@ export default function HAProxy() {
                                 <p className="text-sm text-dark-500">
                                   {t('haproxy.expires')}: {new Date(cert.expiry_date).toLocaleDateString()}
                                   {cert.source && (
-                                    <span className="ml-2 text-dark-600">
+                                    <span className="ml-2 text-dark-500">
                                       ({cert.source === 'letsencrypt' ? t('haproxy.letsencrypt') : t('haproxy.custom')})
                                     </span>
                                   )}
@@ -1804,7 +1809,7 @@ export default function HAProxy() {
                                     <Tooltip label={t('common.copy')}>
                                       <motion.button
                                         onClick={() => copyToClipboard(cert.files!.pem!)}
-                                        className="p-1.5 hover:bg-dark-700 rounded text-dark-500 hover:text-dark-300 opacity-0 group-hover/file:opacity-100 transition-opacity"
+                                        className="p-1.5 hover:bg-dark-700 rounded text-dark-500 hover:text-dark-300 opacity-60 group-hover/file:opacity-100 transition-opacity"
                                         whileHover={{ scale: 1.1 }}
                                         whileTap={{ scale: 0.9 }}
                                       >
@@ -1823,7 +1828,7 @@ export default function HAProxy() {
                                     <Tooltip label={t('common.copy')}>
                                       <motion.button
                                         onClick={() => copyToClipboard(cert.files!.key!)}
-                                        className="p-1.5 hover:bg-dark-700 rounded text-dark-500 hover:text-dark-300 opacity-0 group-hover/file:opacity-100 transition-opacity"
+                                        className="p-1.5 hover:bg-dark-700 rounded text-dark-500 hover:text-dark-300 opacity-60 group-hover/file:opacity-100 transition-opacity"
                                         whileHover={{ scale: 1.1 }}
                                         whileTap={{ scale: 0.9 }}
                                       >
@@ -1842,7 +1847,7 @@ export default function HAProxy() {
                                     <Tooltip label={t('common.copy')}>
                                       <motion.button
                                         onClick={() => copyToClipboard(cert.files!.fullchain!)}
-                                        className="p-1.5 hover:bg-dark-700 rounded text-dark-500 hover:text-dark-300 opacity-0 group-hover/file:opacity-100 transition-opacity"
+                                        className="p-1.5 hover:bg-dark-700 rounded text-dark-500 hover:text-dark-300 opacity-60 group-hover/file:opacity-100 transition-opacity"
                                         whileHover={{ scale: 1.1 }}
                                         whileTap={{ scale: 0.9 }}
                                       >
@@ -1861,7 +1866,7 @@ export default function HAProxy() {
                                     <Tooltip label={t('common.copy')}>
                                       <motion.button
                                         onClick={() => copyToClipboard(cert.files!.cert!)}
-                                        className="p-1.5 hover:bg-dark-700 rounded text-dark-500 hover:text-dark-300 opacity-0 group-hover/file:opacity-100 transition-opacity"
+                                        className="p-1.5 hover:bg-dark-700 rounded text-dark-500 hover:text-dark-300 opacity-60 group-hover/file:opacity-100 transition-opacity"
                                         whileHover={{ scale: 1.1 }}
                                         whileTap={{ scale: 0.9 }}
                                       >
@@ -1880,7 +1885,7 @@ export default function HAProxy() {
                                     <Tooltip label={t('common.copy')}>
                                       <motion.button
                                         onClick={() => copyToClipboard(cert.files!.chain!)}
-                                        className="p-1.5 hover:bg-dark-700 rounded text-dark-500 hover:text-dark-300 opacity-0 group-hover/file:opacity-100 transition-opacity"
+                                        className="p-1.5 hover:bg-dark-700 rounded text-dark-500 hover:text-dark-300 opacity-60 group-hover/file:opacity-100 transition-opacity"
                                         whileHover={{ scale: 1.1 }}
                                         whileTap={{ scale: 0.9 }}
                                       >
@@ -1933,7 +1938,7 @@ export default function HAProxy() {
                             whileHover={{ scale: 1.05 }}
                             whileTap={{ scale: 0.95 }}
                           >
-                            {renewLogExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                            {renewLogExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                             {renewLogExpanded ? t('firewall.hide') : t('firewall.details')}
                           </motion.button>
                         )}
@@ -1944,7 +1949,7 @@ export default function HAProxy() {
                           }`}
                           whileHover={{ scale: 1.1 }}
                         >
-                          <X className="w-3 h-3" />
+                          <X className="w-3.5 h-3.5" />
                         </motion.button>
                       </div>
                     </div>
@@ -2179,7 +2184,7 @@ export default function HAProxy() {
                             whileHover={{ scale: 1.05 }}
                             whileTap={{ scale: 0.95 }}
                           >
-                            {firewallErrorExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                            {firewallErrorExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                             {firewallErrorExpanded ? t('common.hide') : t('common.details')}
                           </motion.button>
                         )}
@@ -2191,7 +2196,7 @@ export default function HAProxy() {
                           className="p-1 hover:bg-danger/20 rounded transition-colors"
                           whileHover={{ scale: 1.1 }}
                         >
-                          <X className="w-3 h-3" />
+                          <X className="w-3.5 h-3.5" />
                         </motion.button>
                       </div>
                     </div>
@@ -2262,7 +2267,7 @@ export default function HAProxy() {
                                 whileHover={{ scale: 1.05 }}
                                 whileTap={{ scale: 0.95 }}
                               >
-                                {firewallErrorExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                                {firewallErrorExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                                 {firewallErrorExpanded ? t('firewall.hide') : t('firewall.details')}
                               </motion.button>
                             )}

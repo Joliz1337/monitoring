@@ -211,7 +211,7 @@ function CoreCard({ info, arch, onChanged }: {
                   <>
                     {!release.installed && release.available && (
                       <button
-                        className="text-dark-400 hover:text-accent-400 p-1"
+                        className="text-dark-400 hover:text-accent-400 p-1.5"
                         title={t('xray_test.download')}
                         onClick={event => { event.stopPropagation(); download(release.version) }}
                         disabled={busy !== null}
@@ -223,7 +223,7 @@ function CoreCard({ info, arch, onChanged }: {
                     )}
                     {release.installed && (
                       <button
-                        className="text-dark-500 hover:text-red-400 p-1"
+                        className="text-dark-500 hover:text-red-400 p-1.5"
                         title={t('xray_test.remove_version')}
                         onClick={event => { event.stopPropagation(); remove(release.version) }}
                         disabled={busy !== null}

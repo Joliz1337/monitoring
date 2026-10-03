@@ -1,7 +1,7 @@
 """Pydantic-схемы управления дополнительными IP-адресами интерфейса."""
 
 import ipaddress
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -14,6 +14,7 @@ MIN_ROLLBACK_TIMEOUT_SEC = 30
 MAX_ROLLBACK_TIMEOUT_SEC = 600
 
 AddressFamily = Literal["ipv4", "ipv6"]
+IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
 TransactionStatus = Literal["applying", "pending", "confirmed", "rolled_back", "failed"]
 BackendName = Literal["netplan", "networkd", "networkmanager", "ifupdown", "fallback"]
 
@@ -21,6 +22,8 @@ BackendName = Literal["netplan", "networkd", "networkmanager", "ifupdown", "fall
 class AddressSpec(BaseModel):
     address: str
     prefix: int = Field(..., ge=0, le=128)
+    # Свой шлюз адреса: хостер выдал адрес из другой сети. None — как у основного
+    gateway: Optional[str] = Field(None, max_length=64)
 
     @model_validator(mode="after")
     def _normalize(self) -> "AddressSpec":
@@ -32,6 +35,10 @@ class AddressSpec(BaseModel):
         if ip.is_multicast or ip.is_loopback or ip.is_unspecified or ip.is_link_local or ip.is_reserved:
             raise ValueError(f"'{ip}' cannot be assigned to an interface")
         self.address = str(ip)
+        if self.gateway:
+            self.gateway = _normalize_gateway(self.gateway, ip)
+        else:
+            self.gateway = None
         return self
 
     @property
@@ -46,7 +53,10 @@ class AddressSpec(BaseModel):
 class NetworkApplyRequest(BaseModel):
     interface: str = Field(..., pattern=INTERFACE_PATTERN)
     add: list[AddressSpec] = Field(default_factory=list)
+    # Свои адреса удаляются из конфига, адреса хостера — снимаются поверх него
     remove: list[AddressSpec] = Field(default_factory=list)
+    # Снятые раньше адреса хостера, которые вернуть на интерфейс
+    restore: list[AddressSpec] = Field(default_factory=list)
     # Адреса, по которым панель ходит на ноду: удалять их нельзя ни при каких условиях
     protected: list[str] = Field(default_factory=list)
     rollback_timeout_sec: int = Field(
@@ -57,15 +67,38 @@ class NetworkApplyRequest(BaseModel):
     def _check_sets(self) -> "NetworkApplyRequest":
         self.add = _dedupe(self.add)
         self.remove = _dedupe(self.remove)
-        if not self.add and not self.remove:
-            raise ValueError("nothing to apply: both add and remove are empty")
-        if len(self.add) + len(self.remove) > MAX_ADDRESSES_PER_TRANSACTION:
+        self.restore = _dedupe(self.restore)
+        if not self.add and not self.remove and not self.restore:
+            raise ValueError("nothing to apply: add, remove and restore are empty")
+        if len(self.add) + len(self.remove) + len(self.restore) > MAX_ADDRESSES_PER_TRANSACTION:
             raise ValueError(f"at most {MAX_ADDRESSES_PER_TRANSACTION} addresses per transaction")
-        overlap = {spec.cidr for spec in self.add} & {spec.cidr for spec in self.remove}
+        appearing = {spec.cidr for spec in self.add} | {spec.cidr for spec in self.restore}
+        overlap = appearing & {spec.cidr for spec in self.remove}
         if overlap:
             raise ValueError(f"addresses both added and removed: {', '.join(sorted(overlap))}")
+        if any(spec.gateway for spec in self.restore):
+            raise ValueError("a restored hoster address keeps the hoster routing and cannot take a gateway")
+        added = {spec.address for spec in self.add}
+        looped = sorted({spec.gateway for spec in self.add if spec.gateway in added})
+        if looped:
+            raise ValueError(f"gateway is one of the added addresses: {', '.join(looped)}")
         self.protected = [ip for ip in self.protected if _is_ip(ip)]
         return self
+
+
+def _normalize_gateway(value: str, address: IPAddress) -> str:
+    """Link-local шлюз разрешён: у IPv6 он обычное дело (`fe80::1` у Hetzner)."""
+    try:
+        gateway = ipaddress.ip_address(value.strip())
+    except ValueError:
+        raise ValueError(f"gateway '{value}' is not an IP address")
+    if gateway.version != address.version:
+        raise ValueError(f"gateway {gateway} and address {address} are of different families")
+    if gateway.is_multicast or gateway.is_loopback or gateway.is_unspecified or gateway.is_reserved:
+        raise ValueError(f"'{gateway}' cannot be a gateway")
+    if gateway == address:
+        raise ValueError(f"{address} cannot be its own gateway")
+    return str(gateway)
 
 
 def _dedupe(specs: list[AddressSpec]) -> list[AddressSpec]:
@@ -98,6 +131,7 @@ class LiveAddress(BaseModel):
     managed: bool
     primary: bool
     dynamic: bool
+    gateway: Optional[str] = None
 
 
 class InterfaceState(BaseModel):
@@ -109,6 +143,14 @@ class InterfaceState(BaseModel):
 
 
 class ManagedAddress(BaseModel):
+    interface: str
+    address: str
+    prefix: int
+    gateway: Optional[str] = None
+
+
+class SuppressedAddress(BaseModel):
+    """Адрес хостера, снятый панелью: в конфиге хостера он остаётся."""
     interface: str
     address: str
     prefix: int
@@ -134,8 +176,11 @@ class NetworkStateResponse(BaseModel):
     backend: Optional[BackendName] = None
     backend_detail: str = ""
     default_interface: Optional[str] = None
+    # family → шлюз default-маршрута: адрес с таким же шлюзом своих маршрутов не получает
+    default_gateway: dict[AddressFamily, str] = Field(default_factory=dict)
     interfaces: list[InterfaceState]
     managed: list[ManagedAddress]
+    suppressed: list[SuppressedAddress] = Field(default_factory=list)
     transaction: Optional[TransactionInfo]
     history: list[TransactionInfo]
     rollback_timeout_sec: int = DEFAULT_ROLLBACK_TIMEOUT_SEC

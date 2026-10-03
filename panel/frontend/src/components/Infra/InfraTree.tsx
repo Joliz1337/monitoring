@@ -7,8 +7,10 @@ import { useInfraStore } from '../../stores/infraStore'
 import { useServersStore } from '../../stores/serversStore'
 import AccountNode from './AccountNode'
 import InfraServerRow from './InfraServerRow'
+import { readStorage, writeStorage } from '../../utils/storage'
 
 const COLLAPSED_KEY = 'infra_collapsed'
+const UNASSIGNED_OPEN_KEY = 'infra_unassigned_open'
 
 function loadCollapsed(): Set<string> {
   try {
@@ -18,22 +20,31 @@ function loadCollapsed(): Set<string> {
 }
 
 function saveCollapsed(set: Set<string>) {
-  localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set]))
+  writeStorage(COLLAPSED_KEY, JSON.stringify([...set]))
 }
 
 export default function InfraTree() {
   const { t } = useTranslation()
-  const { tree, isLoading, fetchTree, createAccount, updateAccount, deleteAccount, createProject, updateProject, deleteProject, addServerToProject, removeServerFromProject } = useInfraStore()
+  const {
+    tree, isLoading, fetchTree,
+    createAccount, updateAccount, deleteAccount,
+    createProject, updateProject, deleteProject,
+    addServerToProject, removeServerFromProject,
+    addServerToAccount, removeServerFromAccount,
+  } = useInfraStore()
   const servers = useServersStore(s => s.servers)
 
   const [collapsed, setCollapsed] = useState(loadCollapsed)
   const [showAddAccount, setShowAddAccount] = useState(false)
   const [newAccountName, setNewAccountName] = useState('')
-  const [treeVisible, setTreeVisible] = useState(() => localStorage.getItem('infra_visible') !== 'false')
+  const [treeVisible, setTreeVisible] = useState(() => readStorage('infra_visible') !== 'false')
+  const [unassignedOpen, setUnassignedOpen] = useState(() => readStorage(UNASSIGNED_OPEN_KEY) === 'true')
 
   useEffect(() => { fetchTree() }, [fetchTree])
 
-  useEffect(() => { localStorage.setItem('infra_visible', String(treeVisible)) }, [treeVisible])
+  useEffect(() => { writeStorage('infra_visible', String(treeVisible)) }, [treeVisible])
+
+  useEffect(() => { writeStorage(UNASSIGNED_OPEN_KEY, String(unassignedOpen)) }, [unassignedOpen])
 
   const toggle = useCallback((key: string) => {
     setCollapsed(prev => {
@@ -54,6 +65,7 @@ export default function InfraTree() {
     if (!tree) return new Set<number>()
     const set = new Set<number>()
     for (const acc of tree.accounts) {
+      for (const sid of acc.server_ids) set.add(sid)
       for (const proj of acc.projects) {
         for (const sid of proj.server_ids) set.add(sid)
       }
@@ -80,7 +92,7 @@ export default function InfraTree() {
       <div className="flex items-center gap-3 mb-3">
         <button
           onClick={() => setTreeVisible(!treeVisible)}
-          className="flex items-center gap-2 text-dark-300 hover:text-dark-100 transition-colors"
+          className="flex flex-1 items-center gap-2 self-stretch text-dark-300 hover:text-dark-100 transition-colors"
         >
           {treeVisible ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
           <Network className="w-4 h-4" />
@@ -90,7 +102,7 @@ export default function InfraTree() {
         {treeVisible && (
           <button
             onClick={() => { setNewAccountName(''); setShowAddAccount(true) }}
-            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-dark-800 border border-dark-600 hover:border-primary/40 text-dark-300 hover:text-primary transition-all"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-dark-800 border border-dark-600 hover:border-primary/40 text-dark-300 hover:text-primary transition-all"
           >
             <Plus className="w-3.5 h-3.5" />
             {t('infra.add_account')}
@@ -149,22 +161,38 @@ export default function InfraTree() {
                 onDeleteProject={(pid) => deleteProject(pid)}
                 onAddServer={(pid, sid) => addServerToProject(pid, sid)}
                 onRemoveServer={(pid, sid) => removeServerFromProject(pid, sid)}
+                onAddAccountServer={(sid) => addServerToAccount(acc.id, sid)}
+                onRemoveAccountServer={(sid) => removeServerFromAccount(acc.id, sid)}
               />
             ))}
 
             {/* Unassigned servers */}
             {tree && tree.unassigned_server_ids.length > 0 && (
               <div className="mt-2 pt-2 border-t border-dark-700/50">
-                <div className="flex items-center gap-2 px-2 py-1.5 text-dark-400">
-                  <ServerIcon className="w-4 h-4" />
-                  <span className="text-xs font-medium">{t('infra.unassigned')}</span>
-                  <span className="text-xs text-dark-500">{tree.unassigned_server_ids.length}</span>
-                </div>
-                {tree.unassigned_server_ids.map(sid => {
-                  const srv = serverMap.get(sid)
-                  if (!srv) return null
-                  return <InfraServerRow key={sid} server={srv} />
-                })}
+                <button
+                  onClick={() => setUnassignedOpen(!unassignedOpen)}
+                  className="flex items-center gap-2 w-full px-2 py-2 rounded-lg text-dark-300 hover:text-dark-100 hover:bg-dark-800/50 transition-colors"
+                >
+                  <span className="p-1 text-dark-400">
+                    {unassignedOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                  </span>
+                  <ServerIcon className="w-4 h-4 text-dark-400 shrink-0" />
+                  <span className="text-sm font-semibold">{t('infra.unassigned')}</span>
+                  <span className="px-1.5 py-0.5 rounded-md bg-dark-800 border border-dark-700 text-xs font-medium text-dark-300">
+                    {tree.unassigned_server_ids.length}
+                  </span>
+                </button>
+                <AnimatePresence>
+                  {unassignedOpen && (
+                    <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}>
+                      {tree.unassigned_server_ids.map(sid => {
+                        const srv = serverMap.get(sid)
+                        if (!srv) return null
+                        return <InfraServerRow key={sid} server={srv} />
+                      })}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             )}
 

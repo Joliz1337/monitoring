@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.services.haproxy_manager import (  # noqa: E402
     MAXCONN_MAX,
     MAXCONN_MIN,
+    SILENT_DROP_RST_TTL,
     HAProxyManager,
 )
 
@@ -197,6 +198,17 @@ class RuleParsingTests(unittest.TestCase):
         self.assertEqual([s.name for s in web.servers], ["web1", "web2"])
         self.assertTrue(web.servers[1].backup)
 
+    def test_listen_port_is_read_from_ip_bound_bind(self):
+        # Панель собирает конфиг под сервер: вместо `*` — его входные IP
+        for bind in ("bind 1.1.1.1:8443", "bind 1.1.1.1:8443,1.1.1.2:8443 accept-proxy"):
+            with self.subTest(bind=bind):
+                content = (
+                    f"frontend tcp_relay\n    {bind}\n    default_backend backend_tcp_relay\n\n"
+                    "backend backend_tcp_relay\n    server srv1 10.0.0.5:443 source 2.2.2.1\n"
+                )
+                [rule] = self.parse(content)
+                self.assertEqual(rule.listen_port, 8443)
+
     def test_backend_without_frontend_is_ignored(self):
         content = "backend backend_tcp_orphan\n    server s 10.0.0.1:443\n"
         self.assertEqual(self.parse(content), [])
@@ -316,6 +328,124 @@ class NofileLimitTests(unittest.TestCase):
         manager = make_manager()
         with mock.patch("pathlib.Path.read_text", side_effect=OSError):
             self.assertEqual(manager._read_nofile_limit(), 1048576)
+
+
+SNI_FRONTEND = (
+    "frontend tcp_relay\n"
+    "    bind *:9445\n"
+    "    # sni-filter (profile)\n"
+    "    tcp-request inspect-delay 5s\n"
+    "    acl sni_allowed req.ssl_sni -i example.com\n"
+    "    tcp-request content silent-drop unless sni_allowed\n"
+    "    default_backend backend_tcp_relay\n"
+)
+
+
+class FakeExecutor:
+    """Отвечает на `haproxy -v` и `iptables -C`, остальные команды записывает."""
+
+    def __init__(self, version_line: str = "", rule_exists: bool = False):
+        self.version_line = version_line
+        self.rule_exists = rule_exists
+        self.commands: list[str] = []
+
+    def execute_sync(self, command: str, timeout: int = 30):
+        self.commands.append(command)
+        if command.startswith("haproxy -v"):
+            return mock.Mock(success=bool(self.version_line), stdout=self.version_line)
+        if " -C " in command:
+            return mock.Mock(success=self.rule_exists, stdout="")
+        return mock.Mock(success=True, stdout="", stderr="")
+
+
+def manager_with(executor: FakeExecutor) -> HAProxyManager:
+    manager = make_manager()
+    manager._executor = executor
+    return manager
+
+
+class SilentDropRstTtlTests(unittest.TestCase):
+    """silent-drop без rst-ttl закрывает соединение через TCP_REPAIR, и conntrack
+    ноды час держит запись брошенного сканера — так забилась таблица на ноде
+    с фильтром SNI. rst-ttl появился в HAProxy 2.7, на старых версиях конфиг
+    с ним не пройдёт проверку."""
+
+    def harden(self, content: str, version_line: str) -> str:
+        return manager_with(FakeExecutor(version_line))._add_silent_drop_rst_ttl(content)
+
+    def test_added_on_supported_version(self):
+        result = self.harden(SNI_FRONTEND, "HAProxy version 3.2.9-1ubuntu2.2 2026/06/19")
+        self.assertIn(
+            f"    tcp-request content silent-drop rst-ttl {SILENT_DROP_RST_TTL} unless sni_allowed\n",
+            result,
+        )
+
+    def test_old_haproxy_keeps_config_valid(self):
+        self.assertEqual(self.harden(SNI_FRONTEND, "HA-Proxy version 2.4.24-0ubuntu0.22.04.1"), SNI_FRONTEND)
+
+    def test_unknown_version_is_left_alone(self):
+        self.assertEqual(self.harden(SNI_FRONTEND, ""), SNI_FRONTEND)
+
+    def test_idempotent(self):
+        once = self.harden(SNI_FRONTEND, "HAProxy version 2.8.5-1ubuntu3")
+        self.assertEqual(self.harden(once, "HAProxy version 2.8.5-1ubuntu3"), once)
+
+    def test_explicit_ttl_from_profile_is_kept(self):
+        content = "    tcp-request content silent-drop rst-ttl 3 if { src 10.0.0.0/8 }\n"
+        self.assertEqual(self.harden(content, "HAProxy version 3.0.11"), content)
+
+    def test_comments_are_not_touched(self):
+        content = "    # tcp-request content silent-drop unless sni_allowed\n"
+        self.assertEqual(self.harden(content, "HAProxy version 3.0.11"), content)
+
+    def test_no_version_probe_without_silent_drop(self):
+        executor = FakeExecutor("HAProxy version 3.0.11")
+        manager_with(executor)._add_silent_drop_rst_ttl("frontend f\n    bind *:443\n")
+        self.assertEqual(executor.commands, [])
+
+
+class InstalledVersionTests(unittest.TestCase):
+    """Полная версия уходит в панель: по ней решается, есть ли сборка новее."""
+
+    def version(self, version_line: str):
+        return manager_with(FakeExecutor(version_line)).installed_version()
+
+    def test_package_version_is_kept_whole(self):
+        line = "HAProxy version 2.8.16-0ubuntu0.24.04.3 2026/06/19 - https://haproxy.org/"
+        self.assertEqual(self.version(line), "2.8.16-0ubuntu0.24.04.3")
+
+    def test_old_banner_spelling(self):
+        self.assertEqual(self.version("HA-Proxy version 2.4.24-0ubuntu0.22.04.1 2023/12/04"), "2.4.24-0ubuntu0.22.04.1")
+
+    def test_not_installed(self):
+        self.assertIsNone(self.version(""))
+
+
+class SilentDropGuardTests(unittest.TestCase):
+    """RST с TTL 1 режется в mangle OUTPUT: conntrack успевает его увидеть и
+    закрыть запись, а сканер не получает ни одного пакета."""
+
+    HARDENED = SNI_FRONTEND.replace("silent-drop", f"silent-drop rst-ttl {SILENT_DROP_RST_TTL}")
+
+    def mutating_commands(self, content: str, rule_exists: bool) -> list[str]:
+        executor = FakeExecutor(rule_exists=rule_exists)
+        manager_with(executor)._sync_silent_drop_guard(content)
+        return [c for c in executor.commands if " -C " not in c]
+
+    def test_inserted_on_top_when_needed(self):
+        commands = self.mutating_commands(self.HARDENED, rule_exists=False)
+        self.assertEqual(len(commands), 1)
+        self.assertIn("-t mangle -I OUTPUT -p tcp --tcp-flags RST RST", commands[0])
+        self.assertIn(f"--ttl-eq {SILENT_DROP_RST_TTL} -j DROP", commands[0])
+
+    def test_removed_when_no_longer_needed(self):
+        commands = self.mutating_commands(SNI_FRONTEND, rule_exists=True)
+        self.assertEqual(len(commands), 1)
+        self.assertIn("-t mangle -D OUTPUT", commands[0])
+
+    def test_nothing_to_do_when_state_matches(self):
+        self.assertEqual(self.mutating_commands(self.HARDENED, rule_exists=True), [])
+        self.assertEqual(self.mutating_commands(SNI_FRONTEND, rule_exists=False), [])
 
 
 if __name__ == "__main__":

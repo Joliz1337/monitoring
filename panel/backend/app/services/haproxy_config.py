@@ -5,7 +5,8 @@ All config generation logic is here - node just applies the config.
 import ipaddress
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from enum import Enum
+from typing import Iterable, Optional
 
 
 RULES_START_MARKER = "# === RULES START ==="
@@ -15,6 +16,91 @@ VALID_ALGORITHMS = (
     "roundrobin", "static-rr", "leastconn", "source", "uri",
     "url_param", "hdr", "random", "first", "rdp-cookie",
 )
+
+# Символы, которые HAProxy допускает в имени сервера; пробел разорвал бы строку `server`
+_SERVER_NAME = re.compile(r"^[a-zA-Z0-9_.:-]+$")
+
+SNI_FILTER_ACL = "sni_allowed"
+SNI_INSPECT_DELAY = "5s"
+SNI_DOMAINS_PER_LINE = 10
+MAX_SNI_DOMAINS = 100
+SNI_WILDCARD_PREFIX = "*."
+
+_SNI_DOMAIN = re.compile(r"^(?=.{1,253}$)[a-z0-9_-]+(\.[a-z0-9_-]+)*$")
+_SNI_MARKER = re.compile(r"^\s*# sni-filter \((profile|custom|off)\)\s*$", re.MULTILINE)
+_SNI_ACL = re.compile(rf"^\s*acl\s+{SNI_FILTER_ACL}\s+req\.ssl_sni\s+-i\s+(-m\s+end\s+)?(.+)$", re.MULTILINE)
+
+
+class SniMode(str, Enum):
+    PROFILE = "profile"
+    CUSTOM = "custom"
+    OFF = "off"
+
+
+class InvalidSniError(ValueError):
+    """SNI нельзя вписать в ACL HAProxy."""
+
+
+def _is_valid_sni(domain: str) -> bool:
+    if not domain.startswith(SNI_WILDCARD_PREFIX):
+        return bool(_SNI_DOMAIN.match(domain))
+    base = domain[len(SNI_WILDCARD_PREFIX):]
+    # *.com пропустил бы целую доменную зону
+    return "." in base and bool(_SNI_DOMAIN.match(base))
+
+
+def _wildcard_base(domain: str) -> Optional[str]:
+    return domain[len(SNI_WILDCARD_PREFIX):] if domain.startswith(SNI_WILDCARD_PREFIX) else None
+
+
+def _sni_acl_lines(patterns: list[str], match_flags: str) -> list[str]:
+    # Одноимённые acl объединяются по ИЛИ — длинный список не упирается в лимит длины строки
+    return [
+        f"    acl {SNI_FILTER_ACL} req.ssl_sni -i{match_flags} {' '.join(patterns[start:start + SNI_DOMAINS_PER_LINE])}"
+        for start in range(0, len(patterns), SNI_DOMAINS_PER_LINE)
+    ]
+
+
+def normalize_sni_domains(values: Iterable[str]) -> tuple[str, ...]:
+    """`*.example.com` — сам example.com и поддомены любой глубины; отдельная
+    запись example.com рядом с ним лишняя и убирается."""
+    result: list[str] = []
+    for raw in values:
+        domain = raw.strip().lower().rstrip(".")
+        if not domain:
+            continue
+        if not _is_valid_sni(domain):
+            raise InvalidSniError(f"Invalid SNI: {raw.strip()}")
+        if domain not in result:
+            result.append(domain)
+    wildcard_bases = {base for base in map(_wildcard_base, result) if base}
+    result = [domain for domain in result if domain not in wildcard_bases]
+    if len(result) > MAX_SNI_DOMAINS:
+        raise InvalidSniError(f"Too many SNI values (max {MAX_SNI_DOMAINS})")
+    return tuple(result)
+
+
+@dataclass(frozen=True)
+class ProfileOptions:
+    """Настройки профиля, которые генератор вписывает в каждое правило."""
+    sni_filter_enabled: bool = False
+    sni_filter_domains: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> "ProfileOptions":
+        if not isinstance(data, dict):
+            return cls()
+        domains = data.get("sni_filter_domains")
+        return cls(
+            sni_filter_enabled=bool(data.get("sni_filter_enabled", False)),
+            sni_filter_domains=tuple(d for d in domains if isinstance(d, str)) if isinstance(domains, list) else (),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "sni_filter_enabled": self.sni_filter_enabled,
+            "sni_filter_domains": list(self.sni_filter_domains),
+        }
 
 
 @dataclass
@@ -76,6 +162,8 @@ class HAProxyRule:
     is_balancer: bool = False
     servers: list[BackendServer] = field(default_factory=list)
     balancer_options: Optional[BalancerOptions] = None
+    sni_mode: SniMode = SniMode.PROFILE
+    sni_domains: tuple[str, ...] = ()
 
 
 class HAProxyConfigGenerator:
@@ -176,7 +264,45 @@ resolvers mydns
             line += " disabled"
         return line
 
-    def _generate_balancer_block(self, rule: HAProxyRule, certs_base_path: str) -> str:
+    @staticmethod
+    def _sni_filter_lines(rule: HAProxyRule, options: ProfileOptions) -> str:
+        """Фильтр по SNI для frontend TCP-правила.
+
+        req.ssl_sni читает ClientHello из сырого потока, поэтому фильтр возможен
+        только там, где TLS не терминирует сам HAProxy. Пока ClientHello не
+        дочитан, выборка «может измениться» и правило ждёт до inspect-delay.
+        Чужой SNI, ClientHello без SNI, не-TLS поток и молчащее соединение
+        бросаются через silent-drop, а не reject: клиент не получает ни FIN,
+        ни RST и видит зависшее соединение, как будто за портом ничего нет.
+        Маркер режима нужен, чтобы при разборе конфига отличить свой список
+        правила от общего списка профиля."""
+        if rule.rule_type != "tcp":
+            return ""
+        if rule.sni_mode == SniMode.OFF:
+            return f"    # sni-filter ({SniMode.OFF.value})\n"
+        if rule.sni_mode == SniMode.CUSTOM:
+            domains = rule.sni_domains
+        else:
+            domains = options.sni_filter_domains if options.sni_filter_enabled else ()
+        if not domains:
+            return ""
+
+        wildcard_bases = [base for base in map(_wildcard_base, domains) if base]
+        # *.example.com: сам домен — точным совпадением, поддомены — по окончанию
+        # с точкой, иначе прошёл бы и evilexample.com
+        exact = list(dict.fromkeys([d for d in domains if not _wildcard_base(d)] + wildcard_bases))
+        suffixes = [f".{base}" for base in wildcard_bases]
+
+        lines = [
+            f"    # sni-filter ({rule.sni_mode.value})",
+            f"    tcp-request inspect-delay {SNI_INSPECT_DELAY}",
+        ]
+        lines += _sni_acl_lines(exact, "")
+        lines += _sni_acl_lines(suffixes, " -m end")
+        lines.append(f"    tcp-request content silent-drop unless {SNI_FILTER_ACL}")
+        return "\n".join(lines) + "\n"
+
+    def _generate_balancer_block(self, rule: HAProxyRule, options: ProfileOptions, certs_base_path: str) -> str:
         opts = rule.balancer_options or BalancerOptions()
         mode = "tcp" if rule.rule_type == "tcp" else "http"
         frontend_name = f"{rule.rule_type}_{rule.name}"
@@ -189,7 +315,7 @@ resolvers mydns
 frontend {frontend_name}
     bind *:{rule.listen_port}{accept_proxy_opt}
     mode tcp
-    default_backend {backend_name}
+{self._sni_filter_lines(rule, options)}    default_backend {backend_name}
 """
         else:
             cert_domain = rule.cert_domain
@@ -266,10 +392,11 @@ frontend {frontend_name}
 
         return frontend + "\n".join(lines) + "\n"
 
-    def generate_rule_block(self, rule: HAProxyRule, certs_base_path: str = "/etc/letsencrypt/live") -> str:
+    def generate_rule_block(self, rule: HAProxyRule, options: ProfileOptions,
+                            certs_base_path: str = "/etc/letsencrypt/live") -> str:
         """Generate frontend/backend block for a rule"""
         if rule.is_balancer and rule.servers:
-            return self._generate_balancer_block(rule, certs_base_path)
+            return self._generate_balancer_block(rule, options, certs_base_path)
 
         frontend_name = f"{rule.rule_type}_{rule.name}"
         backend_name = f"backend_{rule.rule_type}_{rule.name}"
@@ -286,7 +413,7 @@ frontend {frontend_name}
 frontend {frontend_name}
     bind *:{rule.listen_port}{accept_proxy_opt}
     mode tcp
-    default_backend {backend_name}
+{self._sni_filter_lines(rule, options)}    default_backend {backend_name}
 
 backend {backend_name}
     mode tcp
@@ -319,13 +446,14 @@ backend {backend_name}
     {server_line}
 """
     
-    def generate_full_config(self, rules: list[HAProxyRule], certs_base_path: str = "/etc/letsencrypt/live") -> str:
+    def generate_full_config(self, rules: list[HAProxyRule], options: ProfileOptions,
+                             certs_base_path: str = "/etc/letsencrypt/live") -> str:
         """Generate full HAProxy config with all rules"""
         config = self.generate_base_config()
-        
+
         rules_content = ""
         for rule in rules:
-            rules_content += self.generate_rule_block(rule, certs_base_path)
+            rules_content += self.generate_rule_block(rule, options, certs_base_path)
         
         if rules_content:
             config = config.replace(
@@ -352,7 +480,13 @@ backend {backend_name}
         if rule.is_balancer:
             if not rule.servers:
                 return False, "At least one server required for load balancer"
+            seen_names: set[str] = set()
             for srv in rule.servers:
+                if not _SERVER_NAME.match(srv.name):
+                    return False, f"Invalid server name '{srv.name}' (use a-z, A-Z, 0-9, -, _, ., :)"
+                if srv.name in seen_names:
+                    return False, f"Server name '{srv.name}' is used twice in the balancer"
+                seen_names.add(srv.name)
                 if not srv.address:
                     return False, f"Server '{srv.name}': address is required"
                 if not 1 <= srv.port <= 65535:
@@ -368,7 +502,35 @@ backend {backend_name}
             if not 1 <= rule.target_port <= 65535:
                 return False, "Invalid target port (1-65535)"
 
+        if rule.sni_mode == SniMode.CUSTOM and not rule.sni_domains:
+            return False, "At least one SNI is required for the rule's own SNI list"
+
         return True, "Valid"
+
+    @staticmethod
+    def validate_options(options: ProfileOptions) -> tuple[bool, str]:
+        if options.sni_filter_enabled and not options.sni_filter_domains:
+            return False, "At least one SNI is required to enable the SNI filter"
+        return True, "Valid"
+
+    @staticmethod
+    def _parse_sni_filter(block: str) -> tuple[SniMode, tuple[str, ...]]:
+        """Без маркера правило берёт общий список профиля."""
+        marker = _SNI_MARKER.search(block)
+        mode = SniMode(marker.group(1)) if marker else SniMode.PROFILE
+        if mode != SniMode.CUSTOM:
+            return mode, ()
+        exact: list[str] = []
+        wildcards: list[str] = []
+        for suffix_match, patterns in _SNI_ACL.findall(block):
+            for pattern in patterns.split():
+                if suffix_match:
+                    wildcards.append(f"*{pattern}")
+                else:
+                    exact.append(pattern)
+        # Точный домен, вписанный за *.домен, — часть той же записи, а не отдельная
+        bases = {wildcard[len(SNI_WILDCARD_PREFIX):] for wildcard in wildcards}
+        return mode, tuple(d for d in exact if d not in bases) + tuple(wildcards)
     
     @staticmethod
     def _parse_server_opt(opts: str, name: str, cast=str, default=None):
@@ -469,12 +631,15 @@ backend {backend_name}
             cert_match = re.search(r'ssl\s+crt\s+/etc/letsencrypt/live/([^/]+)/combined\.pem', block) if rule_type == "https" else None
             bind_line_match = re.search(r'^\s*bind\s+.+$', block, re.MULTILINE)
             accept_proxy = bool(bind_line_match and 'accept-proxy' in bind_line_match.group(0))
+            sni_mode, sni_domains = self._parse_sni_filter(block)
 
             frontends[name] = {
                 "type": rule_type,
                 "port": int(port_match.group(1)) if port_match else 0,
                 "cert_domain": cert_match.group(1) if cert_match else None,
                 "accept_proxy": accept_proxy,
+                "sni_mode": sni_mode,
+                "sni_domains": sni_domains,
             }
 
         for match in backend_pattern.finditer(config):
@@ -502,6 +667,7 @@ backend {backend_name}
                     cert_domain=fe["cert_domain"],
                     accept_proxy=fe["accept_proxy"],
                     is_balancer=True, servers=servers, balancer_options=balancer_options,
+                    sni_mode=fe["sni_mode"], sni_domains=fe["sni_domains"],
                 ))
             else:
                 # Одиночный сервер (текущая логика)
@@ -516,6 +682,7 @@ backend {backend_name}
                         cert_domain=fe["cert_domain"],
                         target_ssl=target_ssl, send_proxy=send_proxy,
                         accept_proxy=fe["accept_proxy"],
+                        sni_mode=fe["sni_mode"], sni_domains=fe["sni_domains"],
                     ))
 
         return rules

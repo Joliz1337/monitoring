@@ -5,6 +5,7 @@ import { Server, Search, ChevronDown, Folder, FolderOpen, Eye } from 'lucide-rea
 import { Server as ServerType } from '../../api/client'
 import { Checkbox } from '../ui/Checkbox'
 import { Tooltip } from '../ui/Tooltip'
+import { writeStorage } from '../../utils/storage'
 
 const EXPANDED_FOLDERS_KEY = 'ssh_expanded_folders'
 const NO_FOLDER = '__no_folder__'
@@ -97,7 +98,7 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
       const next = new Set(prev)
       if (next.has(folder)) next.delete(folder)
       else next.add(folder)
-      localStorage.setItem(EXPANDED_FOLDERS_KEY, JSON.stringify([...next]))
+      writeStorage(EXPANDED_FOLDERS_KEY, JSON.stringify([...next]))
       return next
     })
   }
@@ -133,7 +134,7 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
           <button
             type="button"
             onClick={e => { e.preventDefault(); onOpenServer(server.id) }}
-            className="p-1 text-dark-500 hover:text-accent-400 transition-colors shrink-0"
+            className="p-1.5 text-dark-500 hover:text-accent-400 transition-colors shrink-0"
           >
             <Eye className="w-4 h-4" />
           </button>
@@ -207,7 +208,7 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
 
       {servers.length === 0 ? (
         <div className="text-center py-8">
-          <Server className="w-12 h-12 text-dark-600 mx-auto mb-3" />
+          <Server className="w-12 h-12 text-dark-500 mx-auto mb-3" />
           <p className="text-dark-400 text-sm">{t('ssh_security.no_servers')}</p>
         </div>
       ) : (
@@ -252,7 +253,7 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
             )}
             {nothingVisible && (
               <div className="text-center py-6">
-                <Search className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                <Search className="w-8 h-8 text-dark-500 mx-auto mb-2" />
                 <p className="text-dark-400 text-sm">{t('ssh_security.selector_no_results')}</p>
               </div>
             )}

@@ -5,7 +5,7 @@ import {
   Bell, Bot, Send, CheckCircle2, XCircle, Loader2,
   ChevronDown, ChevronRight, Trash2, Server, ShieldOff,
   Cpu, MemoryStick, Network, Cable, Power, Activity, Layers,
-  RefreshCw, Clock, X,
+  RefreshCw, Clock, X, Radar,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { alertsApi, serversApi, AlertSettingsData, AlertHistoryItem, AlertStatus, Server as ServerType } from '../api/client'
@@ -13,7 +13,7 @@ import { formatBitsPerSec } from '../utils/format'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon, type FAQScreen } from '../components/FAQ'
 
-type TriggerSection = 'offline' | 'cpu' | 'ram' | 'network' | 'load_avg' | 'conntrack' | 'tcp'
+type TriggerSection = 'offline' | 'cpu' | 'ram' | 'network' | 'load_avg' | 'conntrack' | 'packet_loss' | 'tcp'
 
 export default function Alerts() {
   const { t } = useTranslation()
@@ -167,6 +167,9 @@ export default function Alerts() {
       tcp_finwait_spike: t('alerts.type_tcp_finwait_spike'),
       load_avg_high: t('alerts.type_load_avg_high'),
       conntrack_high: t('alerts.type_conntrack_high'),
+      packet_loss: t('alerts.type_packet_loss'),
+      packet_loss_recovery: t('alerts.type_packet_loss_recovery'),
+      node_update_failed: t('alerts.type_node_update_failed'),
     }
     return map[t_] || t_
   }
@@ -299,7 +302,7 @@ export default function Alerts() {
                           onClick={() => save({ excluded_server_ids: settings.excluded_server_ids.filter(i => i !== id) })}
                           className="ml-0.5 text-dark-500 hover:text-red-400 transition"
                         >
-                          <X className="w-3 h-3" />
+                          <X className="w-4 h-4" />
                         </button>
                       </Tooltip>
                     </span>
@@ -451,6 +454,28 @@ export default function Alerts() {
           />
         </TriggerBlock>
 
+        {/* Потери с релеев */}
+        <TriggerBlock
+          title={t('alerts.trigger_packet_loss')}
+          icon={<Radar className="w-4 h-4" />}
+          enabled={settings.packet_loss_enabled}
+          onToggle={v => save({ packet_loss_enabled: v })}
+          expanded={expanded.has('packet_loss')}
+          onExpand={() => toggle('packet_loss')}
+        >
+          <p className="text-xs text-dark-500">{t('alerts.packet_loss_hint')}</p>
+          <SliderRow label={t('alerts.packet_loss_threshold')} value={settings.packet_loss_threshold} min={5} max={90} step={5} format={v => `${v}%`} onSave={v => save({ packet_loss_threshold: v })} />
+          <SliderRow label={t('alerts.sustained')} value={settings.packet_loss_sustained_seconds} min={60} max={1800} step={60} format={v => `${v / 60} ${t('alerts.minutes_short')}`} onSave={v => save({ packet_loss_sustained_seconds: v })} />
+          <SliderRow label={t('alerts.packet_loss_calm')} value={settings.packet_loss_calm_seconds} min={300} max={3600} step={300} format={v => `${v / 60} ${t('alerts.minutes_short')}`} onSave={v => save({ packet_loss_calm_seconds: v })} />
+          <SliderRow label={t('alerts.packet_loss_reminder')} value={settings.packet_loss_reminder_hours} min={0} max={24} step={6} format={v => v ? `${v} ${t('alerts.hours_short')}` : t('alerts.reminder_off')} onSave={v => save({ packet_loss_reminder_hours: v })} />
+          <TriggerIgnoreList
+            ids={settings.packet_loss_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ packet_loss_excluded_server_ids: ids })}
+            t={t}
+          />
+        </TriggerBlock>
+
         {/* TCP */}
         <TriggerBlock
           title={t('alerts.trigger_tcp')}
@@ -584,6 +609,9 @@ export default function Alerts() {
               <option value="tcp_finwait_spike">{t('alerts.type_tcp_finwait_spike')}</option>
               <option value="load_avg_high">{t('alerts.type_load_avg_high')}</option>
               <option value="conntrack_high">{t('alerts.type_conntrack_high')}</option>
+              <option value="packet_loss">{t('alerts.type_packet_loss')}</option>
+              <option value="packet_loss_recovery">{t('alerts.type_packet_loss_recovery')}</option>
+              <option value="node_update_failed">{t('alerts.type_node_update_failed')}</option>
             </select>
             <button
               onClick={handleClearHistory}
@@ -591,13 +619,13 @@ export default function Alerts() {
               className="px-3 py-1 bg-red-500/10 text-red-400 rounded-lg text-xs hover:bg-red-500/20
                          transition disabled:opacity-40 flex items-center gap-1"
             >
-              {clearing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+              {clearing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
               {t('alerts.clear')}
             </button>
             <Tooltip label={t('common.refresh_data')}>
               <button
                 onClick={() => fetchHistory(historyPage * PAGE_SIZE, historyFilter)}
-                className="p-1 text-dark-400 hover:text-dark-200 transition"
+                className="p-1.5 text-dark-400 hover:text-dark-200 transition"
               >
                 <RefreshCw className="w-4 h-4" />
               </button>
@@ -622,7 +650,7 @@ export default function Alerts() {
                     <span className="text-xs font-medium text-dark-300">{alertTypeLabel(item.alert_type)}</span>
                     <span className="text-xs text-dark-500">|</span>
                     <span className="text-xs text-dark-400 flex items-center gap-1">
-                      <Server className="w-3 h-3" />
+                      <Server className="w-3.5 h-3.5" />
                       {item.server_name}
                     </span>
                     {item.notified && (
@@ -727,7 +755,7 @@ function TriggerBlock({ title, icon, enabled, onToggle, expanded, onExpand, chil
         </button>
         <div className="flex items-center gap-1">
           {faqScreen && <FAQIcon screen={faqScreen} size="sm" />}
-          <button onClick={onExpand} className="p-1 text-dark-500">
+          <button onClick={onExpand} className="p-1.5 text-dark-500">
             {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
           </button>
         </div>
@@ -903,14 +931,14 @@ function TriggerIgnoreList({ ids, allServers, onSave, t }: {
                 key={id}
                 className="inline-flex items-center gap-1 px-2 py-1 bg-dark-700 border border-dark-600 rounded-lg text-xs text-dark-300"
               >
-                <Server className="w-3 h-3 text-dark-500" />
+                <Server className="w-3.5 h-3.5 text-dark-500" />
                 {srv?.name || `#${id}`}
                 <Tooltip label={t('common.remove_from_list')}>
                   <button
                     onClick={() => onSave(ids.filter(i => i !== id))}
                     className="ml-0.5 text-dark-500 hover:text-red-400 transition"
                   >
-                    <X className="w-3 h-3" />
+                    <X className="w-4 h-4" />
                   </button>
                 </Tooltip>
               </span>

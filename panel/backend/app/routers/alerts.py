@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, delete, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 from app.database import get_db
@@ -81,6 +81,12 @@ class AlertSettingsUpdate(BaseModel):
     conntrack_enabled: Optional[bool] = None
     conntrack_threshold: Optional[float] = None
 
+    packet_loss_enabled: Optional[bool] = None
+    packet_loss_threshold: Optional[float] = Field(None, ge=1, le=100)
+    packet_loss_sustained_seconds: Optional[int] = Field(None, ge=60, le=3600)
+    packet_loss_calm_seconds: Optional[int] = Field(None, ge=60, le=7200)
+    packet_loss_reminder_hours: Optional[int] = Field(None, ge=0, le=168)
+
     excluded_server_ids: Optional[list[int]] = None
 
     offline_excluded_server_ids: Optional[list[int]] = None
@@ -90,6 +96,7 @@ class AlertSettingsUpdate(BaseModel):
     tcp_excluded_server_ids: Optional[list[int]] = None
     load_avg_excluded_server_ids: Optional[list[int]] = None
     conntrack_excluded_server_ids: Optional[list[int]] = None
+    packet_loss_excluded_server_ids: Optional[list[int]] = None
 
 
 class TelegramTestRequest(BaseModel):
@@ -151,6 +158,11 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "load_avg_sustained_checks": s.load_avg_sustained_checks,
         "conntrack_enabled": s.conntrack_enabled,
         "conntrack_threshold": s.conntrack_threshold,
+        "packet_loss_enabled": s.packet_loss_enabled,
+        "packet_loss_threshold": s.packet_loss_threshold,
+        "packet_loss_sustained_seconds": s.packet_loss_sustained_seconds,
+        "packet_loss_calm_seconds": s.packet_loss_calm_seconds,
+        "packet_loss_reminder_hours": s.packet_loss_reminder_hours,
         "excluded_server_ids": json.loads(s.excluded_server_ids) if s.excluded_server_ids else [],
         "offline_excluded_server_ids": json.loads(s.offline_excluded_server_ids) if s.offline_excluded_server_ids else [],
         "cpu_excluded_server_ids": json.loads(s.cpu_excluded_server_ids) if s.cpu_excluded_server_ids else [],
@@ -159,6 +171,7 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "tcp_excluded_server_ids": json.loads(s.tcp_excluded_server_ids) if s.tcp_excluded_server_ids else [],
         "load_avg_excluded_server_ids": json.loads(s.load_avg_excluded_server_ids) if s.load_avg_excluded_server_ids else [],
         "conntrack_excluded_server_ids": json.loads(s.conntrack_excluded_server_ids) if s.conntrack_excluded_server_ids else [],
+        "packet_loss_excluded_server_ids": json.loads(s.packet_loss_excluded_server_ids) if s.packet_loss_excluded_server_ids else [],
     }
 
 
@@ -191,6 +204,7 @@ async def update_alert_settings(
         "cpu_excluded_server_ids", "ram_excluded_server_ids",
         "network_excluded_server_ids", "tcp_excluded_server_ids",
         "load_avg_excluded_server_ids", "conntrack_excluded_server_ids",
+        "packet_loss_excluded_server_ids",
     }
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():

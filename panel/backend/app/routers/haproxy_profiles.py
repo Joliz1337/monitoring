@@ -1,10 +1,11 @@
 import asyncio
 import socket
+from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import select, update, func, and_, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 import json
 import logging
@@ -12,13 +13,42 @@ import logging
 from app.database import get_db, async_session_maker
 from app.models import Server, HAProxyConfigProfile, HAProxySyncLog, ServerCache, MetricsSnapshot, PanelSettings
 from app.auth import verify_auth
-from app.services.haproxy_profile_sync import sync_profile_to_servers, compute_config_hash, is_server_online, stop_haproxy_on_server
-from app.services.haproxy_config import HAProxyRule, BackendServer, BalancerOptions, get_config_generator
+from app.services.haproxy_addresses import MAX_ADDRESSES, InvalidAddressError, ServerAddresses, dump_ips, normalize_ips
+from app.services.haproxy_profile_sync import (
+    check_addresses_on_node,
+    expected_config_hash,
+    is_server_online,
+    mark_outdated_pending,
+    server_addresses,
+    stop_haproxy_on_server,
+    sync_profile_to_servers,
+)
+from app.services.haproxy_config import (
+    BackendServer,
+    BalancerOptions,
+    HAProxyRule,
+    InvalidSniError,
+    ProfileOptions,
+    SniMode,
+    get_config_generator,
+    normalize_sni_domains,
+)
 from app.services.haproxy_validator import validate_config
+from app.services.reserved_ports_sync import _version_tuple
+from app.services.server_ip_owners import load_ip_owners
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/haproxy-profiles", tags=["haproxy-profiles"])
+
+# Нода младше разбирает только `bind *:PORT` — порт правила с адресом читался бы нулём
+MIN_NODE_VERSION_HAPROXY_ADDRESSES = "10.31.0"
+
+
+def _addresses_supported(server: Server) -> bool:
+    if not server.node_version:
+        return False
+    return _version_tuple(server.node_version) >= _version_tuple(MIN_NODE_VERSION_HAPROXY_ADDRESSES)
 
 
 # ==================== Schemas ====================
@@ -77,6 +107,11 @@ class BalancerOptionsData(BaseModel):
     timeout_queue: Optional[str] = None
 
 
+class ServerAddressesUpdate(BaseModel):
+    listen_ips: list[str] = Field(default_factory=list, max_length=MAX_ADDRESSES)
+    source_ips: list[str] = Field(default_factory=list, max_length=MAX_ADDRESSES)
+
+
 class RuleData(BaseModel):
     name: str
     rule_type: str = "tcp"
@@ -91,6 +126,13 @@ class RuleData(BaseModel):
     is_balancer: bool = False
     servers: list[BackendServerData] = []
     balancer_options: Optional[BalancerOptionsData] = None
+    sni_mode: SniMode = SniMode.PROFILE
+    sni_domains: list[str] = []
+
+
+class ProfileOptionsData(BaseModel):
+    sni_filter_enabled: bool = False
+    sni_filter_domains: list[str] = []
 
 
 # ==================== Available servers (must be before /{profile_id}) ====================
@@ -201,6 +243,13 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
         }
         for row in result.fetchall()
     ]
+
+
+@router.get("/ip-owners")
+async def get_ip_owners(db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+    """Адрес → сервер панели: интерфейс подписывает цели правил именами серверов."""
+    owners = await load_ip_owners(db)
+    return {address: asdict(owner) for address, owner in owners.items()}
 
 
 class ValidateRequest(BaseModel):
@@ -359,13 +408,12 @@ async def get_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=Dep
     )
     servers = result.scalars().all()
 
-    config_hash = compute_config_hash(profile.config_content)
-
     return {
         "id": profile.id,
         "name": profile.name,
         "description": profile.description,
         "config_content": profile.config_content,
+        "options": _profile_options(profile).to_dict(),
         "position": profile.position,
         "created_at": profile.created_at.isoformat() if profile.created_at else None,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
@@ -375,7 +423,7 @@ async def get_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=Dep
                 "server_name": s.name,
                 "sync_status": s.haproxy_sync_status,
                 "config_hash": s.haproxy_config_hash,
-                "is_synced": s.haproxy_config_hash == config_hash,
+                "is_synced": s.haproxy_config_hash == expected_config_hash(profile.config_content, s),
                 "last_sync_at": s.haproxy_last_sync_at.isoformat() if s.haproxy_last_sync_at else None,
             }
             for s in servers
@@ -407,16 +455,7 @@ async def update_profile(profile_id: int, data: ProfileUpdate, bg: BackgroundTas
             raise HTTPException(400, f"Конфиг не прошёл проверку HAProxy: {message}")
         profile.config_content = data.config_content
         config_changed = True
-
-        new_hash = compute_config_hash(data.config_content)
-        await db.execute(
-            update(Server)
-            .where(
-                Server.active_haproxy_profile_id == profile_id,
-                Server.haproxy_config_hash != new_hash,
-            )
-            .values(haproxy_sync_status="pending")
-        )
+        await mark_outdated_pending(db, profile)
 
     await db.commit()
     await db.refresh(profile)
@@ -484,6 +523,54 @@ async def unlink_server(profile_id: int, server_id: int, bg: BackgroundTasks, db
     # Отвязали от профиля — гасим HAProxy на ноде (stop + disable autostart)
     bg.add_task(_bg_stop_haproxy, server_id)
     return {"success": True}
+
+
+@router.put("/{profile_id}/servers/{server_id}/addresses")
+async def update_server_addresses(
+    profile_id: int, server_id: int, data: ServerAddressesUpdate,
+    db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
+):
+    """Входные и выходные IP сервера; сохраняет и сразу раскатывает конфиг на этот сервер."""
+    profile = await _get_profile(profile_id, db)
+    server = await db.get(Server, server_id)
+    if not server or server.active_haproxy_profile_id != profile_id:
+        raise HTTPException(404, "Server not linked to this profile")
+
+    try:
+        addresses = ServerAddresses(listen=normalize_ips(data.listen_ips), source=normalize_ips(data.source_ips))
+    except InvalidAddressError as e:
+        raise HTTPException(400, str(e))
+
+    # Сброс адресов проверять незачем — он возвращает сервер к общему конфигу профиля
+    if not addresses.is_empty:
+        if not _addresses_supported(server):
+            raise HTTPException(
+                409,
+                f"Агент ноды {server.node_version or 'unknown'} не умеет привязку HAProxy к IP — "
+                f"обновите ноду до {MIN_NODE_VERSION_HAPROXY_ADDRESSES}",
+            )
+        # Коннект пула не держим на время запроса к ноде
+        await db.commit()
+        problem = await check_addresses_on_node(server, addresses)
+        if problem:
+            raise HTTPException(400, problem)
+
+    server.haproxy_listen_ips = dump_ips(addresses.listen)
+    server.haproxy_source_ips = dump_ips(addresses.source)
+    server.haproxy_sync_status = "pending"
+    await db.commit()
+    logger.info(
+        "HAProxy addresses updated: server=%s listen=%s source=%s",
+        server.name, list(addresses.listen), list(addresses.source),
+    )
+
+    results = await sync_profile_to_servers(profile, db, server_ids=[server_id])
+    sync = results[0] if results else None
+    return {
+        "listen_ips": list(addresses.listen),
+        "source_ips": list(addresses.source),
+        "sync": {"success": sync.success, "message": sync.message, "status": sync.status} if sync else None,
+    }
 
 
 # ==================== Sync ====================
@@ -557,8 +644,48 @@ async def regenerate_config(profile_id: int, db: AsyncSession = Depends(get_db),
     profile = await _get_profile(profile_id, db)
     gen = get_config_generator()
     rules = gen.parse_rules_from_config(profile.config_content)
-    regenerated = gen.generate_full_config(rules)
+    regenerated = gen.generate_full_config(rules, _profile_options(profile))
     return {"config_content": regenerated}
+
+
+@router.put("/{profile_id}/options")
+async def update_options(
+    profile_id: int, data: ProfileOptionsData, bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
+):
+    """Общий фильтр SNI вписан в frontend каждого правила — конфиг пересобирается из текущих правил."""
+    profile = await _get_profile(profile_id, db)
+    gen = get_config_generator()
+
+    try:
+        options = ProfileOptions(
+            sni_filter_enabled=data.sni_filter_enabled,
+            sni_filter_domains=normalize_sni_domains(data.sni_filter_domains),
+        )
+    except InvalidSniError as e:
+        raise HTTPException(400, str(e))
+    ok, msg = gen.validate_options(options)
+    if not ok:
+        raise HTTPException(400, msg)
+
+    profile.options = json.dumps(options.to_dict())
+    # Без разобранных правил фильтру не к чему применяться, а пересборка
+    # стёрла бы написанный вручную конфиг
+    rules = gen.parse_rules_from_config(profile.config_content)
+    new_config = gen.generate_full_config(rules, options) if rules else profile.config_content
+    config_changed = new_config != profile.config_content
+    if config_changed:
+        profile.config_content = new_config
+        await mark_outdated_pending(db, profile)
+    await db.commit()
+
+    if config_changed:
+        bg.add_task(_bg_sync_profile, profile_id)
+    logger.info(
+        "HAProxy profile options updated: profile=%s sni_filter=%s domains=%d",
+        profile.name, options.sni_filter_enabled, len(options.sni_filter_domains),
+    )
+    return {"success": True, "options": options.to_dict(), "config_content": profile.config_content}
 
 
 async def _bg_sync_profile(profile_id: int):
@@ -643,6 +770,8 @@ def _serialize_rule(r: HAProxyRule) -> dict:
         "is_balancer": r.is_balancer,
         "servers": [_serialize_server(s) for s in r.servers],
         "balancer_options": _serialize_balancer_options(r.balancer_options) if r.balancer_options else None,
+        "sni_mode": r.sni_mode.value,
+        "sni_domains": list(r.sni_domains),
     }
     return result
 
@@ -650,6 +779,10 @@ def _serialize_rule(r: HAProxyRule) -> dict:
 def _rule_from_data(data: RuleData) -> HAProxyRule:
     servers = [BackendServer(**s.model_dump()) for s in data.servers]
     balancer_options = BalancerOptions(**data.balancer_options.model_dump()) if data.balancer_options else None
+    try:
+        sni_domains = normalize_sni_domains(data.sni_domains) if data.sni_mode == SniMode.CUSTOM else ()
+    except InvalidSniError as e:
+        raise HTTPException(400, str(e))
     return HAProxyRule(
         name=data.name, rule_type=data.rule_type,
         listen_port=data.listen_port, target_ip=data.target_ip,
@@ -658,6 +791,7 @@ def _rule_from_data(data: RuleData) -> HAProxyRule:
         accept_proxy=data.accept_proxy,
         use_wildcard=data.use_wildcard, is_balancer=data.is_balancer,
         servers=servers, balancer_options=balancer_options,
+        sni_mode=data.sni_mode, sni_domains=sni_domains,
     )
 
 
@@ -684,14 +818,8 @@ async def add_rule(profile_id: int, data: RuleData, bg: BackgroundTasks, db: Asy
         raise HTTPException(400, f"Rule '{rule.name}' already exists")
 
     existing_rules.append(rule)
-    profile.config_content = gen.generate_full_config(existing_rules)
-
-    new_hash = compute_config_hash(profile.config_content)
-    await db.execute(
-        update(Server)
-        .where(Server.active_haproxy_profile_id == profile_id, Server.haproxy_config_hash != new_hash)
-        .values(haproxy_sync_status="pending")
-    )
+    profile.config_content = gen.generate_full_config(existing_rules, _profile_options(profile))
+    await mark_outdated_pending(db, profile)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -714,14 +842,8 @@ async def update_rule(profile_id: int, rule_name: str, data: RuleData, bg: Backg
         raise HTTPException(404, f"Rule '{rule_name}' not found")
 
     existing_rules[idx] = rule
-    profile.config_content = gen.generate_full_config(existing_rules)
-
-    new_hash = compute_config_hash(profile.config_content)
-    await db.execute(
-        update(Server)
-        .where(Server.active_haproxy_profile_id == profile_id, Server.haproxy_config_hash != new_hash)
-        .values(haproxy_sync_status="pending")
-    )
+    profile.config_content = gen.generate_full_config(existing_rules, _profile_options(profile))
+    await mark_outdated_pending(db, profile)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -738,14 +860,8 @@ async def delete_rule(profile_id: int, rule_name: str, bg: BackgroundTasks, db: 
     if len(new_rules) == len(existing_rules):
         raise HTTPException(404, f"Rule '{rule_name}' not found")
 
-    profile.config_content = gen.generate_full_config(new_rules)
-
-    new_hash = compute_config_hash(profile.config_content)
-    await db.execute(
-        update(Server)
-        .where(Server.active_haproxy_profile_id == profile_id, Server.haproxy_config_hash != new_hash)
-        .values(haproxy_sync_status="pending")
-    )
+    profile.config_content = gen.generate_full_config(new_rules, _profile_options(profile))
+    await mark_outdated_pending(db, profile)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -829,6 +945,7 @@ async def get_servers_status(profile_id: int, db: AsyncSession = Depends(get_db)
             except (json.JSONDecodeError, AttributeError):
                 pass
 
+        addresses = server_addresses(s)
         items.append({
             "server_id": s.id,
             "server_name": s.name,
@@ -839,6 +956,10 @@ async def get_servers_status(profile_id: int, db: AsyncSession = Depends(get_db)
             "last_sync_at": s.haproxy_last_sync_at.isoformat() if s.haproxy_last_sync_at else None,
             "haproxy_running": haproxy_running,
             "metrics": metrics,
+            "listen_ips": list(addresses.listen),
+            "source_ips": list(addresses.source),
+            "addresses_supported": _addresses_supported(s),
+            "addresses_min_node_version": MIN_NODE_VERSION_HAPROXY_ADDRESSES,
         })
 
     return items
@@ -854,3 +975,11 @@ async def _get_profile(profile_id: int, db: AsyncSession) -> HAProxyConfigProfil
     if not profile:
         raise HTTPException(404, "Profile not found")
     return profile
+
+
+def _profile_options(profile: HAProxyConfigProfile) -> ProfileOptions:
+    try:
+        data = json.loads(profile.options) if profile.options else None
+    except (json.JSONDecodeError, TypeError):
+        data = None
+    return ProfileOptions.from_dict(data)

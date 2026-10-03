@@ -49,7 +49,7 @@ export function BulkProgressPanel({ progress, onClose, onCancel }: BulkProgressP
         </div>
         <div className="flex items-center gap-3">
           {active && (
-            <button onClick={onCancel} className="text-dark-400 hover:text-dark-200 text-xs">
+            <button onClick={onCancel} className="btn-tool">
               {t('ssh_security.bulk_cancel')}
             </button>
           )}

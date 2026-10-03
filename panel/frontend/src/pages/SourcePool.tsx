@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -12,16 +12,25 @@ import {
   XCircle,
   AlertTriangle,
   Clock,
-  DoorOpen,
 } from 'lucide-react'
-import { sourcePoolApi, type SourcePoolNodeView, type SourcePoolInstallStatus } from '../api/client'
+import {
+  sourcePoolApi,
+  type SourcePoolAssignments,
+  type SourcePoolInstallStatus,
+  type SourcePoolMode,
+  type SourcePoolNodePatch,
+  type SourcePoolNodeView,
+} from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import MarkLayoutCard from '../components/sourcepool/MarkLayoutCard'
+import SourcePoolSnippetBlock from '../components/sourcepool/SourcePoolSnippetBlock'
 import { nodeAllows } from '../utils/nodeCapabilities'
+import { addressDotClass, bindingsAsAssignments, formatMarks, marksByAddress, poolMarks } from '../utils/sourcePool'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
-import { useModuleEnabled } from '../hooks/useModuleEnabled'
 import { Tooltip } from '../components/ui/Tooltip'
 import { Toggle } from '../components/ui/Toggle'
+import { Checkbox } from '../components/ui/Checkbox'
 import { FAQIcon } from '../components/FAQ'
 
 const REFRESH_INTERVAL_MS = 10000
@@ -48,7 +57,6 @@ export default function SourcePool() {
   const { servers, fetchServers } = useServersStore()
   const server = servers.find(s => s.id === Number(serverId))
   const systemWritable = nodeAllows(server, 'system', 'write')
-  const exitProxyEnabled = useModuleEnabled('exit-proxy')
 
   const [view, setView] = useState<SourcePoolNodeView | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -95,7 +103,7 @@ export default function SourcePool() {
     }
   }
 
-  const save = async (patch: { enabled?: boolean; excluded?: string[] }) => {
+  const save = async (patch: SourcePoolNodePatch) => {
     if (!serverId) return
     setSaving(true)
     try {
@@ -118,7 +126,36 @@ export default function SourcePool() {
     save({ excluded: Array.from(excluded) })
   }
 
+  const changeMode = (mode: SourcePoolMode) => {
+    if (!view) return
+    // Первый переход на ручную начинается с текущей раскладки, чтобы трафик не сместился в момент переключения
+    if (mode === 'manual' && Object.keys(view.assignments).length === 0) {
+      save({ mode, assignments: bindingsAsAssignments(view.bindings) })
+      return
+    }
+    save({ mode })
+  }
+
+  const saveAssignments = (assignments: SourcePoolAssignments) => save({ assignments })
+
   const statusLabel = (status: SourcePoolInstallStatus) => t(`source_pool.status_${status}`)
+
+  const activeHint = (current: SourcePoolNodeView): string => {
+    if (current.mode === 'manual') {
+      const parts = [
+        current.bindings.length > 0
+          ? t('source_pool.summary', { marks: current.bindings.length, addresses: current.active_count })
+          : t('source_pool.manual_empty'),
+      ]
+      if (current.unavailable_marks.length > 0) {
+        parts.push(t('source_pool.unavailable_hint', { items: formatMarks(current.unavailable_marks) }))
+      }
+      return parts.join(' · ')
+    }
+    return current.active_count >= 2
+      ? t('source_pool.summary', { marks: current.mark_count ?? 0, addresses: current.active_count })
+      : t('source_pool.single_address')
+  }
 
   const statusCard = ((): StatusCard | null => {
     if (!view) return null
@@ -126,9 +163,7 @@ export default function SourcePool() {
     switch (view.install_status) {
       case 'active':
         return { ...base, icon: <CheckCircle2 className="w-6 h-6 text-success" />, color: 'border-success/30',
-          hint: view.active_count >= 2
-            ? t('source_pool.summary', { marks: view.mark_count ?? 0, addresses: view.active_count })
-            : t('source_pool.single_address') }
+          hint: activeHint(view) }
       case 'drift':
         return { ...base, icon: <AlertTriangle className="w-6 h-6 text-warning" />, color: 'border-warning/30',
           hint: [t('source_pool.status_drift_hint', { items: view.missing_marks.join(', ') }), view.node_error].filter(Boolean).join(' · ') }
@@ -142,9 +177,11 @@ export default function SourcePool() {
     }
   })()
 
-  const canToggle = systemWritable && !!view && view.supported_by_node && !saving
-  const markFrom = view?.mark_base ?? 101
-  const markTo = markFrom + (view?.mark_count ?? 30) - 1
+  const canConfigure = systemWritable && !!view && view.supported_by_node
+  const canToggle = canConfigure && !saving
+  const marks = poolMarks(view)
+  const manual = view?.mode === 'manual'
+  const addressMarks = marksByAddress(view?.enabled ? view.bindings : [])
 
   return (
     <div>
@@ -234,7 +271,7 @@ export default function SourcePool() {
                 <div className="flex items-center justify-between gap-4">
                   <div>
                     <div className="text-dark-100 font-medium">{t('source_pool.enable')}</div>
-                    <div className="text-xs text-dark-400 mt-0.5">{t('source_pool.enable_hint', { from: markFrom, to: markTo })}</div>
+                    <div className="text-xs text-dark-400 mt-0.5">{t('source_pool.enable_hint', { from: marks[0], to: marks[marks.length - 1] })}</div>
                   </div>
                   <Toggle
                     on={view.enabled}
@@ -257,58 +294,62 @@ export default function SourcePool() {
               <h2 className="text-dark-100 font-medium">
                 {t('source_pool.addresses', { iface: view.interface ?? '—' })}
               </h2>
-              {view.addresses.length > 0 && (
+              {view.addresses.length > 0 && !manual && (
                 <span className="text-xs text-dark-500">
-                  {t('source_pool.summary', { marks: view.mark_count ?? 30, addresses: view.active_count })}
+                  {t('source_pool.summary', { marks: marks.length, addresses: view.active_count })}
                 </span>
               )}
             </div>
-            <p className="text-xs text-dark-500 mb-3">{t('source_pool.addresses_hint')}</p>
+            <p className="text-xs text-dark-500 mb-3">
+              {manual ? t('source_pool.addresses_hint_manual') : t('source_pool.addresses_hint')}
+            </p>
             {view.addresses.length === 0 ? (
               <p className="text-sm text-dark-400 py-4 text-center">{t('source_pool.no_addresses')}</p>
             ) : (
               <div className="divide-y divide-dark-800">
-                {view.addresses.map(item => (
-                  <div key={item.address} className="flex items-center gap-3 py-2.5">
-                    <input
-                      type="checkbox"
-                      className="checkbox"
-                      checked={!item.excluded}
-                      disabled={!canToggle}
-                      onChange={e => toggleAddress(item.address, e.target.checked)}
-                    />
-                    <span className={`font-mono text-sm ${item.excluded ? 'text-dark-500 line-through' : 'text-dark-100'}`}>
-                      {item.address}
-                    </span>
-                    <span className="ml-auto text-xs text-dark-500">
-                      {item.excluded
-                        ? t('source_pool.excluded')
-                        : view.enabled && item.marks > 0
-                          ? t('source_pool.marks', { count: item.marks })
-                          : t('source_pool.participates')}
-                    </span>
-                  </div>
-                ))}
+                {view.addresses.map((item, index) => {
+                  const ownMarks = addressMarks.get(item.address) ?? []
+                  const struck = !manual && item.excluded
+                  const label = struck
+                    ? t('source_pool.excluded')
+                    : view.enabled && item.marks > 0
+                      ? t('source_pool.marks', { count: item.marks })
+                      : manual ? t('source_pool.unassigned') : t('source_pool.participates')
+                  return (
+                    <div key={item.address} className="flex items-center gap-3 py-2.5">
+                      {!manual && (
+                        <Checkbox
+                          checked={!item.excluded}
+                          disabled={!canToggle}
+                          onChange={e => toggleAddress(item.address, e.target.checked)}
+                        />
+                      )}
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${struck ? 'bg-dark-600' : addressDotClass(index)}`} />
+                      <div className="min-w-0 flex-1">
+                        <div className={`font-mono text-sm ${struck ? 'text-dark-500 line-through' : 'text-dark-100'}`}>
+                          {item.address}
+                        </div>
+                        {ownMarks.length > 0 && (
+                          <div className="font-mono text-2xs text-dark-500 mt-0.5 break-words">{formatMarks(ownMarks)}</div>
+                        )}
+                      </div>
+                      <span className="text-xs text-dark-500 shrink-0">{label}</span>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </motion.div>
 
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-            className="flex items-center justify-between px-4 py-3 rounded-xl bg-dark-800/40 border border-dark-700/40"
-          >
-            <div className="flex items-center gap-2 text-sm text-dark-300">
-              <DoorOpen className="w-4 h-4 text-accent-400" />
-              {t('source_pool.xray_hint')}
-            </div>
-            {exitProxyEnabled && (
-              <Link to={`/${uid}/exit-proxy`} className="text-xs text-accent-400 hover:text-accent-300 transition-colors">
-                {t('source_pool.open_exit_proxy')} →
-              </Link>
-            )}
-          </motion.div>
+          <MarkLayoutCard
+            view={view}
+            editable={canConfigure && view.enabled}
+            saving={saving}
+            onModeChange={changeMode}
+            onSaveAssignments={saveAssignments}
+          />
+
+          <SourcePoolSnippetBlock />
         </div>
       )}
     </div>

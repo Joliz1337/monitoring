@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
+import { useRememberedState } from '../hooks/useRememberedState'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -20,21 +21,21 @@ function ModeBadge({ node }: { node: NodeAntiDdosState }) {
   if (!node.emergency_mode) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-green-500/15 text-green-400">
-        <ShieldCheck className="w-3 h-3" /> {t('anti_ddos.mode_normal')}
+        <ShieldCheck className="w-3.5 h-3.5" /> {t('anti_ddos.mode_normal')}
       </span>
     )
   }
   const src = node.source === 'auto' ? t('anti_ddos.source_auto') : t('anti_ddos.source_manual')
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-red-500/15 text-red-400">
-      <ShieldAlert className="w-3 h-3" /> {t('anti_ddos.mode_emergency')} · {src}
+      <ShieldAlert className="w-3.5 h-3.5" /> {t('anti_ddos.mode_emergency')} · {src}
     </span>
   )
 }
 
 export default function AntiDdos() {
   const { t } = useTranslation()
-  const [activeTab, setActiveTab] = useState<TabType>('control')
+  const [activeTab, setActiveTab] = useRememberedState<TabType>('anti-ddos.tab', 'control')
   const [status, setStatus] = useState<AntiDdosStatus | null>(null)
   const [settings, setSettings] = useState<AntiDdosSettings | null>(null)
   const [loading, setLoading] = useState(true)
@@ -249,8 +250,8 @@ export default function AntiDdos() {
                         <span className="font-medium truncate">{node.server_name}</span>
                         <ModeBadge node={node} />
                         {!nodeAllowed && (
-                          <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-[10px] font-medium">
-                            <Lock className="w-3 h-3" />
+                          <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-2xs font-medium">
+                            <Lock className="w-3.5 h-3.5" />
                             {t('node_caps.row_blocked')}
                           </span>
                         )}
@@ -326,7 +327,7 @@ export default function AntiDdos() {
                             await patchSettings({ user_cidrs: list })
                           }}
                           className="text-dark-500 hover:text-red-400">
-                          <Trash2 className="w-3 h-3" />
+                          <Trash2 className="w-4 h-4" />
                         </button>
                       </span>
                     ))}
@@ -381,7 +382,7 @@ export default function AntiDdos() {
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-medium text-sm truncate">{s.name}</span>
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-dark-800 text-dark-400">{s.ip_count} IP/CIDR</span>
+                            <span className="text-2xs px-1.5 py-0.5 rounded bg-dark-800 text-dark-400">{s.ip_count} IP/CIDR</span>
                           </div>
                           <div className="text-xs text-dark-500 truncate font-mono">{s.url}</div>
                           {s.error_message && <div className="text-xs text-red-400 truncate">{s.error_message}</div>}

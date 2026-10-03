@@ -5,6 +5,7 @@ import { Gauge, Loader2, CheckCircle2, AlertTriangle } from 'lucide-react'
 import { proxyApi, BandwidthLimitState, type Server } from '../../api/client'
 import { nodeAllows } from '../../utils/nodeCapabilities'
 import { Tooltip } from '../ui/Tooltip'
+import { Checkbox } from '../ui/Checkbox'
 
 const MIN_MBIT = 1
 const MAX_MBIT = 100_000
@@ -116,13 +117,7 @@ export default function BandwidthLimitCard({ serverId, server }: Props) {
 
       <div className="flex items-center gap-3 flex-wrap">
         <label className="inline-flex items-center gap-2 text-sm text-dark-300 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={enabled}
-            disabled={!writable || loading}
-            onChange={e => setEnabled(e.target.checked)}
-            className="accent-accent-500"
-          />
+          <Checkbox checked={enabled} disabled={!writable || loading} onChange={e => setEnabled(e.target.checked)} />
           {t('server_details.bandwidth_enable')}
         </label>
         <div className="flex items-center gap-2">
@@ -143,7 +138,7 @@ export default function BandwidthLimitCard({ serverId, server }: Props) {
           disabled={!writable || saving || loading}
           className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
         >
-          {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+          {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
           {t('server_details.bandwidth_apply')}
         </button>
       </div>

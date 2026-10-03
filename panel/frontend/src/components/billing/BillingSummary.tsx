@@ -115,7 +115,7 @@ export function BillingSummary({ servers, t, formatDateTime }: {
               <span className={`text-xs font-medium tabular-nums ${tile.asideClass}`}>{tile.aside}</span>
             )}
           </div>
-          <div className="text-[11px] text-dark-500 mt-0.5 truncate">{tile.hint}</div>
+          <div className="text-2xs text-dark-500 mt-0.5 truncate">{tile.hint}</div>
         </div>
       ))}
     </motion.div>

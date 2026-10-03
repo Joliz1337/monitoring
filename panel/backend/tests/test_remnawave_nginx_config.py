@@ -403,14 +403,30 @@ class TlsAndConnectionsTests(unittest.TestCase):
         config = generate_full_config(
             ProfileOptions(proxy_protocol_enabled=True, proxy_protocol_port=8449), GRPC_RULES,
         )
-        self.assertIn("listen 443 ssl so_keepalive=30s:10s:3;", config)
-        self.assertIn("listen 8449 ssl proxy_protocol so_keepalive=30s:10s:3;", config)
+        self.assertIn("listen 443 ssl backlog=65535 so_keepalive=30s:10s:3;", config)
+        self.assertIn("listen 8449 ssl proxy_protocol backlog=65535 so_keepalive=30s:10s:3;", config)
         self.assertIn("listen 80;", self._listen_lines(config))
 
     def test_client_keepalive_empty_omits_parameter(self):
         config = generate_full_config(ProfileOptions(client_tcp_keepalive=""), GRPC_RULES)
         self.assertNotIn("so_keepalive", config)
-        self.assertIn("listen 443 ssl;", config)
+        self.assertIn("listen 443 ssl backlog=65535;", config)
+
+    def test_client_listens_get_full_backlog(self):
+        """Со своими 511 порт nginx — самая узкая SYN-очередь на ноде: недоделанные
+        рукопожатия релеев переполняют её, ядро шлёт cookies, и вотчдог
+        принимает это за SYN-флуд. Параметр сокета nginx принимает один раз на
+        адрес:порт, поэтому у блока default_server на 443 его нет."""
+        config = generate_full_config(
+            ProfileOptions(proxy_protocol_enabled=True, reject_default_server=True), GRPC_RULES,
+        )
+        listens = self._listen_lines(config)
+        for port in ("443", "8449"):
+            with self.subTest(port=port):
+                on_port = [l for l in listens if l.startswith(f"listen {port} ")]
+                self.assertEqual(sum("backlog=65535" in l for l in on_port), 1)
+        self.assertIn("listen 443 ssl default_server;", listens)
+        self.assertIn("listen 80;", listens)
 
     def test_client_keepalive_bad_format_rejected(self):
         for bad in ("30:10", "abc", "30s:10s:0", "30s:10s:101", "30h:10s:3"):
@@ -580,6 +596,42 @@ class ProxyTargetResolutionTests(unittest.TestCase):
         self.assertIn("proxy_pass https://1.2.3.4:8445;", config)
         self.assertNotIn("set $rw_upstream", config)
         self.assertNotIn("proxy_ssl_server_name", config)
+
+
+class GrpcCustomPathTests(unittest.TestCase):
+    """serviceName со слэшем в начале — свой путь gRPC: Xray шлёт запрос ровно
+    на него, без /Tun, и локация должна совпадать с ним один в один."""
+
+    CUSTOM = GrpcRule(name="seg", service_path="/v1/segment/9f3c1a7be04d2856/Fetch", port=8443)
+
+    def test_location_is_path_as_is(self):
+        config = generate_full_config(ProfileOptions(), [self.CUSTOM])
+        self.assertIn("location ^~ /v1/segment/9f3c1a7be04d2856/Fetch {", config)
+        self.assertNotIn("location ^~ //", config)
+
+    def test_classic_name_keeps_prefix_location(self):
+        config = generate_full_config(ProfileOptions(), GRPC_RULES)
+        self.assertIn("location ^~ /trgrpc {", config)
+
+    def test_round_trip_next_to_classic_rules(self):
+        rules = [*GRPC_RULES, self.CUSTOM, *XHTTP_RULES]
+        config = generate_full_config(ProfileOptions(), rules)
+        self.assertEqual(parse_rules_from_config(config), rules)
+        self.assertEqual(splice_rules(config, rules, ProfileOptions()), config)
+
+    def test_malformed_custom_paths_rejected(self):
+        # Один сегмент Xray склеит в «//метод»; пустой сегмент или хвостовой
+        # слэш дают пустое имя метода; «|» — два пути, а локация одна
+        for service_path in ("/Fetch", "/v1/segment/", "/v1//Fetch", "/v1/Up|Down", "/v1/Fe tch"):
+            with self.subTest(service_path=service_path), self.assertRaises(RuleValidationError):
+                validate_rules([GrpcRule(name="a", service_path=service_path, port=8443)])
+
+    def test_custom_path_clashes_with_same_xhttp_path(self):
+        with self.assertRaises(RuleValidationError):
+            validate_rules([
+                GrpcRule(name="a", service_path="/v1/stream", port=8443),
+                XhttpRule(name="b", path="/v1/stream", port=2081),
+            ])
 
 
 class LocalStubTests(unittest.TestCase):

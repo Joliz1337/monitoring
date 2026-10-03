@@ -16,6 +16,11 @@ Outgoing (out): iptables OUTPUT chain, match dst → DROP (block) / ACCEPT (allo
 Правило ACCEPT белого списка всегда вставляется в позицию 1 цепочки (выше всех
 DROP) — iptables идёт сверху вниз и ACCEPT обрывает обход, поэтому доверенный IP
 проходит ещё до блокировок, даже если попадает под заблокированный CIDR.
+
+Закрытый ping — молчаливый DROP входящих echo-request всем, кроме белого списка:
+сканер не отличает сервер от выключенного, а панель и соседние ноды пингуют как
+раньше. Исключение белого списка — внутри самого правила, поэтому от порядка
+правил в INPUT оно не зависит. По IPv6 ping закрыт для всех: белый список — IPv4.
 """
 
 import ipaddress
@@ -68,6 +73,14 @@ SET_ALLOW_OUT = "allowlist_out"
 
 DEFAULT_TIMEOUT = 600  # 10 minutes
 
+# Закрываем только echo-request: остальной ICMP (fragmentation needed и т.п.)
+# нужен самой сети — без него PMTU discovery ломается и соединения виснут
+PING_RULE_V4 = [
+    "INPUT", "-p", "icmp", "--icmp-type", "echo-request",
+    "-m", "set", "!", "--match-set", SET_ALLOW, "src", "-j", "DROP",
+]
+PING_RULE_V6 = ["INPUT", "-p", "ipv6-icmp", "--icmpv6-type", "echo-request", "-j", "DROP"]
+
 # Direction config: chain + match flag
 _DIR_CONFIG = {
     "in":  {"chain": "INPUT",  "match": "src", "perm": SET_PERMANENT,     "temp": SET_TEMP},
@@ -95,6 +108,7 @@ class IpsetStatus:
     incoming: DirectionStatus
     outgoing: DirectionStatus
     temp_timeout: int
+    ping_blocked: bool = False
 
 
 class IpsetManager:
@@ -103,6 +117,7 @@ class IpsetManager:
     def __init__(self):
         self._use_nsenter = running_in_container()
         self._temp_timeout = DEFAULT_TIMEOUT
+        self._block_ping = False
         self._initialized = False
         # Мутации сетов сериализуются: эндпоинты выполняются в threadpool,
         # параллельные sync с панели не должны перемешивать diff-ы.
@@ -162,6 +177,9 @@ class IpsetManager:
 
     def _run_iptables(self, args: list[str]) -> tuple[bool, str, str]:
         return self._run_cmd(["iptables"] + args)
+
+    def _run_ip6tables(self, args: list[str]) -> tuple[bool, str, str]:
+        return self._run_cmd(["ip6tables"] + args)
 
     # ── helpers to resolve direction → set names / chain ──
 
@@ -274,7 +292,48 @@ class IpsetManager:
             logger.info(f"Allowlist ACCEPT rule on top of {cfg['chain']} ({direction})")
         else:
             logger.error(f"Failed to add allowlist ACCEPT rule ({direction}): {stderr}")
-    
+
+    # ── ping (ICMP echo-request) ──
+
+    @staticmethod
+    def _sync_rule(run, rule: list[str], present: bool) -> tuple[bool, str]:
+        """Идемпотентно поставить или снять правило; rule начинается с имени цепочки."""
+        check = ["-C"] + rule
+        if present:
+            if run(check)[0]:
+                return True, ""
+            ok, _, stderr = run(["-I", rule[0], "1"] + rule[1:])
+            return ok, stderr
+        # Снимаем все копии: оставшийся дубль держал бы ping закрытым
+        while run(check)[0]:
+            ok, _, stderr = run(["-D"] + rule)
+            if not ok:
+                return False, stderr
+        return True, ""
+
+    def _apply_ping_rules(self, block: bool) -> tuple[bool, str]:
+        ok, message = self._sync_rule(self._run_iptables, PING_RULE_V4, block)
+        if not ok:
+            return False, message
+        # IPv6 — по возможности: на хосте с выключенным IPv6 ip6tables может
+        # отказать, и из-за этого ping по IPv4 не должен остаться открытым
+        ok6, message6 = self._sync_rule(self._run_ip6tables, PING_RULE_V6, block)
+        if not ok6:
+            logger.warning(f"IPv6 ping rule not applied: {message6}")
+        return True, "Ping blocked" if block else "Ping allowed"
+
+    def set_ping_block(self, block: bool) -> tuple[bool, str]:
+        with self._mutate_lock:
+            ok, message = self._apply_ping_rules(block)
+            if not ok:
+                logger.error(f"Failed to {'block' if block else 'allow'} ping: {message}")
+                return False, message
+            if block != self._block_ping:
+                self._block_ping = block
+                self._save_config()
+                logger.info(f"Ping {'blocked' if block else 'allowed'} (except allowlist)")
+        return True, message
+
     # ── init ──
     
     def init_sets(self) -> tuple[bool, str]:
@@ -309,6 +368,12 @@ class IpsetManager:
                 return False, f"Failed to create {direction} allow set: {msg}"
             self._ensure_allow_rule_priority(direction)
 
+        # Правило ping ссылается на allowlist — ставится после создания сета.
+        # После ребута хоста его в INPUT нет, восстанавливаем по сохранённому флагу
+        success, msg = self._apply_ping_rules(self._block_ping)
+        if not success:
+            logger.error(f"Failed to restore ping rule: {msg}")
+
         self._load_permanent_ips()
         self._load_allow_ips()
 
@@ -325,6 +390,7 @@ class IpsetManager:
             with open(PERSISTENT_FILE, 'r') as f:
                 data = json.load(f)
                 self._temp_timeout = data.get('temp_timeout', DEFAULT_TIMEOUT)
+                self._block_ping = bool(data.get('block_ping', False))
         except Exception as e:
             logger.warning(f"Failed to load config: {e}")
     
@@ -340,7 +406,7 @@ class IpsetManager:
             'in_allow': self._get_allow_cfg("in")["set"],
             'out_allow': self._get_allow_cfg("out")["set"],
         }
-        data: dict = {'temp_timeout': self._temp_timeout}
+        data: dict = {'temp_timeout': self._temp_timeout, 'block_ping': self._block_ping}
         for key, set_name in sources.items():
             members = self._list_members(set_name)
             if members is None:
@@ -710,6 +776,7 @@ class IpsetManager:
             incoming=_dir_status("in"),
             outgoing=_dir_status("out"),
             temp_timeout=self._temp_timeout,
+            ping_blocked=self._run_iptables(["-C"] + PING_RULE_V4)[0],
         )
 
 

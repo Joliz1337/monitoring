@@ -24,6 +24,7 @@ from app.services.ephemeral_ports import (
     read_kernel_settings,
     scan_listening_ports,
 )
+from app.services.loss_probe import LossProbe, get_loss_probe, readable_sources
 from app.services.numa import read_numa_nodes
 from app.services.port_traffic_sampler import get_port_traffic_sampler
 from app.services.rate_sampler import (
@@ -42,9 +43,10 @@ NO_RATE = (0.0, 0.0)
 class MetricsCollector:
     """Collects current system metrics from host."""
 
-    def __init__(self, rate_sampler: Optional[RateSampler] = None):
+    def __init__(self, rate_sampler: Optional[RateSampler] = None, loss_probe: Optional[LossProbe] = None):
         self.settings = get_settings()
         self._rate_sampler = rate_sampler or get_rate_sampler()
+        self._loss_probe = loss_probe or get_loss_probe()
         # Process cache to avoid blocking
         self._processes_cache: list = []
         self._processes_cache_time: float = 0
@@ -64,7 +66,9 @@ class MetricsCollector:
         # Права в пределах процесса не меняются — собирать карту заново на
         # каждый опрос (а он раз в 10 секунд) незачем
         from app.capabilities import get_policy
-        self._capabilities: Optional[dict] = get_policy().published()
+        policy = get_policy()
+        self._capabilities: Optional[dict] = policy.published()
+        self._loss_probe_sources = readable_sources(policy)
 
     def _read_host_file(self, path: str) -> str:
         """Read file from host filesystem"""
@@ -819,6 +823,7 @@ class MetricsCollector:
             "antiddos": antiddos,
             "live_rates": self.live_rates(rates),
             "window": window,
+            "loss_probe": self._loss_probe.snapshot(self._loss_probe_sources),
             "agent_version": self._agent_version,
             "capabilities": self._capabilities,
         }

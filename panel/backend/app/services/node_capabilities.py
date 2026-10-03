@@ -56,6 +56,7 @@ DOMAIN_PREFIXES: dict[str, Capability] = {
     "/api/system/execute": Capability.EXEC,
     "/api/system/execute-stream": Capability.EXEC,
     "/api/dnat": Capability.DNAT,
+    "/api/loss-probe": Capability.SYSTEM,
 }
 
 ALWAYS_ALLOWED: frozenset[str] = frozenset({

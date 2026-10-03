@@ -15,7 +15,7 @@ from app.services.http_client import get_node_client, get_node_apply_client, nod
 from app.database import get_db
 from app.models import Server, ServerCache, MetricsSnapshot
 from app.auth import verify_auth
-from app.services import update_channel
+from app.services import node_update_watcher, update_channel
 from app.services.metrics_history import HistoryPeriod, load_history
 from app.services.metrics_rates import enrich_metrics_with_speeds
 from app.services.node_capabilities import (
@@ -31,7 +31,15 @@ from app.services.traffic_import import (
     node_supports_traffic_v2,
 )
 from app.services import network_transactions
-from app.services.network_addresses import AddressInputError, expand_entries, normalize_ref, preview
+from app.services.network_addresses import (
+    MAX_ADDRESSES,
+    AddressInputError,
+    expand_entries,
+    normalize_ref,
+    parse_gateway,
+    preview,
+    with_gateway,
+)
 from app.services.reserved_ports_sync import _version_tuple
 
 logger = logging.getLogger(__name__)
@@ -538,6 +546,71 @@ async def set_bandwidth_limit(
     return await proxy_request(server, "/api/system/bandwidth-limit", method="POST", json_data=data, timeout=40.0)
 
 
+# ==================== Download proxy (прокси для загрузок ноды) ====================
+
+# Тот же шаблон, что у ноды (DOWNLOAD_PROXY_URL_PATTERN): адрес уходит в sourced
+# proxy.conf, apt.conf и Environment= юнита Docker — без кавычек и метасимволов
+DOWNLOAD_PROXY_URL_PATTERN = r"^https?://[A-Za-z0-9._~%!*+,=:@\[\]-]+/?$"
+# Проверка ждёт ответа GitHub и реестра через прокси, до 10 с на адрес
+DOWNLOAD_PROXY_TEST_TIMEOUT = 40.0
+
+
+class DownloadProxyRequest(BaseModel):
+    url: str = Field(..., max_length=255, pattern=DOWNLOAD_PROXY_URL_PATTERN)
+
+
+class DownloadProxyTestRequest(BaseModel):
+    url: Optional[str] = Field(None, max_length=255, pattern=DOWNLOAD_PROXY_URL_PATTERN)
+
+
+@router.get("/{server_id}/system/download-proxy")
+async def get_download_proxy(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/system/download-proxy", timeout=30.0)
+
+
+@router.put("/{server_id}/system/download-proxy")
+async def set_download_proxy(
+    server_id: int,
+    data: DownloadProxyRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Задать прокси для загрузок вместо всех найденных. Нода перезапустит Docker."""
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(
+        server, "/api/system/download-proxy", method="PUT", json_data=data.model_dump(), timeout=40.0,
+    )
+
+
+@router.delete("/{server_id}/system/download-proxy")
+async def remove_download_proxy(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(server, "/api/system/download-proxy", method="DELETE", timeout=40.0)
+
+
+@router.post("/{server_id}/system/download-proxy/test")
+async def test_download_proxy(
+    server_id: int,
+    data: DownloadProxyTestRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    server = await get_server_by_id(server_id, db)
+    return await proxy_request(
+        server, "/api/system/download-proxy/test", method="POST",
+        json_data=data.model_dump(exclude_none=True), timeout=DOWNLOAD_PROXY_TEST_TIMEOUT,
+    )
+
+
 # ==================== Hoster access (разведка и вырезание доступов хостера) ====================
 # scan — read-only, purge — необратимо (apt purge, стирание ключей/юзеров/репо).
 # Домен `system` (префикс /api/system/), гейт версии ноды 10.29.0.
@@ -612,6 +685,7 @@ async def hoster_access_purge(
 
 class NetworkPreviewRequest(BaseModel):
     add_text: str = ""
+    gateway: str = Field("", max_length=64)
 
 
 class NetworkAddressRef(BaseModel):
@@ -622,7 +696,11 @@ class NetworkAddressRef(BaseModel):
 class NetworkApplyRequest(BaseModel):
     interface: str = Field(..., min_length=1, max_length=32)
     add_text: str = Field("", max_length=20000)
-    remove: list[NetworkAddressRef] = Field(default_factory=list)
+    # Пусто — адреса ходят через шлюз основного адреса
+    gateway: str = Field("", max_length=64)
+    remove: list[NetworkAddressRef] = Field(default_factory=list, max_length=MAX_ADDRESSES)
+    # Снятые панелью адреса хостера, которые вернуть на интерфейс
+    restore: list[NetworkAddressRef] = Field(default_factory=list, max_length=MAX_ADDRESSES)
 
 
 class NetworkRollbackRequest(BaseModel):
@@ -685,6 +763,9 @@ async def get_network_state(
         await _raise_for_node_error(server, exc)
     state.setdefault("supported", True)
     state["min_node_version"] = network_transactions.MIN_NODE_VERSION_NETWORK
+    state["min_node_version_gateway"] = network_transactions.MIN_NODE_VERSION_NETWORK_GATEWAY
+    state["min_node_version_hoster_removal"] = network_transactions.MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL
+    state["access_address"] = await network_transactions.access_address(server)
     state["node_version"] = server.node_version
     state["job"] = network_transactions.job_snapshot(server.id)
     return state
@@ -699,7 +780,7 @@ async def preview_network_addresses(
 ):
     await get_server_by_id(server_id, db)
     try:
-        return preview(data.add_text)
+        return preview(data.add_text, data.gateway)
     except AddressInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -715,20 +796,42 @@ async def apply_network_addresses(
     require_capability(server, Capability.SYSTEM, write=True)
     _require_network_support(server)
     try:
-        add = expand_entries(data.add_text) if data.add_text.strip() else []
+        gateway = parse_gateway(data.gateway)
+        add = with_gateway(expand_entries(data.add_text), gateway) if data.add_text.strip() else []
         remove = [normalize_ref(ref.address, ref.prefix) for ref in data.remove]
+        restore = [normalize_ref(ref.address, ref.prefix) for ref in data.restore]
     except AddressInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    if not add and not remove:
-        raise HTTPException(status_code=400, detail="Нечего применять: укажите адреса для добавления или удаления")
+    if not add and not remove and not restore:
+        raise HTTPException(status_code=400, detail="Нечего применять: укажите адреса для добавления, удаления или возврата")
+    if gateway and not network_transactions.node_supports_network_gateway(server.node_version):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Свой шлюз адреса поддерживает нода {network_transactions.MIN_NODE_VERSION_NETWORK_GATEWAY} "
+                f"и новее (сейчас {server.node_version or 'неизвестно'}) — обновите ноду или оставьте поле шлюза пустым"
+            ),
+        )
     try:
-        job = await network_transactions.start_apply(server, interface=data.interface, add=add, remove=remove)
+        job = await network_transactions.start_apply(
+            server, interface=data.interface, add=add, remove=remove, restore=restore,
+        )
     except network_transactions.PendingTransactionError:
         raise HTTPException(status_code=409, detail="На ноде уже идёт транзакция — дождитесь её завершения")
     except network_transactions.InterfaceNotFoundError as exc:
         raise HTTPException(status_code=400, detail=f"Интерфейс {exc.interface} не найден на ноде")
     except network_transactions.NothingToApplyError:
-        raise HTTPException(status_code=400, detail="Нечего применять: адреса уже настроены или не управляются панелью")
+        raise HTTPException(status_code=400, detail="Нечего применять: адреса уже настроены или уже сняты с интерфейса")
+    except network_transactions.HosterRemovalUnsupportedError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Удалять адреса хостера умеет нода {network_transactions.MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL} "
+                f"и новее (сейчас {exc.node_version or 'неизвестно'}) — обновите ноду"
+            ),
+        )
+    except network_transactions.GatewayConflictError as exc:
+        raise HTTPException(status_code=400, detail="; ".join(exc.problems))
     except network_transactions.ProtectedIpUnknownError:
         raise HTTPException(status_code=400, detail="Не удалось определить адрес ноды из её URL — защитить его от удаления нельзя")
     except (network_transactions.NodeNetworkError, network_transactions.NodeUnreachableError) as exc:
@@ -795,12 +898,15 @@ async def trigger_node_update(
     Trigger node update.
     Optional data: { "target_version": "v1.1.0" }
     If not specified, updates to the selected update channel (main/dev).
+    Итог панель дождётся сама и при провале обновит ноду по SSH (node_update_watcher).
     """
     server = await get_server_by_id(server_id, db)
     data = data or {}
     if not data.get("target_version"):
         data["target_version"] = update_channel.current_branch()
-    return await proxy_request(server, "/api/system/update", method="POST", json_data=data)
+    result = await proxy_request(server, "/api/system/update", method="POST", json_data=data)
+    await node_update_watcher.track(db, server, data["target_version"], result.get("attempt_id"))
+    return result
 
 
 @router.post("/{server_id}/system/execute")
@@ -945,11 +1051,6 @@ async def apply_node_optimizations(
     Fetches latest configs from GitHub and applies them.
     Accepts optional body with nic_mode: "rps" (default), "multiqueue", or "hybrid".
     """
-    server = await get_server_by_id(server_id, db)
-    # До опроса версии и до нескольких запросов на GitHub: иначе за отказ,
-    # известный заранее, платили бы полуминутой ожидания
-    require_capability(server, Capability.SYSTEM, write=True)
-
     from app.routers.settings import cpu_affinity_enabled
     from app.routers.system import (
         MIN_NODE_VERSION_FOR_RENDER,
@@ -958,6 +1059,14 @@ async def apply_node_optimizations(
         invalidate_node_cache,
         node_supports_renderer,
     )
+
+    # Настройку читаем до get_server_by_id: его commit вернёт коннект в пул, и
+    # тот не провисит минуту применения — «Обновить все» шлёт его на все ноды разом
+    cpu_affinity = await cpu_affinity_enabled(db)
+    server = await get_server_by_id(server_id, db)
+    # До опроса версии и до нескольких запросов на GitHub: иначе за отказ,
+    # известный заранее, платили бы полуминутой ожидания
+    require_capability(server, Capability.SYSTEM, write=True)
 
     nic_mode = (body or {}).get("nic_mode", "rps")
     opt_profile = (body or {}).get("opt_profile", "vpn")
@@ -1015,7 +1124,7 @@ async def apply_node_optimizations(
         "nic_mode": nic_mode,
         "opt_profile": opt_profile,
         "version": github_data.get("version"),
-        "cpu_affinity": await cpu_affinity_enabled(db),
+        "cpu_affinity": cpu_affinity,
     }
 
     result = await proxy_request(

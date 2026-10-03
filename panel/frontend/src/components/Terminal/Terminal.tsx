@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import { FAQIcon } from '../FAQ'
+import { readStorage, writeStorage } from '../../utils/storage'
 import {
   Terminal as TerminalIcon,
   Play,
@@ -70,7 +71,7 @@ export default function Terminal({ serverId }: TerminalProps) {
 
   // Load history from localStorage
   useEffect(() => {
-    const saved = localStorage.getItem(`${HISTORY_KEY}_${serverId}`)
+    const saved = readStorage(`${HISTORY_KEY}_${serverId}`)
     if (saved) {
       try {
         const parsed = JSON.parse(saved)
@@ -84,9 +85,8 @@ export default function Terminal({ serverId }: TerminalProps) {
     }
   }, [serverId])
 
-  // Save history to localStorage
   const saveHistory = useCallback((newHistory: CommandHistory[]) => {
-    localStorage.setItem(`${HISTORY_KEY}_${serverId}`, JSON.stringify(newHistory))
+    writeStorage(`${HISTORY_KEY}_${serverId}`, JSON.stringify(newHistory))
   }, [serverId])
 
   // Auto-scroll output
@@ -98,14 +98,11 @@ export default function Terminal({ serverId }: TerminalProps) {
 
   const addToHistory = useCallback((cmd: string) => {
     const newEntry = { command: cmd, timestamp: new Date() }
-    setHistory(prev => {
-      const filtered = prev.filter(h => h.command !== cmd)
-      const updated = [newEntry, ...filtered].slice(0, MAX_HISTORY)
-      saveHistory(updated)
-      return updated
-    })
+    const updated = [newEntry, ...history.filter(h => h.command !== cmd)].slice(0, MAX_HISTORY)
+    setHistory(updated)
+    saveHistory(updated)
     setHistoryIndex(-1)
-  }, [saveHistory])
+  }, [history, saveHistory])
 
   const executeCommand = useCallback(async () => {
     if (!command.trim() || isRunning) return
@@ -362,9 +359,9 @@ export default function Terminal({ serverId }: TerminalProps) {
                 }`}
               >
                 {lastResult.success ? (
-                  <CheckCircle2 className="w-3 h-3" />
+                  <CheckCircle2 className="w-3.5 h-3.5" />
                 ) : (
-                  <XCircle className="w-3 h-3" />
+                  <XCircle className="w-3.5 h-3.5" />
                 )}
                 <span>exit {lastResult.exitCode}</span>
                 <span className="text-dark-500">({lastResult.time}ms)</span>
@@ -410,7 +407,7 @@ export default function Terminal({ serverId }: TerminalProps) {
                                    scrollbar-thin scrollbar-thumb-dark-700 scrollbar-track-transparent"
                         spellCheck={false}
                       />
-                      <div className="absolute bottom-3 right-3 text-xs text-dark-600">
+                      <div className="absolute bottom-3 right-3 text-xs text-dark-500">
                         Ctrl+Enter — {t('terminal.execute')}
                       </div>
                     </div>
@@ -492,7 +489,7 @@ export default function Terminal({ serverId }: TerminalProps) {
                         <span className="text-xs text-dark-400">{t('terminal.history')}</span>
                         <button
                           onClick={clearHistory}
-                          className="text-xs text-dark-500 hover:text-danger transition-colors"
+                          className="btn-tool btn-tool-danger"
                         >
                           {t('terminal.clear_history')}
                         </button>
@@ -564,9 +561,9 @@ export default function Terminal({ serverId }: TerminalProps) {
                   {output.length > 0 && (
                     <button
                       onClick={clearOutput}
-                      className="flex items-center gap-1.5 text-xs text-dark-400 hover:text-dark-200 transition-colors"
+                      className="btn-tool"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Trash2 className="w-4 h-4" />
                       {t('terminal.clear')}
                     </button>
                   )}
@@ -575,9 +572,9 @@ export default function Terminal({ serverId }: TerminalProps) {
                   {isRunning && (
                     <button
                       onClick={() => abortControllerRef.current?.abort()}
-                      className="flex items-center gap-1.5 text-xs text-danger hover:text-danger/80 transition-colors"
+                      className="btn-tool btn-tool-danger"
                     >
-                      <X className="w-3.5 h-3.5" />
+                      <X className="w-4 h-4" />
                       {t('terminal.cancel')}
                     </button>
                   )}

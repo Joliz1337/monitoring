@@ -45,7 +45,7 @@ interface Transfer {
 function RestoreWarning({ text }: { text: string }) {
   return (
     <p className="text-xs text-warning mb-3 flex items-center gap-1.5">
-      <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+      <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
       {text}
     </p>
   )
@@ -296,7 +296,7 @@ export function BackupCard() {
                       <div className="flex items-center gap-3 text-xs text-dark-500 mt-0.5">
                         <span>{formatBytes(b.size)}</span>
                         <span>{new Date(b.created_at).toLocaleString()}</span>
-                        {b.version && <span className="text-dark-600">v{b.version}</span>}
+                        {b.version && <span className="text-dark-500">v{b.version}</span>}
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5">
@@ -415,7 +415,7 @@ export function BackupCard() {
                   </button>
                 </div>
                 <p className="text-xs text-dark-500 mt-3 flex items-center gap-1.5">
-                  <AlertTriangle className="w-3 h-3" />
+                  <AlertTriangle className="w-3.5 h-3.5" />
                   {t('settings.backup_restart_hint')}
                 </p>
               </motion.div>

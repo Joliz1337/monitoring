@@ -66,7 +66,7 @@ export default function WarpInstallLog({ jobId, onFinished, onClose }: Props) {
           <X className="w-4 h-4" />
         </button>
       </div>
-      <pre ref={logRef} className="text-[11px] font-mono text-dark-300 bg-dark-950/60 rounded-md p-2 max-h-56 overflow-auto whitespace-pre-wrap break-all">
+      <pre ref={logRef} className="text-2xs font-mono text-dark-300 bg-dark-950/60 rounded-md p-2 max-h-56 overflow-auto whitespace-pre-wrap break-all">
         {lines.join('\n')}
       </pre>
     </div>

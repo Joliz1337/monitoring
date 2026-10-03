@@ -1,4 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useRememberedState } from '../hooks/useRememberedState'
+import { useOpenIds } from '../hooks/useOpenIds'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
@@ -49,6 +51,7 @@ import {
   FirewallSyncStatus,
 } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
+import { writeStorage } from '../utils/storage'
 
 type TabKey = 'rules' | 'servers' | 'log'
 
@@ -168,39 +171,39 @@ function syncStatusBadge(status: FirewallSyncStatus | null) {
     pending: {
       color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20',
       label: 'Ожидает',
-      icon: <Clock className="w-3 h-3" />,
+      icon: <Clock className="w-3.5 h-3.5" />,
     },
     synced: {
       color: 'text-green-400 bg-green-500/10 border-green-500/20',
       label: 'Синхронизирован',
-      icon: <CheckCircle2 className="w-3 h-3" />,
+      icon: <CheckCircle2 className="w-3.5 h-3.5" />,
     },
     failed: {
       color: 'text-red-400 bg-red-500/10 border-red-500/20',
       label: 'Ошибка',
-      icon: <XCircle className="w-3 h-3" />,
+      icon: <XCircle className="w-3.5 h-3.5" />,
     },
     rolled_back: {
       color: 'text-orange-400 bg-orange-500/10 border-orange-500/20',
       label: 'Откат',
-      icon: <RefreshCw className="w-3 h-3" />,
+      icon: <RefreshCw className="w-3.5 h-3.5" />,
     },
     drifted: {
       color: 'text-dark-300 bg-dark-700/40 border-dark-600/40',
       label: 'Расхождение',
-      icon: <AlertTriangle className="w-3 h-3" />,
+      icon: <AlertTriangle className="w-3.5 h-3.5" />,
     },
     denied: {
       color: 'text-purple bg-purple/10 border-purple/20',
       label: 'Закрыто на ноде',
-      icon: <Lock className="w-3 h-3" />,
+      icon: <Lock className="w-3.5 h-3.5" />,
     },
   }
   const s = status ? map[status] : null
   if (!s) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-dark-400 bg-dark-700/30 border-dark-600/40">
-        <Clock className="w-3 h-3" /> —
+        <Clock className="w-3.5 h-3.5" /> —
       </span>
     )
   }
@@ -263,7 +266,7 @@ function RuleForm({
           <h4 className="text-sm font-medium text-dark-200 flex items-center gap-2">
             {isEdit ? <><Edit3 className="w-3.5 h-3.5 text-accent-400" /> Редактировать правило</> : <><Plus className="w-3.5 h-3.5 text-accent-400" /> Новое правило</>}
           </h4>
-          <button onClick={onCancel} className="p-1 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
+          <button onClick={onCancel} className="p-1.5 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -333,7 +336,7 @@ function RuleForm({
             disabled={saving}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
           >
-            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             {isEdit ? 'Сохранить' : 'Добавить'}
           </button>
         </div>
@@ -388,7 +391,7 @@ function BulkAddForm({
           <h4 className="text-sm font-medium text-dark-200 flex items-center gap-2">
             <ListPlus className="w-3.5 h-3.5 text-accent-400" /> Добавить правила списком
           </h4>
-          <button onClick={onCancel} className="p-1 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
+          <button onClick={onCancel} className="p-1.5 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -457,7 +460,7 @@ function BulkAddForm({
             disabled={saving}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
           >
-            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             Добавить
           </button>
         </div>
@@ -513,7 +516,7 @@ function BulkEditForm({
           <h4 className="text-sm font-medium text-dark-200 flex items-center gap-2">
             <Edit3 className="w-3.5 h-3.5 text-accent-400" /> Изменить выбранные правила ({count})
           </h4>
-          <button onClick={onCancel} className="p-1 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
+          <button onClick={onCancel} className="p-1.5 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -574,7 +577,7 @@ function BulkEditForm({
             disabled={saving}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
           >
-            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             Применить
           </button>
         </div>
@@ -701,12 +704,12 @@ function CreateProfileModal({
 
 function ProfileListItem({
   profile,
-  selected,
-  onSelect,
+  open,
+  onToggle,
 }: {
   profile: FirewallProfile
-  selected: boolean
-  onSelect: (id: number) => void
+  open: boolean
+  onToggle: (id: number) => void
 }) {
   const linked = profile.linked_servers_count
   const synced = profile.synced_servers_count
@@ -718,9 +721,9 @@ function ProfileListItem({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -4 }}
-      onClick={() => onSelect(profile.id)}
+      onClick={() => onToggle(profile.id)}
       className={`w-full text-left rounded-xl border transition-all duration-200 ${
-        selected
+        open
           ? 'bg-accent-500/10 border-accent-500/40'
           : 'bg-dark-800/60 border-dark-700/60 hover:border-dark-600'
       }`}
@@ -728,8 +731,8 @@ function ProfileListItem({
       <div className="px-4 py-3 flex items-center justify-between gap-3 min-w-0">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <Flame className={`w-4 h-4 shrink-0 ${selected ? 'text-accent-400' : 'text-dark-400'}`} />
-            <span className={`text-sm font-medium truncate ${selected ? 'text-dark-100' : 'text-dark-200'}`}>{profile.name}</span>
+            <Flame className={`w-4 h-4 shrink-0 ${open ? 'text-accent-400' : 'text-dark-400'}`} />
+            <span className={`text-sm font-medium truncate ${open ? 'text-dark-100' : 'text-dark-200'}`}>{profile.name}</span>
             {!profile.node_port_allowed && (
               <Tooltip label={`Нет правила allow для порта API ноды (${profile.node_api_port}/tcp)`}>
                 <span className="shrink-0 text-yellow-400">
@@ -751,7 +754,7 @@ function ProfileListItem({
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <span className="inline-flex items-center gap-1 text-xs text-dark-400">
-            <Server className="w-3 h-3" /> {synced}/{linked}
+            <Server className="w-3.5 h-3.5" /> {synced}/{linked}
           </span>
           {hasUnsync && (
             <Tooltip label="Есть несинхронизированные серверы">
@@ -775,6 +778,7 @@ function ProfileHeader({
   onClone,
   onDelete,
   onSave,
+  onClose,
 }: {
   profile: FirewallProfileWithServers
   saving: boolean
@@ -785,6 +789,7 @@ function ProfileHeader({
   onClone: () => void
   onDelete: () => void
   onSave: (patch: { name?: string; description?: string | null }) => Promise<void>
+  onClose: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState(profile.name)
@@ -822,7 +827,7 @@ function ProfileHeader({
             disabled={saving}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
           >
-            {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+            {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
             Сохранить
           </button>
         </div>
@@ -840,7 +845,7 @@ function ProfileHeader({
               onClick={() => setEditing(true)}
               className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-800 transition-colors"
             >
-              <Edit3 className="w-3.5 h-3.5" />
+              <Edit3 className="w-4 h-4" />
             </button>
           </Tooltip>
         </div>
@@ -858,8 +863,8 @@ function ProfileHeader({
               : 'text-dark-300 bg-dark-800/50 border border-dark-700/50 hover:border-dark-600'
           }`}
         >
-          <input type="checkbox" checked={forceSync} onChange={e => onForceChange(e.target.checked)} className="accent-orange-500" />
-          {forceSync && <AlertTriangle className="w-3 h-3" />}
+          <Checkbox checked={forceSync} onChange={e => onForceChange(e.target.checked)} tone="warning" />
+          {forceSync && <AlertTriangle className="w-3.5 h-3.5" />}
           Принудительно
         </label>
         </Tooltip>
@@ -887,6 +892,14 @@ function ProfileHeader({
         >
           <Trash2 className="w-3.5 h-3.5" /> Удалить
         </button>
+        <Tooltip label="Закрыть">
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-800 transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </Tooltip>
       </div>
     </div>
   )
@@ -1175,7 +1188,7 @@ function RulesTab({
                               onClick={() => { setEditingIndex(index); setShowForm(false) }}
                               className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors"
                             >
-                              <Edit3 className="w-3.5 h-3.5" />
+                              <Edit3 className="w-4 h-4" />
                             </button>
                           </Tooltip>
                           <Tooltip label="Удалить">
@@ -1185,7 +1198,7 @@ function RulesTab({
                               }}
                               className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <Trash2 className="w-4 h-4" />
                             </button>
                           </Tooltip>
                         </div>
@@ -1257,7 +1270,7 @@ function ServersTab({
       const next = new Set(prev)
       if (next.has(folder)) next.delete(folder)
       else next.add(folder)
-      localStorage.setItem('fw_add_expanded_folders', JSON.stringify([...next]))
+      writeStorage('fw_add_expanded_folders', JSON.stringify([...next]))
       return next
     })
   }
@@ -1552,7 +1565,7 @@ function ServersTab({
                       disabled={syncingServerId === srv.server_id}
                       className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors disabled:opacity-50"
                     >
-                      {syncingServerId === srv.server_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                      {syncingServerId === srv.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                     </button>
                   </Tooltip>
                   <Tooltip label="Отвязать">
@@ -1562,7 +1575,7 @@ function ServersTab({
                       }}
                       className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
                     >
-                      <Unlink className="w-3.5 h-3.5" />
+                      <Unlink className="w-4 h-4" />
                     </button>
                   </Tooltip>
                 </div>
@@ -1692,15 +1705,17 @@ function ProfileDetail({
   onProfileDeleted,
   onProfileChanged,
   onProfileCloned,
+  onClose,
 }: {
   profileId: number
   onProfileDeleted: () => void
   onProfileChanged: () => void
   onProfileCloned: (clone: FirewallProfile) => void
+  onClose: () => void
 }) {
   const [profile, setProfile] = useState<FirewallProfileWithServers | null>(null)
   const [loading, setLoading] = useState(true)
-  const [tab, setTab] = useState<TabKey>('rules')
+  const [tab, setTab] = useRememberedState<TabKey>('firewall-profiles.detail-tab', 'rules')
   const [availableServers, setAvailableServers] = useState<FirewallAvailableServer[]>([])
   const [log, setLog] = useState<FirewallSyncLogEntry[]>([])
   const [logLoading, setLogLoading] = useState(false)
@@ -2051,6 +2066,7 @@ function ProfileDetail({
         onClone={handleClone}
         onDelete={handleDelete}
         onSave={handleHeaderSave}
+        onClose={onClose}
       />
 
       <div className="flex items-center gap-1 border-b border-dark-700/60">
@@ -2110,7 +2126,7 @@ function ProfileDetail({
 export default function FirewallProfiles() {
   const [profiles, setProfiles] = useState<FirewallProfile[]>([])
   const [loading, setLoading] = useState(true)
-  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const { openIds, setOpenIds, open: openProfile, close: closeProfile, toggle: toggleProfile } = useOpenIds<number>('firewall-profiles.open')
   const [showCreate, setShowCreate] = useState(false)
   const initialLoadDone = useRef(false)
 
@@ -2118,10 +2134,10 @@ export default function FirewallProfiles() {
     try {
       const res = await firewallProfilesApi.list()
       setProfiles(res.data)
-      setSelectedId(prev => {
-        if (prev !== null && res.data.some(p => p.id === prev)) return prev
-        return res.data[0]?.id ?? null
-      })
+      // На первом заходе справа сразу виден первый профиль, а не пустая заглушка
+      if (!initialLoadDone.current && res.data.length > 0) {
+        setOpenIds(prev => (prev.length > 0 ? prev : [res.data[0].id]))
+      }
     } catch (err) {
       if (!initialLoadDone.current) toast.error(extractErrorMessage(err, 'Не удалось загрузить профили'))
     } finally {
@@ -2130,7 +2146,7 @@ export default function FirewallProfiles() {
         setLoading(false)
       }
     }
-  }, [])
+  }, [setOpenIds])
 
   useEffect(() => {
     fetchProfiles()
@@ -2145,18 +2161,21 @@ export default function FirewallProfiles() {
   const handleCreated = (profile: FirewallProfile) => {
     setShowCreate(false)
     setProfiles(prev => [...prev, profile])
-    setSelectedId(profile.id)
+    openProfile(profile.id)
   }
 
-  const handleDeleted = async () => {
-    setSelectedId(null)
+  const handleDeleted = async (id: number) => {
+    closeProfile(id)
     await fetchProfiles()
   }
 
   const handleCloned = async (clone: FirewallProfile) => {
     await fetchProfiles()
-    setSelectedId(clone.id)
+    openProfile(clone.id)
   }
+
+  // Запомненный с прошлого захода профиль мог быть удалён — открываем только живые
+  const openProfileIds = openIds.filter(id => profiles.some(p => p.id === id))
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
@@ -2198,29 +2217,33 @@ export default function FirewallProfiles() {
                 <ProfileListItem
                   key={p.id}
                   profile={p}
-                  selected={p.id === selectedId}
-                  onSelect={setSelectedId}
+                  open={openIds.includes(p.id)}
+                  onToggle={toggleProfile}
                 />
               ))}
             </AnimatePresence>
           )}
         </div>
 
-        <div className="card">
-          {selectedId === null ? (
-            <div className="flex flex-col items-center justify-center py-16 text-dark-500">
-              <Flame className="w-10 h-10 mb-3 text-dark-600" />
-              <p className="text-sm">Выберите профиль слева</p>
+        <div className="space-y-6">
+          {openProfileIds.length === 0 ? (
+            <div className="card">
+              <div className="flex flex-col items-center justify-center py-16 text-dark-500">
+                <Flame className="w-10 h-10 mb-3 text-dark-500" />
+                <p className="text-sm">Выберите профиль слева</p>
+              </div>
             </div>
-          ) : (
-            <ProfileDetail
-              key={selectedId}
-              profileId={selectedId}
-              onProfileDeleted={handleDeleted}
-              onProfileChanged={fetchProfiles}
-              onProfileCloned={handleCloned}
-            />
-          )}
+          ) : openProfileIds.map(id => (
+            <div key={id} className="card">
+              <ProfileDetail
+                profileId={id}
+                onProfileDeleted={() => handleDeleted(id)}
+                onProfileChanged={fetchProfiles}
+                onProfileCloned={handleCloned}
+                onClose={() => closeProfile(id)}
+              />
+            </div>
+          ))}
         </div>
       </div>
 

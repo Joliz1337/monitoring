@@ -31,17 +31,17 @@ function CandidateRow({ node, candidate, isCurrent, onToggle, onSwitch }: {
 
   return (
     <div ref={setNodeRef} style={style} className={`flex flex-wrap items-center gap-2 px-3 py-2 rounded-lg border ${isCurrent ? 'border-accent-500/40 bg-accent-500/5' : 'border-dark-800 bg-dark-900/40'}`}>
-      <button ref={setActivatorNodeRef} {...attributes} {...listeners} className="text-dark-600 hover:text-dark-300 cursor-grab touch-none" title={t('exit_proxy.drag_hint')}>
+      <button ref={setActivatorNodeRef} {...attributes} {...listeners} className="text-dark-500 hover:text-dark-300 cursor-grab touch-none" title={t('exit_proxy.drag_hint')}>
         <GripVertical className="w-4 h-4" />
       </button>
       <KindIcon kind={candidate.kind} />
       <div className="min-w-[140px]">
         <div className="flex items-center gap-1.5 text-sm text-dark-100 font-mono">
           {candidate.label}
-          {candidate.primary && <span className="text-[10px] text-dark-500 font-sans">{t('exit_proxy.candidate_primary')}</span>}
-          {candidate.managed && <span className="text-[10px] text-dark-500 font-sans">{t('exit_proxy.candidate_managed')}</span>}
+          {candidate.primary && <span className="text-2xs text-dark-500 font-sans">{t('exit_proxy.candidate_primary')}</span>}
+          {candidate.managed && <span className="text-2xs text-dark-500 font-sans">{t('exit_proxy.candidate_managed')}</span>}
         </div>
-        <div className="text-[11px] text-dark-500">
+        <div className="text-2xs text-dark-500">
           {candidate.country ? <>{getFlag(candidate.country)} {candidate.country}{candidate.country_confirm ? ` · ${candidate.country_confirm}` : ''}</> : '—'}
           {candidate.ip && candidate.kind === 'warp' ? ` · ${candidate.ip}` : ''}
         </div>
@@ -56,10 +56,10 @@ function CandidateRow({ node, candidate, isCurrent, onToggle, onSwitch }: {
         {checks.map(([name, check]) => (
           <CheckChip key={name} name={name} ok={check.status === null ? null : check.ok} detail={check.detail} />
         ))}
-        {candidate.error && <span className="text-[11px] text-red-400 break-all">{candidate.error}</span>}
+        {candidate.error && <span className="text-2xs text-red-400 break-all">{candidate.error}</span>}
       </div>
 
-      <div className="text-[11px] text-dark-500 whitespace-nowrap">
+      <div className="text-2xs text-dark-500 whitespace-nowrap">
         {candidate.checked_at ? `${t('exit_proxy.checked_at')} ${formatTimeAgo(candidate.checked_at)}` : t('exit_proxy.not_checked')}
       </div>
 

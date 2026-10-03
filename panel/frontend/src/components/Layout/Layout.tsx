@@ -14,13 +14,20 @@ import {
   Shield,
   Radio,
   StickyNote,
+  ChevronDown,
   type LucideIcon
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import type { TFunction } from 'i18next'
+import type { UpdateSummary } from '../../api/client'
 import { useExtStore } from '../../stores/_extStore'
 import { useNotesStore } from '../../stores/notesStore'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { PANEL_MODULES } from '../../config/modules'
+import { useUpdateSummaryStore } from '../../stores/updateSummaryStore'
+import { useAutoRefresh } from '../../hooks/useAutoRefresh'
+import { useScrollRestoration } from '../../hooks/useScrollRestoration'
+import { useExpandedNavGroups } from '../../hooks/useExpandedNavGroups'
+import { PANEL_MODULES, buildNavTree, type NavGroup, type PanelModule } from '../../config/modules'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import NotesDrawer from '../Notes/NotesDrawer'
@@ -52,6 +59,161 @@ const navItemVariants = {
   })
 }
 
+/** Отдельный пункт из стора встаёт сразу после «Массовых операций» */
+const EXTRA_NAV_ITEM_INDEX = 3
+
+// Версии на GitHub панель кэширует на 5 минут — чаще спрашивать сводку незачем
+const UPDATE_SUMMARY_POLL_MS = 5 * 60_000
+const MAX_BADGE_COUNT = 99
+
+interface NavBadge {
+  count: number
+  hints: string[]
+}
+
+interface NavLinkItem {
+  to: string
+  icon: LucideIcon
+  label: string
+  end: boolean
+  active: boolean
+  badge?: NavBadge
+}
+
+type SidebarEntry =
+  | { kind: 'link'; item: NavLinkItem }
+  | { kind: 'group'; group: NavGroup; items: NavLinkItem[] }
+
+/** Число на значке — сколько всего обновить: панель считается за одну, плюс каждая отставшая нода */
+function updatesBadge(summary: UpdateSummary | null, t: TFunction): NavBadge | undefined {
+  if (!summary) return undefined
+  const panelUpdate = summary.panel.update_available
+  const outdatedNodes = summary.nodes.outdated
+  if (!panelUpdate && outdatedNodes === 0) return undefined
+
+  const hints: string[] = []
+  if (panelUpdate) {
+    hints.push(t('nav.updates_badge_panel', { current: summary.panel.version, latest: summary.panel.latest_version }))
+  }
+  if (outdatedNodes > 0) {
+    hints.push(t('nav.updates_badge_nodes', { count: outdatedNodes, total: summary.nodes.total, latest: summary.nodes.latest_version }))
+  }
+  return { count: (panelUpdate ? 1 : 0) + outdatedNodes, hints }
+}
+
+function NavBadgePill({ badge }: { badge: NavBadge }) {
+  return (
+    <Tooltip label={<div className="space-y-0.5">{badge.hints.map(hint => <div key={hint}>{hint}</div>)}</div>} position="right" maxWidth={300}>
+      <span className="relative z-10 ml-auto min-w-[1.25rem] h-5 px-1.5 rounded-full bg-accent-500/20 text-accent-300
+                       text-2xs font-semibold leading-none flex items-center justify-center">
+        {badge.count > MAX_BADGE_COUNT ? `${MAX_BADGE_COUNT}+` : badge.count}
+      </span>
+    </Tooltip>
+  )
+}
+
+interface SidebarLinkProps {
+  item: NavLinkItem
+  nested?: boolean
+  onNavigate: () => void
+}
+
+function SidebarLink({ item, nested = false, onNavigate }: SidebarLinkProps) {
+  return (
+    <NavLink to={item.to} end={item.end} onClick={onNavigate} className="block">
+      <motion.div
+        className={`
+          relative flex items-center gap-3 rounded-xl transition-all duration-200
+          ${nested ? 'px-3 py-2.5 text-sm' : 'px-4 py-3'}
+          ${item.active
+            ? 'bg-accent-500/10 text-accent-400'
+            : 'text-dark-400 hover:text-dark-200 hover:bg-dark-800/50'
+          }
+        `}
+        whileHover={{ x: 4 }}
+        whileTap={{ scale: 0.98 }}
+      >
+        <motion.div
+          animate={item.active ? { rotate: [0, -10, 10, 0] } : {}}
+          transition={{ duration: 0.5 }}
+        >
+          <item.icon className={nested ? 'w-4 h-4' : 'w-5 h-5'} />
+        </motion.div>
+        <span className="font-medium">{item.label}</span>
+        {item.badge && <NavBadgePill badge={item.badge} />}
+
+        {/* Glow effect for active item */}
+        {item.active && (
+          <motion.div
+            className="absolute inset-0 rounded-xl bg-accent-500/5"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+          />
+        )}
+      </motion.div>
+    </NavLink>
+  )
+}
+
+interface SidebarGroupProps {
+  group: NavGroup
+  items: NavLinkItem[]
+  expanded: boolean
+  onToggle: () => void
+  onNavigate: () => void
+}
+
+function SidebarGroup({ group, items, expanded, onToggle, onNavigate }: SidebarGroupProps) {
+  const { t } = useTranslation()
+  // У свёрнутой папки активная вкладка и значки её вкладок не видны — показываем их на самой папке
+  const highlighted = !expanded && items.some(item => item.active)
+  const collapsedBadge = expanded ? undefined : items.find(item => item.badge)?.badge
+
+  return (
+    <div>
+      <motion.button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        className={`
+          w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200
+          ${highlighted
+            ? 'bg-accent-500/10 text-accent-400'
+            : 'text-dark-400 hover:text-dark-200 hover:bg-dark-800/50'
+          }
+        `}
+        whileHover={{ x: 4 }}
+        whileTap={{ scale: 0.98 }}
+      >
+        <group.icon className="w-5 h-5" />
+        <span className="font-medium">{t(group.labelKey)}</span>
+        {collapsedBadge && <NavBadgePill badge={collapsedBadge} />}
+        <ChevronDown
+          className={`w-4 h-4 transition-transform duration-200 ${collapsedBadge ? '' : 'ml-auto'} ${expanded ? '' : '-rotate-90'}`}
+        />
+      </motion.button>
+
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className="ml-6 mt-1 pl-2 border-l border-dark-800 space-y-1">
+              {items.map(item => (
+                <SidebarLink key={item.to} item={item} nested onNavigate={onNavigate} />
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 export default function Layout() {
   const { uid } = useParams()
   const location = useLocation()
@@ -61,28 +223,70 @@ export default function Layout() {
   const notesOpen = useNotesStore(s => s.isOpen)
   const hiddenModules = useSettingsStore(s => s.hiddenModules)
   const fetchSettings = useSettingsStore(s => s.fetchSettings)
+  const [expandedGroups, setGroupOpen] = useExpandedNavGroups()
   const { t } = useTranslation()
 
   useEffect(() => { fetchSettings() }, [fetchSettings])
+
+  const updatesVisible = !hiddenModules.includes('updates')
+  const updateSummary = useUpdateSummaryStore(s => s.summary)
+  const refreshUpdateSummary = useUpdateSummaryStore(s => s.refresh)
+  useAutoRefresh(refreshUpdateSummary, { enabled: updatesVisible, customInterval: UPDATE_SUMMARY_POLL_MS })
+  const moduleBadges: Record<string, NavBadge | undefined> = {
+    updates: updatesVisible ? updatesBadge(updateSummary, t) : undefined,
+  }
+  const hasNavBadge = Object.values(moduleBadges).some(Boolean)
+
+  const pageContentRef = useRef<HTMLDivElement>(null)
+  useScrollRestoration(pageContentRef)
 
   // Каскадное появление пунктов — только при первой отрисовке меню: раздел,
   // включённый в настройках позже, иначе висел бы прозрачным index × 0.1 с
   const introDone = useRef(false)
   useEffect(() => { introDone.current = true }, [])
 
-  const baseNavItems = PANEL_MODULES
-    .filter(module => !hiddenModules.includes(module.id))
-    .map(module => ({
-      to: module.path ? `/${uid}/${module.path}` : `/${uid}`,
-      icon: module.icon,
-      label: t(module.labelKey),
-      end: module.path === '',
-    }))
+  // Сравнение по границе сегмента: иначе /remnawave подсвечивался бы и на /remnawave-nginx
+  const isPathActive = (to: string, end: boolean) =>
+    location.pathname === to || (!end && location.pathname.startsWith(`${to}/`))
 
-  const navItems = navItem 
-    ? [...baseNavItems.slice(0, 3), { to: `/${uid}/${navItem.path}`, icon: iconMap[navItem.icon] || Search, label: navItem.label, end: false }, ...baseNavItems.slice(3)]
-    : baseNavItems
-  
+  const toNavLink = (to: string, icon: LucideIcon, label: string, end: boolean): NavLinkItem =>
+    ({ to, icon, label, end, active: isPathActive(to, end) })
+
+  const moduleLink = (module: PanelModule): NavLinkItem => ({
+    ...toNavLink(
+      module.path ? `/${uid}/${module.path}` : `/${uid}`,
+      module.icon,
+      t(module.labelKey),
+      module.path === '',
+    ),
+    badge: moduleBadges[module.id],
+  })
+
+  const visibleModules = PANEL_MODULES.filter(module => !hiddenModules.includes(module.id))
+  const sidebarEntries: SidebarEntry[] = buildNavTree(visibleModules).map(entry =>
+    entry.kind === 'module'
+      ? { kind: 'link', item: moduleLink(entry.module) }
+      : { kind: 'group', group: entry.group, items: entry.modules.map(moduleLink) }
+  )
+  if (navItem) {
+    sidebarEntries.splice(EXTRA_NAV_ITEM_INDEX, 0, {
+      kind: 'link',
+      item: toNavLink(`/${uid}/${navItem.path}`, iconMap[navItem.icon] || Search, navItem.label, false),
+    })
+  }
+
+  const activeGroupId = sidebarEntries.find(
+    (entry): entry is Extract<SidebarEntry, { kind: 'group' }> =>
+      entry.kind === 'group' && entry.items.some(item => item.active)
+  )?.group.id
+
+  // Переход на вкладку из свёрнутой папки (в том числе по ссылке со страницы) раскрывает её
+  useEffect(() => {
+    if (activeGroupId) setGroupOpen(activeGroupId, true)
+  }, [activeGroupId, setGroupOpen])
+
+  const closeSidebar = () => setSidebarOpen(false)
+
   return (
     <div className="min-h-screen bg-dark-950 flex overflow-hidden">
       {/* Animated background */}
@@ -101,15 +305,16 @@ export default function Layout() {
             animate="visible"
             exit="exit"
             className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden"
-            onClick={() => setSidebarOpen(false)}
+            onClick={closeSidebar}
           />
         )}
       </AnimatePresence>
       
-      {/* Sidebar */}
-      <motion.aside 
+      {/* Sidebar: на десктопе закреплено и прокручивается само, если не влезает по высоте.
+          z-0 ниже контента (z-10) — модалки страниц должны перекрывать меню */}
+      <motion.aside
         className={`
-          fixed lg:static inset-y-0 left-0 z-50
+          fixed inset-y-0 left-0 z-50 lg:z-0
           w-72 bg-dark-900/80 backdrop-blur-xl border-r border-dark-800/50
           flex flex-col
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
@@ -140,7 +345,7 @@ export default function Layout() {
                 <div>
                   <h1 className="font-bold text-dark-100 flex items-center gap-2">
                     {t('common.monitoring')}
-                    <Sparkles className="w-3 h-3 text-accent-400" />
+                    <Sparkles className="w-3.5 h-3.5 text-accent-400" />
                   </h1>
                 </div>
               </motion.div>
@@ -150,7 +355,7 @@ export default function Layout() {
           {/* Close button for mobile */}
           <motion.button
             className="absolute top-4 right-4 p-2 rounded-lg hover:bg-dark-800 text-dark-400 lg:hidden"
-            onClick={() => setSidebarOpen(false)}
+            onClick={closeSidebar}
             whileHover={{ scale: 1.1 }}
             whileTap={{ scale: 0.9 }}
           >
@@ -158,65 +363,35 @@ export default function Layout() {
           </motion.button>
           
           {/* Navigation */}
-          <nav className="flex-1 p-4 space-y-1">
-            {navItems.map((item, index) => {
-              const isActive = item.end 
-                ? location.pathname === item.to 
-                : location.pathname.startsWith(item.to)
-              
-              return (
-                <motion.div
-                  key={item.to}
-                  custom={index}
-                  variants={navItemVariants}
-                  initial={introDone.current ? false : 'hidden'}
-                  animate="visible"
-                >
-                  <NavLink
-                    to={item.to}
-                    end={item.end}
-                    onClick={() => setSidebarOpen(false)}
-                    className="block"
-                  >
-                    <motion.div
-                      className={`
-                        relative flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200
-                        ${isActive 
-                          ? 'bg-accent-500/10 text-accent-400' 
-                          : 'text-dark-400 hover:text-dark-200 hover:bg-dark-800/50'
-                        }
-                      `}
-                      whileHover={{ x: 4 }}
-                      whileTap={{ scale: 0.98 }}
-                    >
-                      <motion.div
-                        animate={isActive ? { rotate: [0, -10, 10, 0] } : {}}
-                        transition={{ duration: 0.5 }}
-                      >
-                        <item.icon className="w-5 h-5" />
-                      </motion.div>
-                      <span className="font-medium">{item.label}</span>
-                      
-                      {/* Glow effect for active item */}
-                      {isActive && (
-                        <motion.div
-                          className="absolute inset-0 rounded-xl bg-accent-500/5"
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                        />
-                      )}
-                    </motion.div>
-                  </NavLink>
-                </motion.div>
-              )
-            })}
+          <nav className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain p-4 space-y-1">
+            {sidebarEntries.map((entry, index) => (
+              <motion.div
+                key={entry.kind === 'link' ? entry.item.to : entry.group.id}
+                custom={index}
+                variants={navItemVariants}
+                initial={introDone.current ? false : 'hidden'}
+                animate="visible"
+              >
+                {entry.kind === 'link' ? (
+                  <SidebarLink item={entry.item} onNavigate={closeSidebar} />
+                ) : (
+                  <SidebarGroup
+                    group={entry.group}
+                    items={entry.items}
+                    expanded={expandedGroups.has(entry.group.id)}
+                    onToggle={() => setGroupOpen(entry.group.id, !expandedGroups.has(entry.group.id))}
+                    onNavigate={closeSidebar}
+                  />
+                )}
+              </motion.div>
+            ))}
           </nav>
           
         </div>
       </motion.aside>
       
-      {/* Main content */}
-      <div className="flex-1 flex flex-col min-w-0 relative z-10">
+      {/* Main content: отступ margin, а не padding — прозрачный padding поверх меню перехватывал бы клики */}
+      <div className="flex-1 flex flex-col min-w-0 relative z-10 lg:ml-72">
         {/* Mobile header */}
         <motion.header 
           className="h-16 bg-dark-900/60 backdrop-blur-xl border-b border-dark-800/50 
@@ -227,11 +402,12 @@ export default function Layout() {
         >
           <motion.button
             onClick={() => setSidebarOpen(true)}
-            className="p-2 rounded-xl hover:bg-dark-800 text-dark-400"
+            className="relative p-2 rounded-xl hover:bg-dark-800 text-dark-400"
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
           >
             <Menu className="w-6 h-6" />
+            {hasNavBadge && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-accent-400" />}
           </motion.button>
           
           <div className="ml-4 flex items-center gap-2">
@@ -242,7 +418,7 @@ export default function Layout() {
         
         {/* Page content */}
         <main className="flex-1 overflow-auto">
-          <div className="p-6 lg:p-8">
+          <div ref={pageContentRef} className="p-6 lg:p-8">
             <div key={location.pathname} className="animate-page-enter">
               <Outlet />
             </div>

@@ -1,7 +1,8 @@
 """Blocklist management router for IP/CIDR blocking (incoming + outgoing)
 
 All rule mutations (add/delete global, server, source toggle) trigger
-background sync so changes are applied to nodes automatically.
+background sync so changes are applied to nodes automatically. Allow
+(whitelist) rules go out as a separate lightweight allowlist push.
 """
 
 import asyncio
@@ -16,8 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import get_db
 from app.models import BlocklistRule, BlocklistSource, Server
+from app.services import ping_block
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.net_utils import is_public_range
+from app.services.ping_block import PingBlockMode, PingBlockScope
 
 NON_PUBLIC_BLOCK_ERROR = (
     "Blocking private/reserved ranges is not allowed: "
@@ -209,7 +212,7 @@ async def add_global_rules_bulk(
 
     if added > 0:
         invalidate_all_server_rules_cache()
-        bg.add_task(manager.sync_all_nodes)
+        _apply_global_change(bg, {request.list_type})
 
     return {
         "success": True,
@@ -242,25 +245,28 @@ async def delete_global_rule(
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
 
+    list_type = rule.list_type or "block"
     await db.delete(rule)
     await db.commit()
 
     invalidate_all_server_rules_cache()
-    bg.add_task(manager_sync_all)
+    _apply_global_change(bg, {list_type})
 
     return {"success": True, "message": "Rule deleted"}
 
 
-async def _bulk_delete_rules(db: AsyncSession, rule_ids: list[int], server_id: Optional[int]) -> int:
-    """Delete rules by ID within scope (global if server_id is None). Returns deleted count."""
+async def _bulk_delete_rules(db: AsyncSession, rule_ids: list[int], server_id: Optional[int]) -> list[str]:
+    """Delete rules by ID within scope (global if server_id is None). Returns list_type of each deleted rule."""
     scope = BlocklistRule.server_id.is_(None) if server_id is None else BlocklistRule.server_id == server_id
-    deleted = 0
+    deleted: list[str] = []
     for start in range(0, len(rule_ids), EXISTING_LOOKUP_CHUNK):
         chunk = rule_ids[start:start + EXISTING_LOOKUP_CHUNK]
         result = await db.execute(
-            delete(BlocklistRule).where(and_(BlocklistRule.id.in_(chunk), scope))
+            delete(BlocklistRule)
+            .where(and_(BlocklistRule.id.in_(chunk), scope))
+            .returning(BlocklistRule.list_type)
         )
-        deleted += result.rowcount or 0
+        deleted.extend(list_type or "block" for list_type in result.scalars())
     await db.commit()
     return deleted
 
@@ -274,13 +280,23 @@ async def delete_global_rules_bulk(
 ):
     """Delete multiple global blocklist rules. One background sync per call."""
     ids = list(dict.fromkeys(request.rule_ids))
-    deleted = await _bulk_delete_rules(db, ids, server_id=None)
+    deleted_types = await _bulk_delete_rules(db, ids, server_id=None)
 
-    if deleted > 0:
+    if deleted_types:
         invalidate_all_server_rules_cache()
-        bg.add_task(manager_sync_all)
+        _apply_global_change(bg, set(deleted_types))
 
+    deleted = len(deleted_types)
     return {"success": True, "deleted": deleted, "not_found": len(ids) - deleted}
+
+
+def _apply_global_change(bg: BackgroundTasks, list_types: set[str]) -> None:
+    """Белый список — сотни адресов, его рассылка не тянет за собой блок-лист
+    на миллион записей; полный синк нужен только при смене блок-правил."""
+    if "allow" in list_types:
+        get_blocklist_manager().request_allowlist_push()
+    if "block" in list_types:
+        bg.add_task(manager_sync_all)
 
 
 async def manager_sync_all():
@@ -478,7 +494,7 @@ async def delete_server_rules_bulk(
         raise HTTPException(status_code=404, detail="Server not found")
 
     ids = list(dict.fromkeys(request.rule_ids))
-    deleted = await _bulk_delete_rules(db, ids, server_id=server_id)
+    deleted = len(await _bulk_delete_rules(db, ids, server_id=server_id))
 
     if deleted > 0:
         invalidate_server_rules_cache(server_id)
@@ -682,6 +698,42 @@ async def refresh_all_sources(
 
 
 # === Settings ===
+
+class PingBlockScopeRequest(BaseModel):
+    mode: PingBlockMode
+    folders: list[str] = Field(default_factory=list, max_length=1000)
+    server_ids: list[int] = Field(default_factory=list, max_length=10000)
+
+
+class BlocklistSettingsUpdate(BaseModel):
+    ping_block: PingBlockScopeRequest
+
+
+@router.get("/settings")
+async def get_blocklist_settings(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Ping block scope and servers in it whose agent is too old to apply it."""
+    return await ping_block.describe(db)
+
+
+@router.put("/settings")
+async def update_blocklist_settings(
+    request: BlocklistSettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Close ping (except the allowlist) nowhere, everywhere or on chosen folders/servers."""
+    scope = request.ping_block
+    await ping_block.save_scope(db, PingBlockScope(
+        mode=scope.mode,
+        folders=frozenset(f.strip() for f in scope.folders if f.strip()),
+        server_ids=frozenset(scope.server_ids),
+    ))
+    get_blocklist_manager().request_allowlist_push()
+    return await ping_block.describe(db)
+
 
 # === Sync ===
 

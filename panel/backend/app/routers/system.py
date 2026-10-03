@@ -20,7 +20,8 @@ from app.auth import verify_auth
 from app.config import get_settings
 from app.database import get_db, async_session
 from app.models import Server, PanelSettings
-from app.services import update_channel
+from app.services import node_update_watcher, release_versions, update_channel
+from app.services.haproxy_upgrade import describe_haproxy
 from app.services.net_utils import panel_ip_info
 from app.services.panel_host_metrics import HostHistoryPeriod, load_host_history
 from app.services.server_status import get_offline_threshold, resolve_status
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 NODE_VERSIONS_CACHE_TTL_SEC = 30.0
 NODE_NIC_INFO_CACHE_TTL_SEC = 20.0
+OPTIMIZATIONS_CACHE_TTL_SEC = 60.0
+OPTIMIZATIONS_FAILED_CACHE_TTL_SEC = 5.0
 
 # Ссылка подставляется в текст shell-скрипта, который апдейтер исполняет в
 # privileged-контейнере с docker.sock — то есть это прямой путь к произвольной
@@ -44,6 +47,9 @@ _node_versions_locks: dict[int, asyncio.Lock] = {}
 
 _node_nic_info_cache: dict[int, tuple[float, Any]] = {}
 _node_nic_info_locks: dict[int, asyncio.Lock] = {}
+
+_optimizations_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+_optimizations_lock = asyncio.Lock()
 
 
 def _get_per_server_lock(locks: dict[int, asyncio.Lock], server_id: int) -> asyncio.Lock:
@@ -85,16 +91,8 @@ UPDATER_CONTAINER_NAME = "panel-updater"
 UPDATER_IMAGE = "docker:cli"
 
 
-# URL строятся на каждый запрос: базовая ветка зависит от выбранного канала
+# URL строится на каждый запрос: базовая ветка зависит от выбранного канала
 # обновлений (main/dev) и может меняться в рантайме через настройки панели.
-def _github_panel_version_url() -> str:
-    return f"{update_channel.github_raw_base()}/panel/VERSION"
-
-
-def _github_node_version_url() -> str:
-    return f"{update_channel.github_raw_base()}/node/VERSION"
-
-
 def _github_configs_url(filename: str) -> str:
     return f"{update_channel.github_configs_base()}/{filename}"
 
@@ -149,52 +147,10 @@ def get_current_version() -> str:
     return "unknown"
 
 
-async def get_latest_version_from_github() -> Optional[str]:
-    """Fetch latest panel version from panel/VERSION file on GitHub"""
-    try:
-        client = get_external_client()
-        response = await client.get(_github_panel_version_url(), timeout=10.0)
-
-        if response.status_code == 200:
-            version = response.text.strip()
-            return version if version else None
-
-        return None
-    except Exception as e:
-        logger.error(f"Failed to fetch latest version from GitHub: {e}")
-        return None
-
-
-async def get_latest_node_version_from_github() -> Optional[str]:
-    """Fetch latest node version from node/VERSION file on GitHub"""
-    try:
-        client = get_external_client()
-        response = await client.get(_github_node_version_url(), timeout=10.0)
-
-        if response.status_code == 200:
-            version = response.text.strip()
-            return version if version else None
-
-        return None
-    except Exception as e:
-        logger.error(f"Failed to fetch latest node version from GitHub: {e}")
-        return None
-
-
-async def get_latest_optimizations_version_from_github() -> Optional[str]:
-    """Fetch latest optimizations version from configs/VERSION file on GitHub"""
-    try:
-        client = get_external_client()
-        response = await client.get(_github_configs_url("VERSION"), timeout=10.0)
-
-        if response.status_code == 200:
-            version = response.text.strip()
-            return version if version else None
-
-        return None
-    except Exception as e:
-        logger.error(f"Failed to fetch latest optimizations version from GitHub: {e}")
-        return None
+def _panel_update_available(current_version: str, latest_version: Optional[str]) -> bool:
+    if current_version == "unknown":
+        return False
+    return release_versions.is_newer(latest_version, current_version)
 
 
 async def _fetch_node_all_versions(server: Server) -> Optional[dict]:
@@ -290,6 +246,15 @@ def get_docker_client():
         raise
 
 
+@router.get("/node-updates")
+async def list_node_updates(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    """Идущие обновления нод через агента и этап каждого — без запросов к нодам."""
+    return {"updates": await node_update_watcher.list_agent_updates(db)}
+
+
 @router.get("/version/base")
 async def get_version_base(
     db: AsyncSession = Depends(get_db),
@@ -300,41 +265,66 @@ async def get_version_base(
     Загружается мгновенно, ноды приходят без version/status — их грузит фронт поштучно.
     """
     current_version = get_current_version()
+    latest = await release_versions.latest_versions()
 
     result = await db.execute(
         select(Server).where(Server.is_active == True).order_by(Server.position)
     )
     servers = result.scalars().all()
 
-    latest_version, latest_node_version, latest_opt_version = await asyncio.gather(
-        get_latest_version_from_github(),
-        get_latest_node_version_from_github(),
-        get_latest_optimizations_version_from_github(),
-    )
-
-    panel_update_available = False
-    if latest_version and current_version != "unknown":
-        panel_update_available = latest_version != current_version
-
     nodes = [
-        {"id": s.id, "name": s.name, "url": s.url}
+        {
+            "id": s.id,
+            "name": s.name,
+            "url": s.url,
+            "folder": s.folder,
+            # для массовой доставки образа по SSH: кому хватит сохранённых кредов
+            "has_ssh_creds": bool(s.ssh_password or s.ssh_private_key),
+        }
         for s in servers
     ]
 
     return {
         "panel": {
             "version": current_version,
-            "latest_version": latest_version,
-            "update_available": panel_update_available,
+            "latest_version": latest.panel,
+            "update_available": _panel_update_available(current_version, latest.panel),
         },
-        "node": {"latest_version": latest_node_version},
-        "optimizations": {"latest_version": latest_opt_version},
+        "node": {"latest_version": latest.node},
+        "optimizations": {"latest_version": latest.optimizations},
         "nodes": nodes,
         "update_in_progress": _update_status["in_progress"],
     }
 
 
-def _node_version_payload(server: Server, versions_data: Optional[dict]) -> dict:
+@router.get("/update-summary")
+async def get_update_summary(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    """Сводка для значка в меню: вышла ли новая панель и сколько нод отстаёт.
+    К нодам не ходит — их версии в БД держит сборщик метрик."""
+    current_version = get_current_version()
+    latest = await release_versions.latest_versions()
+
+    result = await db.execute(select(Server.node_version).where(Server.is_active == True))
+    node_versions = result.scalars().all()
+
+    return {
+        "panel": {
+            "version": current_version,
+            "latest_version": latest.panel,
+            "update_available": _panel_update_available(current_version, latest.panel),
+        },
+        "nodes": {
+            "latest_version": latest.node,
+            "outdated": sum(1 for version in node_versions if release_versions.is_newer(latest.node, version)),
+            "total": len(node_versions),
+        },
+    }
+
+
+async def _node_version_payload(server: Server, versions_data: Optional[dict]) -> dict:
     no_optimizations = {"installed": False, "version": None}
     return {
         "id": server.id,
@@ -343,6 +333,8 @@ def _node_version_payload(server: Server, versions_data: Optional[dict]) -> dict
         "version": versions_data.get("node_version") if versions_data else None,
         "status": "online" if versions_data else "offline",
         "optimizations": versions_data.get("optimizations", no_optimizations) if versions_data else no_optimizations,
+        "haproxy": await describe_haproxy(versions_data.get("haproxy")) if versions_data else None,
+        "download_proxy": versions_data.get("download_proxy") if versions_data else None,
     }
 
 
@@ -360,12 +352,17 @@ async def get_single_node_version(
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
 
+    offline_threshold = await get_offline_threshold(db)
+    # Коннект пула не держим на время запроса к ноде: после «Обновить все»
+    # страница оптимизаций перечитывает все ноды разом
+    await db.commit()
+
     # Ноду, которую коллектор метрик уже считает офлайн, не дёргаем: запрос всё равно
     # упёрся бы в таймаут, а страницы «Обновления»/«Оптимизации» ждали бы его зря
-    if resolve_status(server, await get_offline_threshold(db)) == "offline":
-        return _node_version_payload(server, None)
+    if resolve_status(server, offline_threshold) == "offline":
+        return await _node_version_payload(server, None)
 
-    return _node_version_payload(server, await get_node_all_versions(server))
+    return await _node_version_payload(server, await get_node_all_versions(server))
 
 
 async def run_panel_update_in_container(target_ref: str | None = None):
@@ -774,6 +771,25 @@ async def get_optimizations_from_github(profile: str = "vpn") -> dict:
     if profile not in ("vpn", "panel"):
         profile = "vpn"
 
+    # «Обновить все» применяет оптимизации на все ноды разом: без общего кэша
+    # каждая нода тянула бы с GitHub те же 12 файлов, и волна упёрлась бы в пул
+    # внешнего клиента (20 соединений) раньше, чем дошла до нод. Неудачу тоже
+    # запоминаем ненадолго — иначе ждущие на локе повторяли бы её по очереди
+    cache_key = (update_channel.github_configs_base(), profile)
+    async with _optimizations_lock:
+        cached = _optimizations_cache.get(cache_key)
+        if cached and time.monotonic() < cached[0]:
+            return cached[1]
+
+        result, complete = await _fetch_optimizations_from_github(profile)
+        ttl = OPTIMIZATIONS_CACHE_TTL_SEC if complete else OPTIMIZATIONS_FAILED_CACHE_TTL_SEC
+        _optimizations_cache[cache_key] = (time.monotonic() + ttl, result)
+        return result
+
+
+async def _fetch_optimizations_from_github(profile: str) -> tuple[dict, bool]:
+    """Скачать файлы оптимизаций; второй элемент — все ли файлы получены."""
+    complete = False
     result = {
         "version": None,
         "profile": profile,
@@ -829,10 +845,12 @@ async def get_optimizations_from_github(profile: str = "vpn") -> dict:
             elif resp.status_code == 200:
                 result[key] = resp.text.strip() if key == "version" else resp.text
 
+        complete = all(result[key] for key, _ in keys)
+
     except Exception as e:
         logger.error(f"Failed to fetch optimizations from GitHub: {e}")
 
-    return result
+    return result, complete
 
 
 # NOTE: GET /optimizations/configs used to exist here and returned the finished

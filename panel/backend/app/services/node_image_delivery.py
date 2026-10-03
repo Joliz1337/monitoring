@@ -22,44 +22,31 @@ from typing import AsyncIterator, Optional
 import asyncssh
 
 from app.services.node_image_cache import ensure_image
+from app.services.ssh_target import CONNECT_TIMEOUT, SSHTarget, ssh_connect_kwargs
 
 logger = logging.getLogger(__name__)
 
-CONNECT_TIMEOUT = 30
 LOAD_TIMEOUT = 3600
 UPDATE_TIMEOUT = 7200
 REMOTE_TAR = "/tmp/mon-node-img.tar.gz"
 FINISHED_TTL_SECONDS = 600
+DELIVERY_CONCURRENCY = 5
 LOG_BUFFER_LIMIT = 5000
+# Подключение к серверу за ТСПУ срывается через раз — повторный запуск обычно проходит
+SSH_CONNECT_ATTEMPTS = 3
+SSH_CONNECT_RETRY_DELAY = 10
 
 
-@dataclass
-class SSHTarget:
-    host: str
-    port: int = 22
-    user: str = "root"
-    password: Optional[str] = None
-    private_key: Optional[str] = None
-    passphrase: Optional[str] = None
+def _error_text(exc: BaseException) -> str:
+    return str(exc) or type(exc).__name__
 
 
-def _connect_kwargs(t: SSHTarget) -> dict:
-    kwargs: dict = {
-        "host": t.host,
-        "port": t.port,
-        "username": t.user,
-        "known_hosts": None,
-        "connect_timeout": CONNECT_TIMEOUT,
-        # Долгая заливка образа по медленному/throttled-каналу: keepalive держит
-        # SSH-сессию живой в паузах между шагами.
-        "keepalive_interval": 15,
-        "keepalive_count_max": 8,
-    }
-    if t.private_key:
-        kwargs["client_keys"] = [asyncssh.import_private_key(t.private_key, t.passphrase or None)]
-    elif t.password:
-        kwargs["password"] = t.password
-    return kwargs
+def _connect_error_text(target: SSHTarget, exc: BaseException) -> str:
+    # asyncssh обрывает подключение по connect_timeout через asyncio.wait_for —
+    # исключение приходит без текста
+    if isinstance(exc, asyncio.TimeoutError):
+        return f"{target.host}:{target.port} не ответил за {CONNECT_TIMEOUT} с"
+    return _error_text(exc)
 
 
 async def _run_streamed(conn, command: str, timeout: int) -> AsyncIterator[dict]:
@@ -88,7 +75,8 @@ async def _run_streamed(conn, command: str, timeout: int) -> AsyncIterator[dict]
 
 
 async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
-    """Доставить образ ноды и поднять её на нём. Стримит события {type: log|error|done}."""
+    """Доставить образ ноды и поднять её на нём. Стримит события {type: log|step|error|done}."""
+    yield {"type": "step", "step": "prepare"}
     yield {"type": "log", "line": f"[panel] Готовлю образ ноды ({tag})…"}
     try:
         tar = await ensure_image(tag)
@@ -96,10 +84,31 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
         yield {"type": "error", "message": f"Панель не смогла получить образ с реестра: {exc}"}
         return
 
+    connect_kwargs = ssh_connect_kwargs(target)
+    for attempt in range(1, SSH_CONNECT_ATTEMPTS + 1):
+        try:
+            conn = await asyncssh.connect(**connect_kwargs)
+            break
+        except asyncssh.PermissionDenied:
+            yield {"type": "error", "message": "SSH: неверный логин, пароль или ключ"}
+            return
+        except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
+            reason = _connect_error_text(target, exc)
+            if attempt == SSH_CONNECT_ATTEMPTS:
+                yield {"type": "error", "message": f"Ошибка SSH: {reason} (попыток: {SSH_CONNECT_ATTEMPTS})"}
+                return
+            yield {
+                "type": "log",
+                "line": f"[panel] SSH не подключился: {reason} — попытка {attempt + 1}/{SSH_CONNECT_ATTEMPTS} "
+                        f"через {SSH_CONNECT_RETRY_DELAY} с",
+            }
+            await asyncio.sleep(SSH_CONNECT_RETRY_DELAY)
+
     size_mb = tar.stat().st_size // (1024 * 1024)
     try:
-        async with await asyncssh.connect(**_connect_kwargs(target)) as conn:
+        async with conn:
             yield {"type": "log", "line": f"[panel] SSH к {target.host}:{target.port} установлен"}
+            yield {"type": "step", "step": "upload", "percent": 0}
             yield {"type": "log", "line": f"[panel] Заливаю образ ({size_mb} МБ) — на медленном канале это несколько минут…"}
             async with conn.start_sftp_client() as sftp:
                 total = tar.stat().st_size
@@ -117,9 +126,11 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
                     await asyncio.sleep(8)
                     done_mb = progress["copied"] // (1024 * 1024)
                     pct = int(progress["copied"] * 100 / total) if total else 0
+                    yield {"type": "step", "step": "upload", "percent": pct}
                     yield {"type": "log", "line": f"[panel] Заливка: {pct}% ({done_mb}/{size_mb} МБ)"}
                 await put_task  # пробросить исключение, если заливка упала
 
+            yield {"type": "step", "step": "load"}
             yield {"type": "log", "line": "[panel] Загружаю образ в docker…"}
             load_cmd = f"gunzip -c {shlex.quote(REMOTE_TAR)} | docker load && rm -f {shlex.quote(REMOTE_TAR)}"
             async for ev in _run_streamed(conn, load_cmd, LOAD_TIMEOUT):
@@ -132,6 +143,7 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
 
             # Никаких скачиваний с ноды: образ уже загружен, просто поднимаем её на
             # нём. Тег в .env приводим к доставленному, иначе compose полез бы в реестр.
+            yield {"type": "step", "step": "start"}
             yield {"type": "log", "line": "[panel] Поднимаю ноду на доставленном образе (без скачивания)…"}
             apply_cmd = (
                 "cd /opt/monitoring-node && "
@@ -150,18 +162,21 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
                     yield ev
 
             yield {"type": "done", "message": "Образ доставлен, нода поднята"}
-    except asyncssh.PermissionDenied:
-        yield {"type": "error", "message": "SSH: неверный логин, пароль или ключ"}
     except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
-        yield {"type": "error", "message": f"Ошибка SSH: {exc}"}
+        yield {"type": "error", "message": f"Ошибка SSH: {_error_text(exc)}"}
 
 
 @dataclass
 class DeliveryJob:
     id: str
+    server_id: int
     name: str
     host: str
-    status: str = "running"  # running | success | error
+    status: str = "queued"  # queued | running | success | error
+    # Этап по порядку: prepare → upload → load → start — статус на карточке ноды
+    # «заливка образа 45% (2/4)»; пока задача идёт
+    step: Optional[str] = None
+    percent: Optional[int] = None  # прогресс заливки образа
     log: list[str] = field(default_factory=list)
     error: Optional[str] = None
     started_at: float = field(default_factory=time.time)
@@ -173,8 +188,12 @@ class DeliveryJob:
 class ImageDeliveryJobManager:
     """In-memory реестр фоновых задач доставки образа с pub/sub лога."""
 
-    def __init__(self) -> None:
+    def __init__(self, concurrency: int = DELIVERY_CONCURRENCY) -> None:
         self._jobs: dict[str, DeliveryJob] = {}
+        self._concurrency = concurrency
+        # Все заливки идут с одного аплинка панели: без потолка массовый запуск
+        # поделил бы канал на всех и не довёз бы образ ни до одной ноды за разумное время
+        self._slots = asyncio.Semaphore(concurrency)
 
     def _cleanup_finished(self) -> None:
         now = time.time()
@@ -187,17 +206,38 @@ class ImageDeliveryJobManager:
     def get(self, job_id: str) -> Optional[DeliveryJob]:
         return self._jobs.get(job_id)
 
+    def _active_job_for(self, server_id: int) -> Optional[DeliveryJob]:
+        return next(
+            (j for j in self._jobs.values() if j.server_id == server_id and j.finished_at is None),
+            None,
+        )
+
     def list_jobs(self) -> list[dict]:
         self._cleanup_finished()
         return [
-            {"job_id": j.id, "name": j.name, "host": j.host, "status": j.status, "error": j.error}
+            {
+                "job_id": j.id,
+                "server_id": j.server_id,
+                "name": j.name,
+                "host": j.host,
+                "status": j.status,
+                "error": j.error,
+                "started_at": j.started_at,
+                "finished_at": j.finished_at,
+                "step": j.step,
+                "percent": j.percent,
+            }
             for j in sorted(self._jobs.values(), key=lambda x: x.started_at)
         ]
 
-    def start(self, name: str, target: SSHTarget, tag: str) -> str:
+    def start(self, server_id: int, name: str, target: SSHTarget, tag: str) -> str:
+        """Запустить доставку. Если по серверу уже идёт задача — вернуть её, вторую не плодить."""
         self._cleanup_finished()
+        active = self._active_job_for(server_id)
+        if active is not None:
+            return active.id
         job_id = uuid.uuid4().hex
-        job = DeliveryJob(id=job_id, name=name, host=target.host)
+        job = DeliveryJob(id=job_id, server_id=server_id, name=name, host=target.host)
         self._jobs[job_id] = job
         job.task = asyncio.create_task(self._run(job, target, tag))
         return job_id
@@ -214,42 +254,48 @@ class ImageDeliveryJobManager:
             except asyncio.QueueFull:
                 pass
 
+    def _finish(self, job: DeliveryJob, status: str, error: Optional[str] = None) -> None:
+        if error:
+            self._emit(job, {"type": "error", "message": error})
+        job.status = status
+        job.error = error
+        job.step = None
+        job.percent = None
+        job.finished_at = time.time()
+        self._emit(job, {"type": "done", "status": status})
+
     async def _run(self, job: DeliveryJob, target: SSHTarget, tag: str) -> None:
         try:
             self._emit(job, {"type": "start", "host": job.host})
-            async for event in deliver_image(target, tag):
-                etype = event.get("type")
-                if etype == "error":
-                    job.error = event.get("message")
+            if self._slots.locked():
+                self._emit(job, {
+                    "type": "log",
+                    "line": f"[panel] В очереди: одновременно обновляется не больше {self._concurrency} нод",
+                })
+            async with self._slots:
+                job.status = "running"
+                async for event in deliver_image(target, tag):
+                    etype = event.get("type")
+                    if etype == "error":
+                        self._finish(job, "error", event.get("message"))
+                        return
+                    if etype == "done":
+                        self._emit(job, {"type": "log", "line": f"[panel] {event.get('message')}"})
+                        self._finish(job, "success")
+                        return
+                    if etype == "step":
+                        # Этап — для статуса на карточке, в лог окна он не идёт
+                        job.step = event.get("step")
+                        job.percent = event.get("percent")
+                        continue
                     self._emit(job, event)
-                    self._emit(job, {"type": "done", "status": "error"})
-                    job.status = "error"
-                    job.finished_at = time.time()
-                    return
-                if etype == "done":
-                    self._emit(job, event)
-                    self._emit(job, {"type": "done", "status": "success"})
-                    job.status = "success"
-                    job.finished_at = time.time()
-                    return
-                self._emit(job, event)
-            self._emit(job, {"type": "error", "message": "Доставка прервалась без результата"})
-            self._emit(job, {"type": "done", "status": "error"})
-            job.status = "error"
-            job.error = "Доставка прервалась без результата"
-            job.finished_at = time.time()
+            self._finish(job, "error", "Доставка прервалась без результата")
         except asyncio.CancelledError:
-            job.status = "error"
-            job.error = "Доставка отменена"
-            job.finished_at = time.time()
+            self._finish(job, "error", "Доставка отменена")
             raise
         except Exception as exc:  # noqa: BLE001 — верхняя граница фоновой задачи
             logger.error("Delivery job %s failed: %s", job.id, exc)
-            self._emit(job, {"type": "error", "message": str(exc)})
-            self._emit(job, {"type": "done", "status": "error"})
-            job.status = "error"
-            job.error = str(exc)
-            job.finished_at = time.time()
+            self._finish(job, "error", str(exc))
 
     async def subscribe(self, job_id: str) -> AsyncIterator[dict]:
         job = self._jobs.get(job_id)

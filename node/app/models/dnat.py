@@ -5,7 +5,9 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-Protocol = Literal["tcp", "udp", "both"]
+from app.models.loss_probe import ProbeStats
+
+Protocol =Literal["tcp", "udp", "both"]
 # per_server — панель уже выбрала этой ноде один адрес; остальные режимы —
 # нода сама раскидывает новые соединения по всем адресам списка
 Distribution = Literal["per_server", "random", "round_robin", "client_hash"]
@@ -108,6 +110,7 @@ class DnatTargetCounters(BaseModel):
     bytes_in: int = 0
     packets_out: int = 0
     bytes_out: int = 0
+    probe: Optional[ProbeStats] = None  # потери до цели; у UDP-правил нет
 
 
 class DnatRuleCounters(BaseModel):

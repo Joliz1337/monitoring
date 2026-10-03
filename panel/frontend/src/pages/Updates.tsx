@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
@@ -15,25 +15,40 @@ import {
   Check,
   Rocket,
   Upload,
+  Folder,
+  FolderOpen,
+  ChevronDown,
+  ChevronRight,
+  X,
+  Globe,
+  type LucideIcon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { systemApi, VersionBaseInfo, SingleNodeVersion } from '../api/client'
+import {
+  systemApi, nodeImageApi, haproxyUpgradeApi, VersionBaseInfo, SingleNodeVersion, ImageDeliveryJobInfo, RemnawaveInstallJobInfo,
+  NodeUpdateProgress,
+} from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Tooltip } from '../components/ui/Tooltip'
+import { Checkbox } from '../components/ui/Checkbox'
 import { FAQIcon } from '../components/FAQ'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useUpdateSummaryStore } from '../stores/updateSummaryStore'
+import { orderFolders } from '../utils/folders'
+import { versionAtLeast } from '../utils/version'
+import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import DeliverImageModal from '../components/servers/DeliverImageModal'
+import BulkDeliverImageModal from '../components/servers/BulkDeliverImageModal'
+import NodeUpdateCard, { NodeState } from '../components/updates/NodeUpdateCard'
+import HAProxyUpgradeModal, { HAProxyUpgradeTarget } from '../components/updates/HAProxyUpgradeModal'
+import DownloadProxyModal, { DownloadProxyTarget } from '../components/updates/DownloadProxyModal'
 
-type NodeLoadState = 'pending' | 'loading' | 'loaded' | 'error'
-
-interface NodeState {
-  id: number
-  name: string
-  url: string
-  loadState: NodeLoadState
-  version: string | null
-  status: 'online' | 'offline'
-}
+// Пока идёт обновление ноды, SSH-доставка или обновление HAProxy хоть на одной ноде — статусы на карточках обновляются с этим шагом
+const JOB_POLL_INTERVAL_MS = 3_000
+// После смены прокси нода перезапускает Docker — версию перечитываем, когда агент снова поднялся
+const PROXY_REFRESH_DELAY_MS = 40_000
+const COLLAPSED_FOLDERS_KEY = 'updates_collapsed_folders'
+const NODE_GRID_CLASS = 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
 
 // После запуска обновления панель уходит в перезапуск (updater-контейнер пересобирает образ).
 // Ждём 10с прежде чем начать опрос — за это время старая панель успевает погаснуть.
@@ -42,6 +57,19 @@ const PANEL_REBOOT_POLL_INTERVAL_MS = 5_000
 const PANEL_PROBE_TIMEOUT_MS = 4_000
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+type FolderNodeState = 'current' | 'updating' | 'outdated'
+
+const FOLDER_CHIPS: { state: FolderNodeState; icon: LucideIcon; spin?: boolean; className: string }[] = [
+  { state: 'current', icon: CheckCircle2, className: 'text-success bg-success/10' },
+  { state: 'updating', icon: Loader2, spin: true, className: 'text-warning bg-warning/10' },
+  { state: 'outdated', icon: ArrowUpCircle, className: 'text-accent-400 bg-accent-500/10' },
+]
+
+const toHAProxyTarget = (node: NodeState): HAProxyUpgradeTarget => ({
+  id: node.id, name: node.name, version: node.haproxyVersion, targetVersion: node.haproxyTarget,
+  hasSshCreds: node.hasSshCreds,
+})
 
 // /health из браузера недоступен (nginx отдаёт его только внутренним IP), поэтому живость
 // бэкенда проверяем лёгким /api/auth/check напрямую через fetch — минуя axios-интерсепторы
@@ -68,6 +96,7 @@ async function isPanelBackendAlive(): Promise<boolean> {
 export default function Updates() {
   const { t } = useTranslation()
   const { updateBranch, fetchSettings } = useSettingsStore()
+  const refreshUpdateSummary = useUpdateSummaryStore(s => s.refresh)
   // На dev-ветке версии между пушами могут не меняться — обновление разрешено всегда
   const isDevChannel = updateBranch === 'dev'
 
@@ -86,9 +115,26 @@ export default function Updates() {
 
   const [isChecking, setIsChecking] = useState(false)
   const [deliverTarget, setDeliverTarget] = useState<{ id: number; name: string } | null>(null)
+  const [bulkDeliverOpen, setBulkDeliverOpen] = useState(false)
+  // Последняя SSH-доставка по каждому серверу: идущая или завершённая недавно
+  const [deliveryJobs, setDeliveryJobs] = useState<Map<number, ImageDeliveryJobInfo>>(new Map())
+  // Завершённые доставки, после которых запустили обычное обновление: на карточке
+  // они уступают его статусу, иначе старая «SSH: ошибка» прячет идущее обновление
+  const [supersededDeliveries, setSupersededDeliveries] = useState<Set<string>>(new Set())
+  // Последнее обновление HAProxy по каждому серверу: идущее или завершённое недавно
+  const [haproxyJobs, setHaproxyJobs] = useState<Map<number, RemnawaveInstallJobInfo>>(new Map())
+  // Идущие обновления нод через агента — их держит панель, поэтому видны и после перезагрузки страницы
+  const [nodeUpdates, setNodeUpdates] = useState<Map<number, NodeUpdateProgress>>(new Map())
+  const [haproxyModal, setHaproxyModal] = useState<{ targets: HAProxyUpgradeTarget[]; jobId: string | null } | null>(null)
+  const [proxyModal, setProxyModal] = useState<DownloadProxyTarget[] | null>(null)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [collapsedFolders, toggleFolderCollapsed] = useCollapsedFolders(COLLAPSED_FOLDERS_KEY)
 
   const abortRef = useRef(false)
   const rebootWaitCancelRef = useRef(false)
+  const deliveryStatusRef = useRef<Map<string, ImageDeliveryJobInfo['status']>>(new Map())
+  const haproxyStatusRef = useRef<Map<string, RemnawaveInstallJobInfo['status']>>(new Map())
+  const nodeUpdateIdsRef = useRef<Set<number>>(new Set())
   const lastActivityRef = useRef(Date.now())
   const IDLE_THRESHOLD = 5000
   const AUTO_REFRESH_INTERVAL = 12000
@@ -115,14 +161,19 @@ export default function Updates() {
       const data: SingleNodeVersion = resp.data
 
       setNodes(prev => {
+        const existing = prev.get(nodeId)
+        if (!existing) return prev
         const next = new Map(prev)
         next.set(nodeId, {
-          id: data.id,
+          ...existing,
           name: data.name,
           url: data.url,
           loadState: 'loaded',
           version: data.version,
           status: data.status,
+          haproxyVersion: data.haproxy?.version ?? null,
+          haproxyTarget: data.haproxy?.target_version ?? null,
+          downloadProxy: data.download_proxy ?? null,
         })
         return next
       })
@@ -147,19 +198,30 @@ export default function Updates() {
       const resp = await systemApi.getVersionBase()
       const data = resp.data
       setBaseInfo(data)
+      // Значок в меню догоняет то, что видно на странице, не дожидаясь своего опроса
+      refreshUpdateSummary()
 
-      const initialNodes = new Map<number, NodeState>()
-      for (const n of data.nodes) {
-        initialNodes.set(n.id, {
-          id: n.id,
-          name: n.name,
-          url: n.url,
-          loadState: 'pending',
-          version: null,
-          status: 'offline',
-        })
-      }
-      setNodes(initialNodes)
+      setNodes(prev => {
+        const initialNodes = new Map<number, NodeState>()
+        for (const n of data.nodes) {
+          const known = prev.get(n.id)
+          initialNodes.set(n.id, {
+            id: n.id,
+            name: n.name,
+            url: n.url,
+            folder: n.folder,
+            hasSshCreds: n.has_ssh_creds,
+            loadState: 'pending',
+            // Последние известные версия и статус: пока нода перечитывается, счётчики папок не падают в ноль
+            version: known?.version ?? null,
+            status: known?.status ?? 'offline',
+            haproxyVersion: null,
+            haproxyTarget: null,
+            downloadProxy: null,
+          })
+        }
+        return initialNodes
+      })
 
       // Promise pool: ограничиваем параллельные запросы к нодам, иначе при 100+ нодах
       // autorefresh каждые 12с создаёт лавину одновременных HTTP, и ноды мигают онлайн/оффлайн.
@@ -181,7 +243,7 @@ export default function Updates() {
       setLoading(false)
       setIsChecking(false)
     }
-  }, [t, fetchNodeVersion])
+  }, [t, fetchNodeVersion, refreshUpdateSummary])
 
   useEffect(() => {
     fetchSettings()
@@ -189,21 +251,109 @@ export default function Updates() {
     return () => { abortRef.current = true }
   }, [fetchSettings, fetchBase])
 
+  const fetchDeliveryJobs = useCallback(async () => {
+    try {
+      const { data } = await nodeImageApi.jobs()
+      const byServer = new Map<number, ImageDeliveryJobInfo>()
+      for (const job of data.jobs) {
+        byServer.set(job.server_id, job)
+        const prevStatus = deliveryStatusRef.current.get(job.job_id)
+        // Нода только что поднялась на доставленном образе — сразу показать её новую версию
+        if (job.status === 'success' && prevStatus && prevStatus !== 'success') fetchNodeVersion(job.server_id)
+        deliveryStatusRef.current.set(job.job_id, job.status)
+      }
+      setDeliveryJobs(byServer)
+    } catch {
+      // статусы SSH-доставок — дополнение к странице, без них она работает как раньше
+    }
+  }, [fetchNodeVersion])
+
+  useEffect(() => { fetchDeliveryJobs() }, [fetchDeliveryJobs])
+
+  const hasActiveDelivery = Array.from(deliveryJobs.values())
+    .some(j => j.status === 'queued' || j.status === 'running')
+
+  useEffect(() => {
+    if (!hasActiveDelivery) return
+    const id = setInterval(fetchDeliveryJobs, JOB_POLL_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [hasActiveDelivery, fetchDeliveryJobs])
+
+  const fetchHaproxyJobs = useCallback(async () => {
+    try {
+      const { data } = await haproxyUpgradeApi.jobs()
+      const byServer = new Map<number, RemnawaveInstallJobInfo>()
+      for (const job of data.jobs) {
+        byServer.set(job.server_id, job)
+        const prevStatus = haproxyStatusRef.current.get(job.job_id)
+        // Обновление HAProxy только что закончилось — показать новую версию на карточке
+        if (job.status !== 'running' && prevStatus === 'running') fetchNodeVersion(job.server_id)
+        haproxyStatusRef.current.set(job.job_id, job.status)
+      }
+      setHaproxyJobs(byServer)
+    } catch {
+      // статусы обновлений HAProxy — дополнение к странице, без них она работает как раньше
+    }
+  }, [fetchNodeVersion])
+
+  useEffect(() => { fetchHaproxyJobs() }, [fetchHaproxyJobs])
+
+  const hasActiveHaproxyUpgrade = Array.from(haproxyJobs.values()).some(j => j.status === 'running')
+
+  useEffect(() => {
+    if (!hasActiveHaproxyUpgrade) return
+    const id = setInterval(fetchHaproxyJobs, JOB_POLL_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [hasActiveHaproxyUpgrade, fetchHaproxyJobs])
+
+  const fetchNodeUpdates = useCallback(async () => {
+    try {
+      const { data } = await systemApi.nodeUpdates()
+      const byServer = new Map(data.updates.map(update => [update.server_id, update]))
+      const finished = [...nodeUpdateIdsRef.current].filter(id => !byServer.has(id))
+      nodeUpdateIdsRef.current = new Set(byServer.keys())
+      setNodeUpdates(byServer)
+      if (finished.length === 0) return
+      // Обновление закончилось: показать новую версию, а при провале — запущенное панелью обновление по SSH
+      finished.forEach(id => fetchNodeVersion(id))
+      fetchDeliveryJobs()
+    } catch {
+      // статусы обновлений — дополнение к странице, без них она работает как раньше
+    }
+  }, [fetchNodeVersion, fetchDeliveryJobs])
+
+  useEffect(() => { fetchNodeUpdates() }, [fetchNodeUpdates])
+
+  const hasActiveNodeUpdate = nodeUpdates.size > 0
+
+  useEffect(() => {
+    if (!hasActiveNodeUpdate) return
+    const id = setInterval(fetchNodeUpdates, JOB_POLL_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [hasActiveNodeUpdate, fetchNodeUpdates])
+
   useEffect(() => {
     const id = setInterval(() => {
       const isIdle = Date.now() - lastActivityRef.current > IDLE_THRESHOLD
       const isVisible = !document.hidden
       const isBusy = updatingPanel || updatingNodes.size > 0 || updatingAll || updatingEverything || isChecking
-      if (isIdle && isVisible && !isBusy) fetchBase()
+      if (!isIdle || !isVisible || isBusy) return
+      fetchBase()
+      // Панель сама запускает обновление по SSH, если нода не обновилась через агента
+      fetchDeliveryJobs()
+      fetchNodeUpdates()
     }, AUTO_REFRESH_INTERVAL)
     return () => clearInterval(id)
-  }, [fetchBase, updatingPanel, updatingNodes, updatingAll, updatingEverything, isChecking])
+  }, [fetchBase, fetchDeliveryJobs, fetchNodeUpdates, updatingPanel, updatingNodes, updatingAll, updatingEverything, isChecking])
 
   const handleRefresh = useCallback(() => {
     abortRef.current = true
     setUpdateResults({})
     fetchBase(true)
-  }, [fetchBase])
+    fetchDeliveryJobs()
+    fetchHaproxyJobs()
+    fetchNodeUpdates()
+  }, [fetchBase, fetchDeliveryJobs, fetchHaproxyJobs, fetchNodeUpdates])
 
   // Дожидаемся, пока панель сначала уйдёт в перезапуск (бэкенд недоступен), а затем снова
   // поднимется, и только тогда перезагружаем страницу. Требование "сначала увидеть падение"
@@ -261,6 +411,10 @@ export default function Updates() {
   const handleUpdateNode = async (nodeId: number, nodeName: string) => {
     if (updatingNodes.has(nodeId)) return
 
+    const delivery = deliveryJobs.get(nodeId)
+    if (delivery && (delivery.status === 'success' || delivery.status === 'error')) {
+      setSupersededDeliveries(prev => new Set(prev).add(delivery.job_id))
+    }
     setUpdatingNodes(prev => new Set(prev).add(nodeId))
     setUpdateResults(prev => ({
       ...prev,
@@ -268,26 +422,21 @@ export default function Updates() {
     }))
 
     try {
-      const response = await systemApi.updateNode(nodeId)
-      setUpdateResults(prev => ({
-        ...prev,
-        [`node-${nodeId}`]: { success: true, message: response.data.message }
-      }))
-
-      setTimeout(() => {
-        fetchNodeVersion(nodeId)
-        setUpdatingNodes(prev => {
-          const next = new Set(prev)
-          next.delete(nodeId)
-          return next
-        })
-      }, 5000)
+      await systemApi.updateNode(nodeId)
+      // Дальше статус ведёт панель: этап обновления приходит из списка идущих обновлений
+      setUpdateResults(prev => {
+        const next = { ...prev }
+        delete next[`node-${nodeId}`]
+        return next
+      })
+      await fetchNodeUpdates()
     } catch (err: any) {
       setUpdateResults(prev => ({
         ...prev,
         [`node-${nodeId}`]: { success: false, message: err.response?.data?.detail || t('updates.failed_update') }
       }))
       toast.error(`${nodeName}: ${err.response?.data?.detail || t('updates.failed_update')}`)
+    } finally {
       setUpdatingNodes(prev => {
         const next = new Set(prev)
         next.delete(nodeId)
@@ -296,13 +445,10 @@ export default function Updates() {
     }
   }
 
-  const collectNodeUpdateTargets = () =>
-    Array.from(nodes.values()).filter(n =>
-      n.loadState === 'loaded' && n.status === 'online' && (isDevChannel || getNodeNeedsUpdate(n))
-    )
+  const collectNodeUpdateTargets = () => Array.from(nodes.values()).filter(canAgentUpdate)
 
   const handleUpdateAllNodes = async () => {
-    if (updatingAll || !baseInfo) return
+    if (updatingAll || !allNodesLoaded || !baseInfo) return
 
     setUpdatingAll(true)
     await Promise.all(collectNodeUpdateTargets().map(n => handleUpdateNode(n.id, n.name)))
@@ -313,7 +459,7 @@ export default function Updates() {
   // (каждая обновляет себя сама, результат отдельной ноды не блокирует процесс),
   // и как только все запросы отправлены — панель запускает обновление самой себя.
   const handleUpdateEverything = async () => {
-    if (updatingEverything || updatingAll || updatingPanel || !baseInfo) return
+    if (updatingEverything || updatingAll || updatingPanel || !allNodesLoaded || !baseInfo) return
 
     setUpdatingEverything(true)
     try {
@@ -337,7 +483,24 @@ export default function Updates() {
 
   const getNodeNeedsUpdate = (node: NodeState): boolean => {
     if (!node.version || !baseInfo?.node.latest_version) return false
-    return node.version !== baseInfo.node.latest_version
+    // «Ниже», а не «не равно»: после перехода с dev на стабильный канал старый релиз — не обновление
+    return !versionAtLeast(node.version, baseInfo.node.latest_version)
+  }
+
+  // Обновление через агента ноды: только онлайн, не идущее уже, и на стабильном канале — только отстающие
+  const canAgentUpdate = (node: NodeState): boolean =>
+    node.loadState === 'loaded' && node.status === 'online' && !nodeUpdates.has(node.id)
+    && (isDevChannel || getNodeNeedsUpdate(node))
+
+  const toggleSelected = (ids: number[], on: boolean) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      for (const id of ids) {
+        if (on) next.add(id)
+        else next.delete(id)
+      }
+      return next
+    })
   }
 
   const loadedNodes = Array.from(nodes.values())
@@ -352,7 +515,143 @@ export default function Updates() {
   const panelCanUpdate = isDevChannel || !!baseInfo?.panel.update_available
   const canUpdateEverything = updateAllCount > 0 || panelCanUpdate
 
-  const allNodesLoaded = loadedNodes.every(n => n.loadState === 'loaded' || n.loadState === 'error')
+  // Массовые кнопки ждут ответа от каждой ноды: ещё не загруженную canAgentUpdate пропускает,
+  // и нажатие посреди загрузки молча обновило бы только часть парка
+  const finishedNodesCount = loadedNodes.filter(n => n.loadState === 'loaded' || n.loadState === 'error').length
+  const allNodesLoaded = finishedNodesCount === loadedNodes.length
+  const nodesLoadingLabel = t('updates.nodes_loading', { loaded: finishedNodesCount, total: loadedNodes.length })
+
+  const selectedNodes = loadedNodes.filter(n => selected.has(n.id))
+  const selectedAgentTargets = selectedNodes.filter(canAgentUpdate)
+  const selectedProxyTargets = selectedNodes.filter(n => n.status === 'online' && n.downloadProxy !== null)
+  const selectedHaproxyTargets = selectedNodes.filter(n =>
+    n.status === 'online' && n.haproxyTarget && haproxyJobs.get(n.id)?.status !== 'running'
+  )
+  const allSelected = loadedNodes.length > 0 && selectedNodes.length === loadedNodes.length
+
+  // Папки — как на дашборде: порядок пользователя, внутри папки — порядок серверов
+  const nodeGroups = useMemo(() => {
+    const byFolder = new Map<string, NodeState[]>()
+    const unfoldered: NodeState[] = []
+    for (const node of nodes.values()) {
+      if (!node.folder) {
+        unfoldered.push(node)
+        continue
+      }
+      const members = byFolder.get(node.folder)
+      if (members) members.push(node)
+      else byFolder.set(node.folder, [node])
+    }
+    const folders = orderFolders([...byFolder.keys()]).map(name => ({ name, members: byFolder.get(name)! }))
+    return { folders, unfoldered }
+  }, [nodes])
+
+  const handleUpdateSelected = async () => {
+    const targets = selectedAgentTargets
+    setSelected(new Set())
+    await Promise.all(targets.map(n => handleUpdateNode(n.id, n.name)))
+  }
+
+  const handleBulkDeliveryStarted = () => {
+    setSelected(new Set())
+    fetchDeliveryJobs()
+  }
+
+  const visibleDeliveryJob = (nodeId: number) => {
+    const job = deliveryJobs.get(nodeId)
+    return job && !supersededDeliveries.has(job.job_id) ? job : undefined
+  }
+
+  const isNodeUpdating = (node: NodeState): boolean => {
+    const delivery = visibleDeliveryJob(node.id)?.status
+    return updatingNodes.has(node.id) || nodeUpdates.has(node.id) || delivery === 'queued' || delivery === 'running'
+  }
+
+  // Офлайн-нода и нода без известной версии ни в один счётчик папки не попадают
+  const folderNodeState = (node: NodeState): FolderNodeState | null => {
+    if (isNodeUpdating(node)) return 'updating'
+    if (node.status !== 'online' || !node.version) return null
+    return getNodeNeedsUpdate(node) ? 'outdated' : 'current'
+  }
+
+  const renderFolderChips = (members: NodeState[]) => {
+    const counts: Record<FolderNodeState, number> = { current: 0, updating: 0, outdated: 0 }
+    for (const node of members) {
+      const state = folderNodeState(node)
+      if (state) counts[state] += 1
+    }
+    return FOLDER_CHIPS.filter(chip => counts[chip.state] > 0).map(({ state, icon: Icon, spin, className }) => (
+      <Tooltip key={state} label={t(`updates.folder_${state}`, { count: counts[state], total: members.length })}>
+        <span className={`flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded-md flex-shrink-0 ${className}`}>
+          <Icon className={`w-3.5 h-3.5 ${spin ? 'animate-spin' : ''}`} />
+          {counts[state]}
+        </span>
+      </Tooltip>
+    ))
+  }
+
+  const renderNodeCard = (node: NodeState, index: number) => (
+    <NodeUpdateCard
+      key={node.id}
+      node={node}
+      index={index}
+      needsUpdate={node.loadState === 'loaded' && getNodeNeedsUpdate(node)}
+      isDevChannel={isDevChannel}
+      isUpdating={updatingNodes.has(node.id)}
+      updateResult={updateResults[`node-${node.id}`]}
+      agentUpdate={nodeUpdates.get(node.id)}
+      deliveryJob={visibleDeliveryJob(node.id)}
+      haproxyJob={haproxyJobs.get(node.id)}
+      selected={selected.has(node.id)}
+      onToggleSelect={() => toggleSelected([node.id], !selected.has(node.id))}
+      onUpdate={() => handleUpdateNode(node.id, node.name)}
+      onOpenDelivery={() => setDeliverTarget({ id: node.id, name: node.name })}
+      onOpenHAProxy={() => setHaproxyModal({ targets: [toHAProxyTarget(node)], jobId: haproxyJobs.get(node.id)?.job_id ?? null })}
+      onOpenProxy={() => setProxyModal([{ id: node.id, name: node.name }])}
+    />
+  )
+
+  const renderFolder = (name: string, members: NodeState[]) => {
+    const isCollapsed = collapsedFolders.has(name)
+    const selectedInFolder = members.filter(n => selected.has(n.id)).length
+    const FolderIcon = isCollapsed ? Folder : FolderOpen
+    const Chevron = isCollapsed ? ChevronRight : ChevronDown
+    return (
+      <div key={name} className="rounded-xl border bg-dark-900/50 border-dark-800/50 overflow-hidden">
+        <div className="flex items-center gap-3 px-4 py-3">
+          <Checkbox
+            checked={selectedInFolder === members.length}
+            indeterminate={selectedInFolder > 0 && selectedInFolder < members.length}
+            onChange={() => toggleSelected(members.map(n => n.id), selectedInFolder < members.length)}
+          />
+          <button onClick={() => toggleFolderCollapsed(name)} className="flex items-center gap-2.5 flex-1 min-w-0 group">
+            <div className="w-8 h-8 rounded-lg bg-blue-500/15 flex items-center justify-center flex-shrink-0">
+              <FolderIcon className="w-4 h-4 text-blue-400" />
+            </div>
+            <span className="text-sm font-semibold text-white truncate group-hover:text-blue-300 transition">{name}</span>
+            <span className="text-xs text-dark-500 flex-shrink-0">{members.length}</span>
+            {renderFolderChips(members)}
+            <Chevron className="w-3.5 h-3.5 text-dark-500 flex-shrink-0" />
+          </button>
+        </div>
+        <AnimatePresence initial={false}>
+          {!isCollapsed && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="overflow-hidden"
+            >
+              <div className="px-3 pb-3">
+                <div className={NODE_GRID_CLASS}>{members.map(renderNodeCard)}</div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    )
+  }
 
   if (loading) {
     return (
@@ -426,17 +725,19 @@ export default function Updates() {
             <Tooltip label={t('updates.update_everything_hint')} maxWidth={320}>
             <motion.button
               onClick={handleUpdateEverything}
-              disabled={updatingEverything || updatingAll || updatingPanel || updatingNodes.size > 0}
+              disabled={!allNodesLoaded || updatingEverything || updatingAll || updatingPanel || updatingNodes.size > 0}
               className="btn btn-primary"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
             >
-              {updatingEverything ? (
+              {updatingEverything || !allNodesLoaded ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
               ) : (
                 <Rocket className="w-4 h-4" />
               )}
-              {updatingEverything ? t('updates.updating_everything') : t('updates.update_everything')}
+              {updatingEverything
+                ? t('updates.updating_everything')
+                : allNodesLoaded ? t('updates.update_everything') : nodesLoadingLabel}
             </motion.button>
             </Tooltip>
           )}
@@ -558,7 +859,7 @@ export default function Updates() {
 
       {/* Nodes Section */}
       <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
           <div>
             <h2 className="text-lg font-semibold text-dark-100 flex items-center gap-2">
               <ServerIcon className="w-5 h-5 text-accent-500" />
@@ -577,190 +878,114 @@ export default function Updates() {
             )}
           </div>
 
-          {updateAllCount > 0 && (
-            <motion.button
-              onClick={handleUpdateAllNodes}
-              disabled={updatingAll}
-              className="btn btn-secondary"
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-            >
-              {updatingAll ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <ArrowUpCircle className="w-4 h-4" />
-              )}
-              {t('updates.update_all_nodes')} ({updateAllCount})
-            </motion.button>
-          )}
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          <AnimatePresence mode="popLayout">
-            {loadedNodes.length === 0 ? (
-              <motion.div
-                className="card text-center py-12 col-span-full"
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                key="empty"
-              >
-                <ServerIcon className="w-12 h-12 text-dark-600 mx-auto mb-3" />
-                <p className="text-dark-400">{t('updates.no_nodes')}</p>
-              </motion.div>
-            ) : (
-              loadedNodes.map((node, index) => {
-                const isUpdating = updatingNodes.has(node.id)
-                const updateResult = updateResults[`node-${node.id}`]
-                const needsUpdate = node.loadState === 'loaded' && getNodeNeedsUpdate(node)
-                const isNodeLoading = node.loadState === 'pending' || node.loadState === 'loading'
-
-                return (
-                  <motion.div
-                    key={node.id}
-                    className="card group hover:border-dark-700 transition-all overflow-visible flex flex-col"
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    transition={{ delay: index * 0.03 }}
-                    layout
-                  >
-                    {/* Шапка: иконка + имя + статус */}
-                    <div className="flex items-center gap-3">
-                      <motion.div
-                        className={`w-10 h-10 rounded-xl flex items-center justify-center border flex-shrink-0
-                          ${isNodeLoading
-                            ? 'bg-dark-800/50 border-dark-700/30 animate-pulse'
-                            : node.status === 'online'
-                              ? 'bg-gradient-to-br from-dark-700 to-dark-800 border-dark-700/50 group-hover:border-accent-500/30'
-                              : 'bg-dark-800/50 border-dark-700/30'
-                          } transition-colors`}
-                        whileHover={{ rotate: 5, scale: 1.05 }}
-                      >
-                        {isNodeLoading ? (
-                          <Loader2 className="w-4 h-4 text-dark-500 animate-spin" />
-                        ) : (
-                          <ServerIcon className={`w-4 h-4 ${
-                            node.status === 'online' ? 'text-accent-500' : 'text-dark-500'
-                          }`} />
-                        )}
-                      </motion.div>
-                      <div className="min-w-0 flex-1">
-                        <h3 className="font-semibold text-dark-100 flex items-center gap-2 truncate">
-                          <span className="truncate">{node.name}</span>
-                          {!isNodeLoading && (
-                            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                              node.status === 'online' ? 'bg-success' : 'bg-dark-500'
-                            }`} />
-                          )}
-                        </h3>
-                        {isNodeLoading ? (
-                          <Skeleton className="h-4 w-20 mt-0.5" />
-                        ) : (
-                          <span className="text-xs text-dark-500">
-                            <span className={`font-mono ${
-                              node.version ? 'text-dark-300' : 'text-dark-500'
-                            }`}>
-                              {node.version ? `v${node.version}` : t('updates.unknown')}
-                            </span>
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Статус + кнопка */}
-                    <div className="flex items-center justify-between mt-3 pt-3 border-t border-dark-700/30">
-                      <div className="flex-1 min-w-0">
-                        <AnimatePresence>
-                          {updateResult && (
-                            <motion.div
-                              className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg w-fit ${
-                                updateResult.success
-                                  ? 'text-success bg-success/10'
-                                  : 'text-danger bg-danger/10'
-                              }`}
-                              initial={{ opacity: 0, scale: 0.8 }}
-                              animate={{ opacity: 1, scale: 1 }}
-                              exit={{ opacity: 0, scale: 0.8 }}
-                            >
-                              {isUpdating ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : updateResult.success ? (
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                              ) : (
-                                <XCircle className="w-3.5 h-3.5" />
-                              )}
-                              <span className="truncate max-w-[120px]">{updateResult.message}</span>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-
-                        {!updateResult && isNodeLoading && (
-                          <span className="flex items-center gap-1.5 text-xs text-dark-500">
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          </span>
-                        )}
-
-                        {!updateResult && !isNodeLoading && node.status === 'offline' && (
-                          <span className="flex items-center gap-1.5 text-xs text-dark-500">
-                            <Clock className="w-3.5 h-3.5" />
-                            {t('updates.offline')}
-                          </span>
-                        )}
-
-                        {!updateResult && !isNodeLoading && node.status === 'online' && needsUpdate && !isUpdating && (
-                          <motion.span
-                            className="px-2 py-0.5 text-xs font-medium bg-accent-500/20 text-accent-400 rounded-full"
-                            initial={{ scale: 0 }}
-                            animate={{ scale: 1 }}
-                          >
-                            {t('updates.update_available')}
-                          </motion.span>
-                        )}
-
-                        {!updateResult && !isNodeLoading && node.status === 'online' && !needsUpdate && !isUpdating && (
-                          <span className="flex items-center gap-1.5 text-xs text-success">
-                            <Check className="w-3.5 h-3.5" />
-                            {t('updates.up_to_date')}
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        {!isNodeLoading && (
-                          <Tooltip label={t('imageDelivery.deliver_hint')} maxWidth={280}>
-                            <motion.button
-                              onClick={() => setDeliverTarget({ id: node.id, name: node.name })}
-                              disabled={isUpdating}
-                              className="btn btn-secondary text-xs px-2.5 py-1.5"
-                              whileHover={{ scale: 1.05 }}
-                              whileTap={{ scale: 0.95 }}
-                            >
-                              <Upload className="w-3.5 h-3.5" />
-                            </motion.button>
-                          </Tooltip>
-                        )}
-                        <motion.button
-                          onClick={() => handleUpdateNode(node.id, node.name)}
-                          disabled={isUpdating || isNodeLoading || node.status === 'offline' || (!needsUpdate && !isDevChannel)}
-                          className="btn btn-secondary text-xs px-3 py-1.5"
-                          whileHover={{ scale: 1.05 }}
-                          whileTap={{ scale: 0.95 }}
-                        >
-                          {isUpdating ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <Download className="w-3.5 h-3.5" />
-                          )}
-                          {t('updates.update')}
-                        </motion.button>
-                      </div>
-                    </div>
-                  </motion.div>
-                )
-              })
+          <div className="flex items-center gap-3">
+            {loadedNodes.length > 0 && (
+              <label className="flex items-center gap-2 text-sm text-dark-400 cursor-pointer select-none">
+                <Checkbox
+                  checked={allSelected}
+                  indeterminate={selectedNodes.length > 0 && !allSelected}
+                  onChange={() => setSelected(allSelected ? new Set() : new Set(loadedNodes.map(n => n.id)))}
+                />
+                {t('updates.select_all')}
+              </label>
             )}
-          </AnimatePresence>
+            {updateAllCount > 0 && (
+              <motion.button
+                onClick={handleUpdateAllNodes}
+                disabled={updatingAll || !allNodesLoaded}
+                className="btn btn-secondary"
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                {updatingAll || !allNodesLoaded ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <ArrowUpCircle className="w-4 h-4" />
+                )}
+                {updatingAll || allNodesLoaded
+                  ? `${t('updates.update_all_nodes')} (${updateAllCount})`
+                  : nodesLoadingLabel}
+              </motion.button>
+            )}
+          </div>
         </div>
+
+        <AnimatePresence>
+          {selectedNodes.length > 0 && (
+            <motion.div
+              className="sticky top-2 z-20 mb-4 flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-xl bg-dark-900/95 backdrop-blur border border-accent-500/30 shadow-lg"
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+            >
+              <span className="text-sm text-dark-200">{t('updates.selected_count', { count: selectedNodes.length })}</span>
+              <div className="flex items-center gap-2 flex-wrap">
+                <Tooltip label={t('updates.update_selected_hint')} maxWidth={300}>
+                  <button
+                    onClick={handleUpdateSelected}
+                    disabled={selectedAgentTargets.length === 0}
+                    className="btn btn-secondary text-sm"
+                  >
+                    <Download className="w-4 h-4" />
+                    {t('updates.update_selected', { count: selectedAgentTargets.length })}
+                  </button>
+                </Tooltip>
+                <Tooltip label={t('imageDelivery.deliver_hint')} maxWidth={300}>
+                  <button onClick={() => setBulkDeliverOpen(true)} className="btn btn-primary text-sm">
+                    <Upload className="w-4 h-4" />
+                    {t('updates.update_selected_ssh', { count: selectedNodes.length })}
+                  </button>
+                </Tooltip>
+                <Tooltip label={t('updates.haproxy_selected_hint')} maxWidth={300}>
+                  <button
+                    onClick={() => setHaproxyModal({ targets: selectedHaproxyTargets.map(toHAProxyTarget), jobId: null })}
+                    disabled={selectedHaproxyTargets.length === 0}
+                    className="btn btn-secondary text-sm"
+                  >
+                    <ArrowUpCircle className="w-4 h-4" />
+                    {t('updates.haproxy_selected', { count: selectedHaproxyTargets.length })}
+                  </button>
+                </Tooltip>
+                <Tooltip label={t('updates.proxy_selected_hint')} maxWidth={300}>
+                  <button
+                    onClick={() => setProxyModal(selectedProxyTargets.map(n => ({ id: n.id, name: n.name })))}
+                    disabled={selectedProxyTargets.length === 0}
+                    className="btn btn-secondary text-sm"
+                  >
+                    <Globe className="w-4 h-4" />
+                    {t('updates.proxy_selected', { count: selectedProxyTargets.length })}
+                  </button>
+                </Tooltip>
+                <Tooltip label={t('updates.clear_selection')}>
+                  <button
+                    onClick={() => setSelected(new Set())}
+                    className="p-2 text-dark-400 hover:text-dark-200 transition rounded-lg hover:bg-dark-800/50"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </Tooltip>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {loadedNodes.length === 0 ? (
+          <motion.div
+            className="card text-center py-12"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+          >
+            <ServerIcon className="w-12 h-12 text-dark-500 mx-auto mb-3" />
+            <p className="text-dark-400">{t('updates.no_nodes')}</p>
+          </motion.div>
+        ) : (
+          <div className="space-y-4">
+            {nodeGroups.folders.map(({ name, members }) => renderFolder(name, members))}
+            {nodeGroups.unfoldered.length > 0 && (
+              <div className={NODE_GRID_CLASS}>{nodeGroups.unfoldered.map(renderNodeCard)}</div>
+            )}
+          </div>
+        )}
       </motion.div>
 
       {/* All Up To Date Card */}
@@ -821,9 +1046,43 @@ export default function Updates() {
 
       {deliverTarget && (
         <DeliverImageModal
+          key={deliverTarget.id}
           serverId={deliverTarget.id}
           serverName={deliverTarget.name}
+          jobId={deliveryJobs.get(deliverTarget.id)?.job_id ?? null}
+          onStarted={fetchDeliveryJobs}
           onClose={() => setDeliverTarget(null)}
+        />
+      )}
+
+      {proxyModal && (
+        <DownloadProxyModal
+          targets={proxyModal}
+          onChanged={(ids) => {
+            if (proxyModal.length > 1) setSelected(new Set())
+            setTimeout(() => ids.forEach(fetchNodeVersion), PROXY_REFRESH_DELAY_MS)
+          }}
+          onClose={() => setProxyModal(null)}
+        />
+      )}
+
+      {haproxyModal && (
+        <HAProxyUpgradeModal
+          targets={haproxyModal.targets}
+          jobId={haproxyModal.jobId}
+          onStarted={() => {
+            if (haproxyModal.targets.length > 1) setSelected(new Set())
+            fetchHaproxyJobs()
+          }}
+          onClose={() => setHaproxyModal(null)}
+        />
+      )}
+
+      {bulkDeliverOpen && (
+        <BulkDeliverImageModal
+          servers={selectedNodes.map(n => ({ id: n.id, name: n.name, hasSshCreds: n.hasSshCreds }))}
+          onStarted={handleBulkDeliveryStarted}
+          onClose={() => setBulkDeliverOpen(false)}
         />
       )}
     </motion.div>

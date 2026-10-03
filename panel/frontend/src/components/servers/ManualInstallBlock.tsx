@@ -71,7 +71,7 @@ export default function ManualInstallBlock({ open, onToggle, command, loading, o
                 <textarea
                   readOnly
                   value={command}
-                  className="input font-mono text-[11px] break-all resize-none w-full min-h-[88px]"
+                  className="input font-mono text-2xs break-all resize-none w-full min-h-[88px]"
                   onClick={(e) => (e.target as HTMLTextAreaElement).select()}
                 />
               ) : (

@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Loader2, Lock, Network, Plus, Trash2, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Loader2, Lock, Network, Plus, RotateCcw, Trash2, XCircle } from 'lucide-react'
 import {
   proxyApi,
   type NetworkAddress,
+  type NetworkAddressFamily,
   type NetworkAddressRef,
   type NetworkInterface,
   type NetworkJobSnapshot,
@@ -15,13 +16,37 @@ import {
   type Server,
 } from '../../api/client'
 import { nodeAllows } from '../../utils/nodeCapabilities'
+import { versionAtLeast } from '../../utils/version'
 import { Tooltip } from '../ui/Tooltip'
+import { Checkbox } from '../ui/Checkbox'
 import { CopyableIp } from '../ui/CopyableIp'
 import { FAQIcon } from '../FAQ'
 
 const POLL_INTERVAL_MS = 3000
 const PREVIEW_DEBOUNCE_MS = 400
 const DEFAULT_ROLLBACK_SEC = 120
+const MIN_NODE_VERSION_GATEWAY = '10.31.0'
+const MIN_NODE_VERSION_HOSTER_REMOVAL = '10.31.0'
+// Потолок ноды на одну транзакцию (добавление + удаление)
+const MAX_ADDRESSES_PER_APPLY = 256
+
+type LockReason = 'access' | 'primary' | 'dhcp' | 'node'
+
+const LOCK_HINT_KEYS: Record<LockReason, string> = {
+  access: 'server_details.network_locked_access',
+  primary: 'server_details.network_locked_primary',
+  dhcp: 'server_details.network_locked_dhcp',
+  node: 'server_details.network_locked_needs_node',
+}
+
+/** Почему адрес нельзя удалить; null — можно. Свои адреса нода убирает из конфига, адреса хостера снимает поверх него. */
+function lockReason(addr: NetworkAddress, accessAddress: string | null | undefined, hosterRemoval: boolean): LockReason | null {
+  if (addr.address === accessAddress) return 'access'
+  if (addr.primary) return 'primary'
+  if (addr.managed) return null
+  if (addr.dynamic) return 'dhcp'
+  return hosterRemoval ? null : 'node'
+}
 
 interface Props {
   serverId: number
@@ -62,7 +87,9 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
   const [job, setJob] = useState<NetworkJobSnapshot | null>(null)
   const [showProgress, setShowProgress] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
-  const [removeTarget, setRemoveTarget] = useState<{ iface: string; ref: NetworkAddressRef } | null>(null)
+  const [removeTarget, setRemoveTarget] = useState<{ iface: string; refs: NetworkAddressRef[]; hoster: number } | null>(null)
+  // Выбор для массового удаления — по интерфейсам: одна транзакция ноды меняет один интерфейс
+  const [selected, setSelected] = useState<Record<string, Set<string>>>({})
   const [busy, setBusy] = useState(false)
   const [now, setNow] = useState(() => Date.now())
 
@@ -122,10 +149,12 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
     previousPhase.current = job.phase
   }, [job, load, t])
 
-  const runApply = async (iface: string, addText: string, remove: NetworkAddressRef[]): Promise<string | null> => {
+  const runApply = async (
+    iface: string, addText: string, gateway: string, remove: NetworkAddressRef[], restore: NetworkAddressRef[] = [],
+  ): Promise<string | null> => {
     setBusy(true)
     try {
-      const res = await proxyApi.applyNetworkAddresses(serverId, { interface: iface, add_text: addText, remove })
+      const res = await proxyApi.applyNetworkAddresses(serverId, { interface: iface, add_text: addText, gateway, remove, restore })
       previousPhase.current = res.data.phase === 'done' ? null : res.data.phase
       setJob(res.data)
       setShowProgress(true)
@@ -154,6 +183,22 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
     }
   }
 
+  const setSelection = (iface: string, cidrs: string[], checked: boolean) => {
+    setSelected(prev => {
+      const next = new Set(prev[iface])
+      for (const value of cidrs) {
+        if (checked) next.add(value)
+        else next.delete(value)
+      }
+      return { ...prev, [iface]: next }
+    })
+  }
+
+  const restoreAddress = async (iface: string, ref: NetworkAddressRef) => {
+    const error = await runApply(iface, '', '', [], [ref])
+    if (error) toast.error(error)
+  }
+
   const rollback = async () => {
     const id = job?.transaction_id ?? transaction?.id
     if (!id) return
@@ -170,6 +215,10 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
   }
 
   const rollbackTimeout = state?.rollback_timeout_sec ?? DEFAULT_ROLLBACK_SEC
+  const minGatewayVersion = state?.min_node_version_gateway ?? MIN_NODE_VERSION_GATEWAY
+  const gatewaySupported = versionAtLeast(state?.node_version, minGatewayVersion)
+  const minHosterVersion = state?.min_node_version_hoster_removal ?? MIN_NODE_VERSION_HOSTER_REMOVAL
+  const hosterRemoval = versionAtLeast(state?.node_version, minHosterVersion)
 
   if (!readable || unsupported) {
     return (
@@ -208,7 +257,7 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
             disabled={!canAct || !state}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
           >
-            <Plus className="w-3 h-3" />
+            <Plus className="w-3.5 h-3.5" />
             {t('server_details.network_add')}
           </button>
         </div>
@@ -244,8 +293,20 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
         <InterfaceBlock
           key={iface.name}
           iface={iface}
+          suppressed={(state.suppressed ?? []).filter(entry => entry.interface === iface.name
+            && !iface.addresses.some(addr => addr.address === entry.address))}
+          lockOf={addr => lockReason(addr, state.access_address, hosterRemoval)}
+          minHosterVersion={minHosterVersion}
+          selectable={writable}
           canRemove={canAct}
-          onRemove={ref => setRemoveTarget({ iface: iface.name, ref })}
+          selected={selected[iface.name]}
+          onSelect={(cidrs, checked) => setSelection(iface.name, cidrs, checked)}
+          onRemove={addrs => setRemoveTarget({
+            iface: iface.name,
+            refs: addrs.map(addr => ({ address: addr.address, prefix: addr.prefix })),
+            hoster: addrs.filter(addr => !addr.managed).length,
+          })}
+          onRestore={ref => restoreAddress(iface.name, ref)}
         />
       ))}
 
@@ -256,27 +317,33 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
             serverId={serverId}
             interfaces={state.interfaces}
             defaultInterface={state.default_interface ?? state.interfaces[0]?.name ?? ''}
+            defaultGateway={state.default_gateway ?? {}}
+            gatewaySupported={gatewaySupported}
+            minGatewayVersion={minGatewayVersion}
             rollbackTimeout={rollbackTimeout}
             busy={busy}
             onClose={() => setAddOpen(false)}
-            onApply={async (iface, text) => {
-              const error = await runApply(iface, text, [])
+            onApply={async (iface, text, gateway) => {
+              const error = await runApply(iface, text, gateway, [])
               if (!error) setAddOpen(false)
               return error
             }}
           />
         )}
         {removeTarget && (
-          <RemoveAddressModal
+          <RemoveAddressesModal
             key="remove"
             iface={removeTarget.iface}
-            ref_={removeTarget.ref}
+            refs={removeTarget.refs}
+            hoster={removeTarget.hoster}
             rollbackTimeout={rollbackTimeout}
             busy={busy}
             onClose={() => setRemoveTarget(null)}
             onConfirm={async () => {
-              const error = await runApply(removeTarget.iface, '', [removeTarget.ref])
+              const { iface, refs } = removeTarget
+              const error = await runApply(iface, '', '', refs)
               if (error) toast.error(error)
+              else setSelection(iface, refs.map(cidr), false)
               setRemoveTarget(null)
             }}
           />
@@ -286,39 +353,110 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
   )
 }
 
-function InterfaceBlock({ iface, canRemove, onRemove }: {
+function InterfaceBlock({
+  iface, suppressed, lockOf, minHosterVersion, selectable, canRemove, selected, onSelect, onRemove, onRestore,
+}: {
   iface: NetworkInterface
+  suppressed: NetworkAddressRef[]
+  lockOf: (addr: NetworkAddress) => LockReason | null
+  minHosterVersion: string
+  selectable: boolean
   canRemove: boolean
-  onRemove: (ref: NetworkAddressRef) => void
+  selected?: Set<string>
+  onSelect: (cidrs: string[], checked: boolean) => void
+  onRemove: (addrs: NetworkAddress[]) => void
+  onRestore: (ref: NetworkAddressRef) => void
 }) {
   const { t } = useTranslation()
+  const removable = iface.addresses.filter(addr => lockOf(addr) === null)
+  const withCheckboxes = selectable && removable.length > 0
+  const chosen = removable.filter(addr => selected?.has(cidr(addr)))
+  const allChosen = chosen.length === removable.length
+  const overLimit = chosen.length > MAX_ADDRESSES_PER_APPLY
+
   return (
     <div className={`mt-3 ${iface.is_up ? '' : 'opacity-60'}`}>
-      <div className="flex items-center gap-2 text-sm text-dark-200 font-medium mb-1">
+      <div className="flex items-center gap-2 text-sm text-dark-200 font-medium mb-1 flex-wrap">
+        {withCheckboxes && (
+          <Checkbox
+            checked={allChosen}
+            indeterminate={chosen.length > 0 && !allChosen}
+            onChange={() => onSelect(removable.map(cidr), !allChosen)}
+            className="ml-2"
+          />
+        )}
         <span className="font-mono">{iface.name}</span>
         {iface.kind !== 'physical' && <Badge tone="muted">{iface.kind}</Badge>}
         {iface.is_default && <Badge tone="accent">{t('server_details.network_default_badge')}</Badge>}
         {!iface.is_up && <Badge tone="warning">{t('server_details.network_down_badge')}</Badge>}
+        {chosen.length > 0 && (
+          <div className="ml-auto flex items-center gap-2 text-xs font-normal">
+            <span className="text-dark-400">{t('server_details.network_selected_count', { count: chosen.length })}</span>
+            <button
+              onClick={() => onRemove(chosen)}
+              disabled={!canRemove || overLimit}
+              className="px-2 py-1 rounded-md font-medium bg-danger/15 text-danger hover:bg-danger/25 transition-colors disabled:opacity-40 flex items-center gap-1"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              {t('server_details.network_remove_selected')}
+            </button>
+          </div>
+        )}
       </div>
-      {iface.addresses.length === 0 && <p className="text-xs text-dark-500 ml-1">{t('server_details.network_no_addresses')}</p>}
+      {overLimit && (
+        <p className="text-xs text-warning ml-1 mb-1">{t('server_details.network_remove_limit', { max: MAX_ADDRESSES_PER_APPLY })}</p>
+      )}
+      {iface.addresses.length === 0 && suppressed.length === 0 && (
+        <p className="text-xs text-dark-500 ml-1">{t('server_details.network_no_addresses')}</p>
+      )}
       <div className="space-y-1">
         {iface.addresses.map(addr => (
-          <AddressRow key={`${addr.address}/${addr.prefix}`} addr={addr} canRemove={canRemove} onRemove={onRemove} />
+          <AddressRow
+            key={cidr(addr)}
+            addr={addr}
+            lock={lockOf(addr)}
+            minHosterVersion={minHosterVersion}
+            withCheckbox={withCheckboxes}
+            checked={!!selected?.has(cidr(addr))}
+            canRemove={canRemove}
+            onToggle={checked => onSelect([cidr(addr)], checked)}
+            onRemove={() => onRemove([addr])}
+          />
+        ))}
+        {suppressed.map(entry => (
+          <SuppressedRow
+            key={cidr(entry)}
+            entry={entry}
+            withCheckbox={withCheckboxes}
+            showRestore={selectable}
+            canRestore={canRemove}
+            onRestore={() => onRestore({ address: entry.address, prefix: entry.prefix })}
+          />
         ))}
       </div>
     </div>
   )
 }
 
-function AddressRow({ addr, canRemove, onRemove }: {
+// Пустое место под галочку держит неудаляемые адреса в одной колонке с остальными
+const CheckboxSpacer = () => <span className="w-[18px] shrink-0" />
+
+function AddressRow({ addr, lock, minHosterVersion, withCheckbox, checked, canRemove, onToggle, onRemove }: {
   addr: NetworkAddress
+  lock: LockReason | null
+  minHosterVersion: string
+  withCheckbox: boolean
+  checked: boolean
   canRemove: boolean
-  onRemove: (ref: NetworkAddressRef) => void
+  onToggle: (checked: boolean) => void
+  onRemove: () => void
 }) {
   const { t } = useTranslation()
-  const locked = !addr.managed
   return (
     <div className="flex items-center gap-2 text-sm px-2 py-1 rounded-lg bg-dark-800/60 flex-wrap">
+      {withCheckbox && (lock === null
+        ? <Checkbox checked={checked} onChange={e => onToggle(e.target.checked)} />
+        : <CheckboxSpacer />)}
       <span className="font-mono text-dark-100">
         <CopyableIp value={addr.address} display={`${addr.address}/${addr.prefix}`} />
       </span>
@@ -326,19 +464,53 @@ function AddressRow({ addr, canRemove, onRemove }: {
       {addr.primary && <Badge tone="accent">{t('server_details.network_primary_badge')}</Badge>}
       {addr.dynamic && <Badge tone="muted">DHCP</Badge>}
       {addr.managed && <Badge tone="success">{t('server_details.network_managed_badge')}</Badge>}
-      {locked && (
-        <Tooltip label={t('server_details.network_locked_hint')} maxWidth={320}>
+      {addr.gateway && (
+        <Tooltip label={t('server_details.network_gateway_badge_hint', { gateway: addr.gateway })} maxWidth={320}>
+          <span className="text-xs font-mono text-dark-400 cursor-help">via {addr.gateway}</span>
+        </Tooltip>
+      )}
+      {lock && (
+        <Tooltip label={t(LOCK_HINT_KEYS[lock], { version: minHosterVersion })} maxWidth={320}>
           <Lock className="w-3.5 h-3.5 text-dark-500 cursor-help" />
         </Tooltip>
       )}
-      {addr.managed && (
+      {lock === null && (
         <button
-          onClick={() => onRemove({ address: addr.address, prefix: addr.prefix })}
+          onClick={onRemove}
           disabled={!canRemove}
-          className="ml-auto text-xs text-dark-400 hover:text-danger disabled:opacity-40 flex items-center gap-1"
+          className="ml-auto btn-tool btn-tool-danger"
         >
-          <Trash2 className="w-3.5 h-3.5" />
+          <Trash2 className="w-4 h-4" />
           {t('server_details.network_remove')}
+        </button>
+      )}
+    </div>
+  )
+}
+
+function SuppressedRow({ entry, withCheckbox, showRestore, canRestore, onRestore }: {
+  entry: NetworkAddressRef
+  withCheckbox: boolean
+  showRestore: boolean
+  canRestore: boolean
+  onRestore: () => void
+}) {
+  const { t } = useTranslation()
+  return (
+    <div className="flex items-center gap-2 text-sm px-2 py-1 rounded-lg bg-dark-800/30 flex-wrap">
+      {withCheckbox && <CheckboxSpacer />}
+      <span className="font-mono text-dark-500 line-through">{cidr(entry)}</span>
+      <Tooltip label={t('server_details.network_suppressed_hint')} maxWidth={340}>
+        <span className="cursor-help"><Badge tone="warning">{t('server_details.network_suppressed_badge')}</Badge></span>
+      </Tooltip>
+      {showRestore && (
+        <button
+          onClick={onRestore}
+          disabled={!canRestore}
+          className="ml-auto btn-tool"
+        >
+          <RotateCcw className="w-4 h-4" />
+          {t('server_details.network_restore')}
         </button>
       )}
     </div>
@@ -352,7 +524,7 @@ function Badge({ tone, children }: { tone: 'accent' | 'warning' | 'success' | 'm
     success: 'bg-success/15 text-success',
     muted: 'bg-dark-700 text-dark-400',
   }
-  return <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${tones[tone]}`}>{children}</span>
+  return <span className={`text-2xs uppercase tracking-wide px-1.5 py-0.5 rounded ${tones[tone]}`}>{children}</span>
 }
 
 function TransactionProgress({ job, transaction, now, busy, canCancel, onCancel, onHide }: {
@@ -436,11 +608,11 @@ function TransactionProgress({ job, transaction, now, busy, canCancel, onCancel,
 
       {job?.error_log && (
         <div className="mt-2">
-          <button onClick={() => setLogOpen(v => !v)} className="text-xs text-dark-400 hover:text-dark-200 flex items-center gap-1">
-            {logOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          <button onClick={() => setLogOpen(v => !v)} className="btn-disclosure">
+            {logOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
             {t('server_details.network_error_log')}
           </button>
-          {logOpen && <pre className="mt-1 p-2 rounded-lg bg-dark-900 text-[11px] text-dark-300 overflow-x-auto whitespace-pre-wrap">{job.error_log}</pre>}
+          {logOpen && <pre className="mt-1 p-2 rounded-lg bg-dark-900 text-2xs text-dark-300 overflow-x-auto whitespace-pre-wrap">{job.error_log}</pre>}
         </div>
       )}
 
@@ -451,7 +623,7 @@ function TransactionProgress({ job, transaction, now, busy, canCancel, onCancel,
           </button>
         )}
         {done && (
-          <button onClick={onHide} className="text-xs text-dark-400 hover:text-dark-200">{t('server_details.network_hide')}</button>
+          <button onClick={onHide} className="btn-tool">{t('server_details.network_hide')}</button>
         )}
       </div>
     </div>
@@ -501,22 +673,30 @@ function RollbackWarning({ seconds }: { seconds: number }) {
   )
 }
 
-function AddAddressesModal({ serverId, interfaces, defaultInterface, rollbackTimeout, busy, onClose, onApply }: {
+function AddAddressesModal({
+  serverId, interfaces, defaultInterface, defaultGateway, gatewaySupported, minGatewayVersion,
+  rollbackTimeout, busy, onClose, onApply,
+}: {
   serverId: number
   interfaces: NetworkInterface[]
   defaultInterface: string
+  defaultGateway: Partial<Record<NetworkAddressFamily, string>>
+  gatewaySupported: boolean
+  minGatewayVersion: string
   rollbackTimeout: number
   busy: boolean
   onClose: () => void
-  onApply: (iface: string, text: string) => Promise<string | null>
+  onApply: (iface: string, text: string, gateway: string) => Promise<string | null>
 }) {
   const { t } = useTranslation()
   const [iface, setIface] = useState(defaultInterface)
   const [text, setText] = useState('')
+  const [gateway, setGateway] = useState('')
   const [preview, setPreview] = useState<NetworkPreview | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [previewing, setPreviewing] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const gatewayValue = gatewaySupported ? gateway.trim() : ''
 
   useEffect(() => {
     if (!text.trim()) {
@@ -527,7 +707,7 @@ function AddAddressesModal({ serverId, interfaces, defaultInterface, rollbackTim
     setPreviewing(true)
     const timer = setTimeout(async () => {
       try {
-        const res = await proxyApi.previewNetworkAddresses(serverId, text)
+        const res = await proxyApi.previewNetworkAddresses(serverId, text, gatewayValue)
         setPreview(res.data)
         setPreviewError(null)
       } catch (err) {
@@ -538,7 +718,12 @@ function AddAddressesModal({ serverId, interfaces, defaultInterface, rollbackTim
       }
     }, PREVIEW_DEBOUNCE_MS)
     return () => clearTimeout(timer)
-  }, [text, serverId, t])
+  }, [text, gatewayValue, serverId, t])
+
+  // Шлюз основного адреса того семейства, что в списке: его и подразумевает пустое поле
+  const family: NetworkAddressFamily = preview && preview.ipv6 > 0 && preview.ipv4 === 0 ? 'ipv6' : 'ipv4'
+  const mainGateway = defaultGateway[family]
+  const sameAsMain = !!gatewayValue && gatewayValue.toLowerCase() === mainGateway?.toLowerCase()
 
   const present = useMemo(() => {
     const target = interfaces.find(i => i.name === iface)
@@ -549,7 +734,7 @@ function AddAddressesModal({ serverId, interfaces, defaultInterface, rollbackTim
 
   const submit = async () => {
     setSubmitError(null)
-    const error = await onApply(iface, text)
+    const error = await onApply(iface, text, gatewayValue)
     if (error) setSubmitError(error)
   }
 
@@ -578,12 +763,33 @@ function AddAddressesModal({ serverId, interfaces, defaultInterface, rollbackTim
       />
       <p className="text-xs text-dark-500 mt-1 mb-3">{t('server_details.network_format_hint')}</p>
 
+      <label className="block text-xs text-dark-400 mb-1">{t('server_details.network_gateway_label')}</label>
+      <input
+        value={gatewaySupported ? gateway : ''}
+        onChange={e => setGateway(e.target.value)}
+        disabled={!gatewaySupported}
+        placeholder={mainGateway
+          ? t('server_details.network_gateway_placeholder', { gateway: mainGateway })
+          : t('server_details.network_gateway_placeholder_unknown')}
+        className="w-full font-mono text-sm px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-dark-100 placeholder-dark-600 focus:outline-none focus:border-accent-500/50 disabled:opacity-50"
+      />
+      <p className="text-xs text-dark-500 mt-1 mb-3">
+        {!gatewaySupported
+          ? t('server_details.network_gateway_needs_node', { version: minGatewayVersion })
+          : sameAsMain
+            ? t('server_details.network_gateway_same_as_main')
+            : t('server_details.network_gateway_hint')}
+      </p>
+
       <div className="min-h-[1.5rem] text-xs mb-3">
-        {previewing && <span className="text-dark-500 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />{t('server_details.network_preview_wait')}</span>}
+        {previewing && <span className="text-dark-500 flex items-center gap-1"><Loader2 className="w-3.5 h-3.5 animate-spin" />{t('server_details.network_preview_wait')}</span>}
         {!previewing && previewError && <span className="text-danger">{previewError}</span>}
         {!previewing && preview && (
           <span className="text-dark-300">
             {t('server_details.network_preview_count', { count: willAdd, ipv4: preview.ipv4, ipv6: preview.ipv6 })}
+            {gatewayValue && !sameAsMain && (
+              <span className="text-dark-500"> · {t('server_details.network_preview_via', { gateway: gatewayValue })}</span>
+            )}
             {alreadyPresent > 0 && <span className="text-dark-500"> · {t('server_details.network_already_present', { count: alreadyPresent })}</span>}
           </span>
         )}
@@ -610,20 +816,37 @@ function AddAddressesModal({ serverId, interfaces, defaultInterface, rollbackTim
   )
 }
 
-function RemoveAddressModal({ iface, ref_, rollbackTimeout, busy, onClose, onConfirm }: {
+function RemoveAddressesModal({ iface, refs, hoster, rollbackTimeout, busy, onClose, onConfirm }: {
   iface: string
-  ref_: NetworkAddressRef
+  refs: NetworkAddressRef[]
+  // Сколько среди них адресов хостера: их нода снимает поверх конфига, а не удаляет из него
+  hoster: number
   rollbackTimeout: number
   busy: boolean
   onClose: () => void
   onConfirm: () => Promise<void>
 }) {
   const { t } = useTranslation()
+  const single = refs.length === 1
   return (
-    <ModalShell title={t('server_details.network_modal_remove_title')} danger onClose={() => !busy && onClose()}>
+    <ModalShell
+      title={t(single ? 'server_details.network_modal_remove_title' : 'server_details.network_modal_remove_many_title')}
+      danger
+      onClose={() => !busy && onClose()}
+    >
       <p className="text-dark-300 text-sm mb-4">
-        {t('server_details.network_remove_confirm', { address: cidr(ref_), iface })}
+        {single
+          ? t(hoster ? 'server_details.network_remove_hoster_confirm' : 'server_details.network_remove_confirm',
+            { address: cidr(refs[0]), iface })
+          : t(hoster ? 'server_details.network_remove_many_hoster_confirm' : 'server_details.network_remove_many_confirm',
+            { count: refs.length, iface })}
       </p>
+      {!single && (
+        <ul className="mb-4 max-h-48 overflow-y-auto pr-1 font-mono text-xs text-dark-200 space-y-0.5">
+          {refs.map(ref => <li key={cidr(ref)}>{cidr(ref)}</li>)}
+        </ul>
+      )}
+      {hoster > 0 && <p className="text-dark-400 text-xs mb-4">{t('server_details.network_remove_hoster_note')}</p>}
       <RollbackWarning seconds={rollbackTimeout} />
       <div className="flex justify-end gap-3 mt-5">
         <button className="btn btn-secondary" onClick={onClose} disabled={busy}>{t('common.cancel')}</button>

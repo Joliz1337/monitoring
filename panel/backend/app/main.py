@@ -15,11 +15,12 @@ logging.basicConfig(
 
 from app.database import init_db, async_session
 from app.config import get_settings
-from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles, reserved_ports, node_image, remnawave_install, xray_test, exit_proxy, source_pool
+from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles, reserved_ports, node_image, remnawave_install, haproxy_upgrade, xray_test, exit_proxy, source_pool, loss
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
 from app.services.server_alerter import start_server_alerter, stop_server_alerter
+from app.services.loss_exclusions import load_loss_exclusions
 from app.services.billing_checker import start_billing_checker, stop_billing_checker
 from app.services.telegram_bot import start_telegram_bot_service, stop_telegram_bot_service
 from app.services.time_sync import start_time_sync, stop_time_sync
@@ -27,6 +28,7 @@ from app.services.wildcard_ssl import start_wildcard_ssl_manager, stop_wildcard_
 from app.services.torrent_blocker import start_torrent_blocker, stop_torrent_blocker
 from app.services.antiddos_manager import start_antiddos_manager, stop_antiddos_manager
 from app.services.node_sync_queue import start_node_sync_queue, stop_node_sync_queue
+from app.services.node_update_watcher import start_node_update_watcher, stop_node_update_watcher
 from app.services.exit_proxy.service import start_exit_proxy, stop_exit_proxy
 from app.services.source_pool.service import start_source_pool, stop_source_pool
 from app.services.xray_test.runner import start_xray_test_service, stop_xray_test_service
@@ -95,6 +97,7 @@ async def lifespan(app: FastAPI):
     async with async_session() as db:
         branch = await load_branch_from_db(db)
         await load_xray_test_versions(db)
+        await load_loss_exclusions(db)
     logger.info(f"Update channel: {branch}")
     
     await _init_optional_module("app.services._ext", "init_ext_db")
@@ -116,6 +119,8 @@ async def lifespan(app: FastAPI):
     await start_antiddos_manager()
     # Долги перед нодами лежат в базе — очередь подхватывает их и после перезапуска панели.
     await start_node_sync_queue()
+    # Попытки обновления нод тоже в базе: итог дождётся и рестарта панели после «Обновить всё».
+    await start_node_update_watcher()
     await start_exit_proxy()
     await start_source_pool()
     await start_xray_test_service()
@@ -141,6 +146,7 @@ async def lifespan(app: FastAPI):
     await stop_traffic_import()
     await stop_source_pool()
     await stop_exit_proxy()
+    await stop_node_update_watcher()
     await stop_node_sync_queue()
     await stop_antiddos_manager()
     await stop_torrent_blocker()
@@ -201,6 +207,7 @@ class GZipMiddlewareNoSSE:
             if (path.endswith("/execute-stream") or path.endswith("/notes/stream")
                     or "/ssh-security/bulk/" in path
                     or ("/servers/remnawave-install/" in path and path.endswith("/stream"))
+                    or ("/servers/deliver-image/" in path and path.endswith("/stream"))
                     or ("/exit-proxy/warp-install/" in path and path.endswith("/stream"))
                     or ("/xray-test/jobs/" in path and path.endswith("/stream"))):
                 await self.app(scope, receive, send)
@@ -218,6 +225,8 @@ app.include_router(server_deploy.router)
 app.include_router(node_image.router)
 # remnawave_install раньше servers: /servers/remnawave-install/... — статичный сегмент
 app.include_router(remnawave_install.router)
+# haproxy_upgrade раньше servers: /servers/haproxy-upgrade/... — статичный сегмент
+app.include_router(haproxy_upgrade.router)
 app.include_router(servers.router)
 app.include_router(node_install_keys.router)
 app.include_router(proxy.router)
@@ -244,6 +253,7 @@ app.include_router(reserved_ports.router)
 app.include_router(xray_test.router)
 app.include_router(exit_proxy.router)
 app.include_router(source_pool.router)
+app.include_router(loss.router)
 
 try:
     from app.routers._internal import router as ext_router

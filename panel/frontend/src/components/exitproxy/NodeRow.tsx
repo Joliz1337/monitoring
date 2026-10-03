@@ -3,22 +3,11 @@ import { useTranslation } from 'react-i18next'
 import type { ExitProxyNode } from '../../api/client'
 import { useExitProxyStore } from '../../stores/exitProxyStore'
 import { getFlag } from '../../utils/format'
+import { versionAtLeast } from '../../utils/version'
 import { Toggle } from '../ui/Toggle'
 import { Tooltip } from '../ui/Tooltip'
 import NodePanel from './NodePanel'
 import { HealthBadge, InstallBadge, SelfTestBadge } from './badges'
-
-function versionAtLeast(version: string | null, minimum: string): boolean {
-  if (!version) return false
-  const parse = (v: string) => v.split('.').map(part => parseInt(part, 10) || 0)
-  const a = parse(version)
-  const b = parse(minimum)
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const diff = (a[i] ?? 0) - (b[i] ?? 0)
-    if (diff !== 0) return diff > 0
-  }
-  return true
-}
 
 interface Props {
   node: ExitProxyNode
@@ -50,13 +39,13 @@ export default function NodeRow({ node, open, onToggleOpen, minNodeVersion }: Pr
         <span className={`w-2 h-2 rounded-full shrink-0 ${node.online ? 'bg-green-400 animate-pulse' : 'bg-dark-600'}`} />
         <div className="min-w-[160px]">
           <div className="text-sm text-dark-100">{node.name}</div>
-          <div className="text-[11px] text-dark-500">{node.node_version ? `v${node.node_version}` : '—'}</div>
+          <div className="text-2xs text-dark-500">{node.node_version ? `v${node.node_version}` : '—'}</div>
         </div>
         <InstallBadge status={status} hint={hint} />
 
         <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[200px] text-sm text-dark-300">
           {node.enabled && node.check_in_progress && (
-            <span className="inline-flex items-center gap-1 text-xs text-dark-400"><Loader2 className="w-3 h-3 animate-spin" />{t('exit_proxy.checking')}</span>
+            <span className="inline-flex items-center gap-1 text-xs text-dark-400"><Loader2 className="w-3.5 h-3.5 animate-spin" />{t('exit_proxy.checking')}</span>
           )}
           {node.enabled && node.current_exit && (
             <>
@@ -65,7 +54,7 @@ export default function NodeRow({ node, open, onToggleOpen, minNodeVersion }: Pr
               {node.current_exit.country && <span>{getFlag(node.current_exit.country)} {node.current_exit.country}</span>}
               <HealthBadge healthy={node.current_exit.healthy} />
               <SelfTestBadge ok={node.self_test ? node.self_test.ok : null} />
-              <span className="text-[11px] text-dark-500">{t('exit_proxy.connections', { count: node.stats.active_connections })}</span>
+              <span className="text-2xs text-dark-500">{t('exit_proxy.connections', { count: node.stats.active_connections })}</span>
             </>
           )}
           {!node.enabled && <span className="text-xs text-dark-500">—</span>}

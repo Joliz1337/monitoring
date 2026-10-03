@@ -1,13 +1,15 @@
-"""Установка компонентов на уже добавленный сервер через агента ноды.
+"""Установка компонентов на уже добавленный сервер.
 
-Панель запускает install.sh на хосте через SSE-канал агента
-POST /api/system/execute-stream (nsenter) — SSH-креды не нужны. Установка идёт
-фоновой задачей, не привязанной к HTTP: обрыв вкладки её не прерывает; лог
-стримится подписчикам и переигрывается при переподключении (как у деплоя).
+Обычно панель запускает install.sh на хосте через SSE-канал агента
+POST /api/system/execute-stream (nsenter) — SSH-креды не нужны. Сервер за ТСПУ
+ставит ноду Remnawave по SSH с загрузкой всего через панель
+(deploy_service.install_via_panel). Установка идёт фоновой задачей, не
+привязанной к HTTP: обрыв вкладки её не прерывает; лог стримится подписчикам и
+переигрывается при переподключении (как у деплоя).
 
 Менеджер общий: нода Remnawave (MON_INSTALL_REMNAWAVE=1) и WARP для exit-прокси
-(MON_INSTALL_WARP=1) отличаются только командой, стартовой строкой лога и тем,
-что делать после успеха.
+(MON_INSTALL_WARP=1) отличаются только потоком событий установки, стартовой
+строкой лога и тем, что делать после успеха.
 """
 from __future__ import annotations
 
@@ -126,7 +128,7 @@ OnSuccess = Callable[[int], Awaitable[None]]
 
 
 class HostInstallJobManager:
-    """In-memory реестр фоновых установок через агента с pub/sub лога.
+    """In-memory реестр фоновых установок с pub/sub лога.
 
     `start_message` — первая строка лога с подстановкой `{name}`; `on_success`
     вызывается с id сервера после install.sh с нулевым кодом.
@@ -162,12 +164,14 @@ class HostInstallJobManager:
             for j in sorted(self._jobs.values(), key=lambda x: x.started_at)
         ]
 
-    def start(self, server: Server, command: str) -> str:
+    def start(self, server: Server, events: AsyncIterator[dict]) -> str:
+        """events — поток установки {type: log|error|done}: run_install_on_node
+        (через агента) или deploy_service.install_via_panel (по SSH)."""
         self._cleanup_finished()
         job_id = uuid.uuid4().hex
         job = HostInstallJob(id=job_id, server_id=server.id, server_name=server.name)
         self._jobs[job_id] = job
-        job.task = asyncio.create_task(self._run(job, server, command))
+        job.task = asyncio.create_task(self._run(job, events))
         return job_id
 
     def _emit(self, job: HostInstallJob, event: dict) -> None:
@@ -188,11 +192,11 @@ class HostInstallJobManager:
         job.finished_at = time.time()
         self._emit(job, {"type": "done", "status": status, "exit_code": job.exit_code})
 
-    async def _run(self, job: HostInstallJob, server: Server, command: str) -> None:
+    async def _run(self, job: HostInstallJob, events: AsyncIterator[dict]) -> None:
         try:
             self._emit(job, {"type": "start", "name": job.server_name})
             self._emit(job, {"type": "log", "line": "[panel] " + self._start_message.format(name=job.server_name)})
-            async for event in run_install_on_node(server, command):
+            async for event in events:
                 etype = event.get("type")
                 if etype == "error":
                     self._emit(job, event)
@@ -267,7 +271,7 @@ async def mark_xray_installed(server_id: int) -> None:
 
 
 _manager = HostInstallJobManager(
-    start_message="Устанавливаю ноду Remnawave на «{name}» через агента…",
+    start_message="Устанавливаю ноду Remnawave на «{name}»…",
     on_success=mark_xray_installed,
 )
 

@@ -3,6 +3,8 @@
 Панель подключается к серверу, скачивает install.sh и запускает его в режиме
 `--unattended`: ставится нода мониторинга и, по желанию, WARP / нода Remnawave /
 HTTP-прокси установщика. Пароль SSH живёт только в памяти на время установки.
+Тем же SSH-прогоном ставится нода Remnawave на уже добавленный сервер, когда
+тот качает всё через панель (install_via_panel).
 
 Свежие образы OVH (и ряда других хостеров) отдают root с просроченным паролем —
 PAM форсирует смену при первом входе. Без TTY команда не выполняется
@@ -16,9 +18,10 @@ import asyncio
 import secrets
 import shlex
 import string
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 import asyncssh
 from python_socks import ProxyType
@@ -26,9 +29,16 @@ from python_socks import ProxyError as SocksProxyError
 from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from app.services.http_client import parse_proxy_input, sanitize_proxy
+from app.services.install_tunnel import InstallTunnel, TunnelForwardingDenied, open_install_tunnel
+from app.services.ssh_target import SSHTarget, ssh_connect_kwargs
 from app.services import update_channel
 
 REMOTE_SCRIPT = "/tmp/mon-install.sh"
+
+TUNNEL_DENIED_MESSAGE = (
+    "sshd на сервере запрещает проброс портов (AllowTcpForwarding) — установка через "
+    "панель невозможна: разрешите проброс или снимите «Качать всё через панель»"
+)
 
 # install.sh печатает этот маркер перед ребутом из Rescue System — по нему
 # деплой понимает, что ОС установлена и обрыв SSH ожидаем (не ошибка).
@@ -100,6 +110,9 @@ class DeployParams:
     new_password: str | None = None
     # Язык интерфейса панели в момент запуска — им же говорит установщик и меню `mon` на ноде
     lang: InstallerLanguage = InstallerLanguage.EN
+    # Сервер без доступа к GitHub/реестрам (ТСПУ): всё качается через панель по
+    # SSH-туннелю, прокси на сервере живёт только на время установки
+    via_panel: bool = False
 
 
 def _generate_strong_password(length: int = 20) -> str:
@@ -126,7 +139,7 @@ def _looks_expired(line: str) -> bool:
     return any(marker in low for marker in _EXPIRED_MARKERS)
 
 
-def _render_unattended_command(env: dict[str, str]) -> str:
+def _render_unattended_command(env: dict[str, str], download_proxy: str | None = None) -> str:
     """Скачать install.sh и запустить --unattended с заданным окружением.
 
     Все значения env экранируются shlex.quote — защита от инъекций. curl-часть
@@ -134,8 +147,10 @@ def _render_unattended_command(env: dict[str, str]) -> str:
     и секреты из env туда попадать не должны.
     """
     assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+    proxy_flag = f"--proxy {shlex.quote(download_proxy)} " if download_proxy else ""
     return (
-        f"curl -fsSL {shlex.quote(update_channel.installer_url())} -o {shlex.quote(REMOTE_SCRIPT)} && "
+        f"curl -fsSL {proxy_flag}{shlex.quote(update_channel.installer_url())} "
+        f"-o {shlex.quote(REMOTE_SCRIPT)} && "
         f"{assignments} bash {shlex.quote(REMOTE_SCRIPT)} --unattended"
     )
 
@@ -145,13 +160,21 @@ def _escape_remnawave_cert(cert: str) -> str:
     return cert.replace("\r\n", "\n").replace("\n", "\\n")
 
 
-def build_remnawave_install_command(remnawave_cert: str) -> str:
-    """Команда установки только ноды Remnawave — для запуска через агента ноды."""
+def _temporary_proxy_env(tunnel_proxy: str) -> dict[str, str]:
+    # Прокси панели живёт только в SSH-сессии — установщик снимает его по завершении
+    return {"MON_PROXY_URL": tunnel_proxy, "MON_PROXY_TEMPORARY": "1"}
+
+
+def build_remnawave_install_command(remnawave_cert: str, tunnel_proxy: str | None = None) -> str:
+    """Команда установки только ноды Remnawave — через агента ноды или, с
+    tunnel_proxy, по SSH с загрузкой всего через панель."""
     env = {"MON_INSTALL_REMNAWAVE": "1"}
     if update_channel.current_branch() != update_channel.STABLE_BRANCH:
         env["MON_BRANCH"] = update_channel.current_branch()
+    if tunnel_proxy:
+        env.update(_temporary_proxy_env(tunnel_proxy))
     env["REMNAWAVE_CERT"] = _escape_remnawave_cert(remnawave_cert)
-    return _render_unattended_command(env)
+    return _render_unattended_command(env, download_proxy=tunnel_proxy)
 
 
 def build_warp_install_command() -> str:
@@ -162,9 +185,24 @@ def build_warp_install_command() -> str:
     return _render_unattended_command(env)
 
 
-def build_install_command(params: DeployParams) -> str:
+def build_haproxy_upgrade_command(tunnel_proxy: str | None = None) -> str:
+    """Команда обновления HAProxy до новейшей официальной LTS-сборки под релиз сервера —
+    через агента ноды или, с tunnel_proxy, по SSH с загрузкой пакетов через панель."""
+    env = {"MON_INSTALL_HAPROXY": "1"}
+    if update_channel.current_branch() != update_channel.STABLE_BRANCH:
+        env["MON_BRANCH"] = update_channel.current_branch()
+    if tunnel_proxy:
+        env.update(_temporary_proxy_env(tunnel_proxy))
+    return _render_unattended_command(env, download_proxy=tunnel_proxy)
+
+
+def build_install_command(params: DeployParams, tunnel_proxy: str | None = None) -> str:
     """Команда установки ноды мониторинга (+опции). Её же панель показывает
-    оператору для полуавтоматического режима — запуск руками на сервере."""
+    оператору для полуавтоматического режима — запуск руками на сервере.
+
+    tunnel_proxy — адрес прокси панели на сервере (SSH-туннель): через него
+    качается сам install.sh и всё, что он тянет; установщик снимает прокси
+    по завершении (MON_PROXY_TEMPORARY)."""
     env: dict[str, str] = {
         "MON_INSTALL_NODE": "1",
         "NODE_SECRET": params.node_secret,
@@ -176,7 +214,9 @@ def build_install_command(params: DeployParams) -> str:
         env["PANEL_IP"] = params.panel_ip
     if params.node_api_port != 9100:
         env["NODE_API_PORT"] = str(params.node_api_port)
-    if params.proxy_url:
+    if tunnel_proxy:
+        env.update(_temporary_proxy_env(tunnel_proxy))
+    elif params.proxy_url:
         env["MON_PROXY_URL"] = params.proxy_url
     if params.install_optimizations:
         env["MON_INSTALL_OPTIMIZATIONS"] = "1"
@@ -190,12 +230,12 @@ def build_install_command(params: DeployParams) -> str:
         if params.remnawave_cert:
             env["REMNAWAVE_CERT"] = _escape_remnawave_cert(params.remnawave_cert)
 
-    return _render_unattended_command(env)
+    return _render_unattended_command(env, download_proxy=tunnel_proxy)
 
 
-def _build_command(params: DeployParams) -> str:
+def _build_command(params: DeployParams, tunnel_proxy: str | None) -> str:
     """Оборачивает команду установки в sudo, если вход не под root."""
-    inner = build_install_command(params)
+    inner = build_install_command(params, tunnel_proxy)
     if params.ssh_user.strip() == "root":
         return inner
     # с паролем — sudo -S читает его из stdin; без пароля — sudo -n (нужен NOPASSWD)
@@ -248,63 +288,138 @@ async def _ssh_connect(
     return await asyncssh.connect(**connect_kwargs, sock=sock)
 
 
-async def _run_install_once(connect_kwargs: dict, params: DeployParams) -> AsyncIterator[dict]:
-    """Один прогон установки. Стримит лог построчно, в конце отдаёт служебное
+# Адрес прокси панели на сервере (None без туннеля) → команда установки
+CommandForProxy = Callable[[str | None], str]
+
+
+def _run_install_once(connect_kwargs: dict, params: DeployParams) -> AsyncIterator[dict]:
+    needs_sudo = params.ssh_user.strip() != "root"
+    return _stream_ssh_install(
+        connect_kwargs,
+        params.socks5_proxy,
+        params.via_panel,
+        lambda tunnel_proxy: _build_command(params, tunnel_proxy),
+        sudo_password=params.ssh_password if needs_sudo else None,
+    )
+
+
+async def install_via_panel(
+    target: SSHTarget, socks5_proxy: str | None, command_for: CommandForProxy
+) -> AsyncIterator[dict]:
+    """Установка на уже добавленный сервер по SSH, всё качается через панель.
+
+    Через агента ноды так нельзя: установщик перезапускает Docker, чтобы тот
+    тянул образы через прокси, и вместе с Docker погиб бы агент, а с ним и
+    команда. Стримит события {type: log|error|done}.
+    """
+    try:
+        connect_kwargs = ssh_connect_kwargs(target)
+    except (asyncssh.KeyImportError, ValueError) as exc:
+        yield {"type": "error", "message": f"Некорректный SSH-ключ: {exc}"}
+        return
+
+    async for event in _stream_ssh_install(connect_kwargs, socks5_proxy, True, command_for):
+        if event["type"] == "_result":
+            yield {"type": "done", "exit_code": event["exit_code"]}
+        else:
+            yield event
+
+
+async def _stream_ssh_install(
+    connect_kwargs: dict,
+    socks5_proxy: str | None,
+    via_panel: bool,
+    command_for: CommandForProxy,
+    sudo_password: str | None = None,
+) -> AsyncIterator[dict]:
+    """Один прогон установки по SSH. Стримит лог построчно, в конце отдаёт служебное
     событие {"type": "_result", "exit_code", "expired"}. Фатальные сбои
     соединения отдаются как {"type": "error"} без `_result`.
+
+    `_result` отдаётся уже после закрытия SSH-сессии — вместе с ней закрывается
+    и туннель панели, он не должен жить дольше самой установки.
     """
-    command = _build_command(params)
-    needs_sudo = params.ssh_user.strip() != "root"
     expired = False
+    result: dict | None = None
 
     try:
-        async with await _ssh_connect(connect_kwargs, params.socks5_proxy) as conn:
-            via_proxy = f" через SOCKS5 {sanitize_proxy(params.socks5_proxy)}" if params.socks5_proxy else ""
+        async with await _ssh_connect(connect_kwargs, socks5_proxy) as conn:
+            via_proxy = f" через SOCKS5 {sanitize_proxy(socks5_proxy)}" if socks5_proxy else ""
             yield {
                 "type": "log",
-                "line": f"[panel] SSH-подключение к {params.host}:{params.ssh_port} установлено{via_proxy}",
+                "line": f"[panel] SSH-подключение к {connect_kwargs['host']}:{connect_kwargs['port']} "
+                        f"установлено{via_proxy}",
             }
-            process = await conn.create_process(command, stderr=asyncssh.STDOUT)
+            tunnel_scope = open_install_tunnel(conn) if via_panel else nullcontext()
+            async with tunnel_scope as tunnel:
+                tunnel_proxy = tunnel.proxy_url if tunnel else None
+                if tunnel:
+                    yield {
+                        "type": "log",
+                        "line": f"[panel] Сервер качает всё через панель: прокси {tunnel_proxy} "
+                                "внутри SSH-сессии, закроется вместе с ней",
+                    }
+                process = await conn.create_process(command_for(tunnel_proxy), stderr=asyncssh.STDOUT)
 
-            if needs_sudo and params.ssh_password:
-                process.stdin.write(params.ssh_password + "\n")
+                if sudo_password:
+                    process.stdin.write(sudo_password + "\n")
 
-            loop = asyncio.get_event_loop()
-            deadline = loop.time() + DEPLOY_TIMEOUT
+                loop = asyncio.get_event_loop()
+                deadline = loop.time() + DEPLOY_TIMEOUT
 
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    process.terminate()
-                    yield {"type": "error", "message": "Превышен таймаут установки"}
-                    return
-                try:
-                    line = await asyncio.wait_for(
-                        process.stdout.readline(), timeout=remaining
-                    )
-                except asyncio.TimeoutError:
-                    process.terminate()
-                    yield {"type": "error", "message": "Превышен таймаут установки"}
-                    return
-                if not line:
-                    break
-                stripped = line.rstrip("\n")
-                if _looks_expired(stripped):
-                    expired = True
-                yield {"type": "log", "line": stripped}
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        process.terminate()
+                        yield {"type": "error", "message": "Превышен таймаут установки"}
+                        return
+                    try:
+                        line = await asyncio.wait_for(
+                            process.stdout.readline(), timeout=remaining
+                        )
+                    except asyncio.TimeoutError:
+                        process.terminate()
+                        yield {"type": "error", "message": "Превышен таймаут установки"}
+                        return
+                    if not line:
+                        break
+                    stripped = line.rstrip("\n")
+                    if _looks_expired(stripped):
+                        expired = True
+                    yield {"type": "log", "line": stripped}
+                    for event in _tunnel_notes(tunnel):
+                        yield event
 
-            await process.wait()
-            # returncode: код выхода (0..255) или отрицательный номер сигнала
-            exit_code = process.returncode
-            yield {
-                "type": "_result",
-                "exit_code": exit_code if exit_code is not None else 1,
-                "expired": expired,
-            }
+                await process.wait()
+                for event in _tunnel_notes(tunnel):
+                    yield event
+                if tunnel:
+                    yield {"type": "log", "line": tunnel.stats.summary()}
+                # returncode: код выхода (0..255) или отрицательный номер сигнала
+                exit_code = process.returncode
+                result = {
+                    "type": "_result",
+                    "exit_code": exit_code if exit_code is not None else 1,
+                    "expired": expired,
+                }
+    except TunnelForwardingDenied:
+        yield {"type": "error", "message": TUNNEL_DENIED_MESSAGE}
+        return
     except asyncssh.PermissionDenied:
         yield {"type": "error", "message": "SSH: неверный логин, пароль или ключ"}
+        return
     except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
         yield {"type": "error", "message": f"Ошибка SSH-подключения: {exc}"}
+        return
+
+    if result is not None:
+        yield result
+
+
+def _tunnel_notes(tunnel: InstallTunnel | None) -> list[dict]:
+    if tunnel is None:
+        return []
+    return [{"type": "log", "line": note} for note in tunnel.stats.drain_notes()]
 
 
 def _wants_current_password(text: str) -> bool:

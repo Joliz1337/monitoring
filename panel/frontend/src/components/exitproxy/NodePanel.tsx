@@ -89,7 +89,7 @@ export default function NodePanel({ node }: { node: ExitProxyNode }) {
           ) : (
             <p className="text-sm text-dark-400">{t('exit_proxy.no_current_exit')}</p>
           )}
-          <p className="text-[11px] text-dark-500">
+          <p className="text-2xs text-dark-500">
             {t('exit_proxy.connections', { count: node.stats.active_connections })} · {t('exit_proxy.connections_total', { count: node.stats.total_connections })}
           </p>
         </div>
@@ -100,14 +100,14 @@ export default function NodePanel({ node }: { node: ExitProxyNode }) {
             <SelfTestBadge ok={selfTest ? selfTest.ok : null} />
           </div>
           {selfTest ? (
-            <div className="text-[11px] text-dark-400 space-y-0.5">
+            <div className="text-2xs text-dark-400 space-y-0.5">
               <p>{t('exit_proxy.self_test_ip')}: <span className="font-mono text-dark-200">{selfTest.ip ?? '—'}</span></p>
               <p>{t('exit_proxy.self_test_expected')}: <span className="font-mono text-dark-200">{selfTest.expected ?? '—'}</span></p>
               <p>{t('exit_proxy.checked_at')} {selfTest.at ? formatTimeAgo(selfTest.at) : '—'}</p>
               {!selfTest.ok && <p className="text-red-400">{selfTest.error || t('exit_proxy.self_test_mismatch')}</p>}
             </div>
           ) : (
-            <p className="text-[11px] text-dark-500">{t('exit_proxy.self_test_unknown')}</p>
+            <p className="text-2xs text-dark-500">{t('exit_proxy.self_test_unknown')}</p>
           )}
         </div>
       </div>
@@ -115,7 +115,7 @@ export default function NodePanel({ node }: { node: ExitProxyNode }) {
       <div className="space-y-2">
         <div className="flex items-center justify-between">
           <p className="text-xs text-dark-500">{t('exit_proxy.candidates')}</p>
-          <p className="text-[11px] text-dark-500">{t('exit_proxy.candidates_hint')}</p>
+          <p className="text-2xs text-dark-500">{t('exit_proxy.candidates_hint')}</p>
         </div>
         <CandidateList node={node} />
       </div>

@@ -298,14 +298,14 @@ export default function TorrentBlocker() {
                     key={s.id}
                     className="inline-flex items-center gap-1 px-2 py-0.5 bg-dark-800 border border-dark-700 rounded-md text-xs text-dark-300"
                   >
-                    <ServerIcon className="w-3 h-3 text-dark-500" />
+                    <ServerIcon className="w-3.5 h-3.5 text-dark-500" />
                     {s.name}
                     <Tooltip label={t('common.remove_from_list')}>
                       <button
                         onClick={() => removeExclusion(s.id)}
                         className="text-dark-500 hover:text-dark-300 ml-0.5"
                       >
-                        <X className="w-3 h-3" />
+                        <X className="w-4 h-4" />
                       </button>
                     </Tooltip>
                   </span>

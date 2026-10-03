@@ -4,6 +4,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.models.loss_probe import LossProbeEntry
+
 
 class CPUFrequency(BaseModel):
     current: float
@@ -323,4 +325,6 @@ class AllMetrics(BaseModel):
     # Карта прав панели на этой ноде; null — ограничений нет. Поле обязано быть
     # объявлено здесь: то, чего нет в response_model, FastAPI из ответа вырежет.
     capabilities: Optional[dict[str, str]] = None
+    # Потери до адресов назначения релея — по ним панель шлёт алерт
+    loss_probe: list[LossProbeEntry] = []
 
