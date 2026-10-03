@@ -1161,7 +1161,7 @@ interface NicInfo {
 - `panel/frontend/src/components/Infra/AccountNode.tsx` — строка аккаунта: создание/переименование/удаление проектов, привязка/отвязка серверов прямо к аккаунту; счётчики онлайн/офлайн (`FolderStatusCounts`, как у папок) по всем серверам аккаунта — из его проектов и привязанных напрямую, без повторов; считаются те же статусы, что рисуют точки в строках серверов, включая серверы с выключенным мониторингом
 - `panel/frontend/src/components/Infra/ProjectNode.tsx` — строка проекта: привязка/отвязка серверов
 - `panel/frontend/src/components/Infra/InfraServerRow.tsx` — компактная строка сервера: статус-точка, имя, IP, CPU/RAM/сеть, клик → детали сервера
-- `panel/frontend/src/components/Infra/ServerSearchDropdown.tsx` — поиск по имени/IP при привязке сервера
+- `panel/frontend/src/components/Infra/ServerSearchDropdown.tsx` — поиск по имени/IP при привязке сервера; после привязки не закрывается — можно поправить запрос и привязать следующий. Закрывается кликом вне окна (mousedown на `document`), Esc или повторным нажатием «+»: кнопку передают через `toggleRef`, иначе её mousedown закрыл бы поиск, а click тут же открыл бы снова. Пока ждём API, строка остаётся на месте со спиннером (`addingIds`), повторный клик игнорируется; сама строка не `disabled`, а `aria-disabled` + `preventDefault` на mousedown — так фокус не уходит из поля поиска
 - `panel/frontend/src/pages/Servers.tsx` — InfraTree вставлен выше списка серверов, переключён на `fetchServersWithMetrics`; URL ноды обёрнут в `<CopyableIp>` (показывает полный URL, копирует только хост)
 
 **i18n:** ключи пространства имён `infra` — в `en.json` и `ru.json`.

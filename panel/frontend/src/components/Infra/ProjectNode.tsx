@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronRight, ChevronDown, FolderOpen, Plus, Edit2, Trash2, Check, X, Activity } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -38,6 +38,7 @@ export default function ProjectNode({
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState(project.name)
   const [showSearch, setShowSearch] = useState(false)
+  const searchToggleRef = useRef<HTMLButtonElement>(null)
   const [deleteConfirm, setDeleteConfirm] = useState(false)
 
   const totalSpeed = useMemo(() => {
@@ -108,7 +109,7 @@ export default function ProjectNode({
         {!editing && (
           <div onClick={e => e.stopPropagation()} className="flex items-center gap-1 ml-auto opacity-60 group-hover:opacity-100 transition-opacity">
             <Tooltip label={t('infra.add_server')}>
-              <button onClick={() => setShowSearch(!showSearch)} className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-primary">
+              <button ref={searchToggleRef} onClick={() => setShowSearch(!showSearch)} className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-primary">
                 <Plus className="w-4 h-4" />
               </button>
             </Tooltip>
@@ -142,6 +143,7 @@ export default function ProjectNode({
               excludeIds={allAssignedIds}
               onSelect={async (id) => { try { await onAddServer(id); toast.success(t('infra.server_added')) } catch { toast.error(t('common.error')) } }}
               onClose={() => setShowSearch(false)}
+              toggleRef={searchToggleRef}
             />
           </motion.div>
         )}
