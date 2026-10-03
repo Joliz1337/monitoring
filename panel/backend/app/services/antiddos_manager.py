@@ -1,7 +1,7 @@
 """Anti-DDoS manager (panel side).
 
 Two background loops:
-  - whitelist push: hourly, sends {all node IPs + panel IP + user CIDRs} to every
+  - whitelist push: hourly, sends {all node addresses + panel IP + user CIDRs} to every
     node's antiddos_allow set so the node has a fresh list on disk before an attack.
   - status poll: reads each node's emergency state into Server.antiddos_*, and
     fires a Telegram alert when a node auto-enters emergency mode.
@@ -17,7 +17,6 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import select
@@ -27,7 +26,8 @@ from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory, An
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_node_apply_client, get_external_client, node_auth_headers
 from app.services.node_capabilities import Capability, denied_message, server_allows
-from app.services.net_utils import resolve_panel_ip, host_to_ip
+from app.services.net_utils import resolve_panel_ip
+from app.services.node_ips import collect_node_ips
 from app.services.node_sync_queue import KIND_ANTIDDOS_WHITELIST, enqueue
 from app.services import update_channel
 
@@ -91,14 +91,11 @@ class AntiDdosManager:
     # ── whitelist assembly ─────────────────────────────────────────────────
 
     async def build_whitelist(self, db) -> list[str]:
-        """Auto (node IPs + panel IP) + manual (user CIDRs) + auto-source lists."""
-        ips: set[str] = set()
-
-        servers = (await db.execute(select(Server).where(Server.is_active == True))).scalars().all()  # noqa: E712
-        for srv in servers:
-            ip = await host_to_ip(urlparse(srv.url).hostname or "")
-            if ip:
-                ips.add(ip)
+        """Auto (all node addresses + panel IP) + manual (user CIDRs) + auto-source lists."""
+        servers = (await db.execute(
+            select(Server.url, Server.last_metrics).where(Server.is_active == True)  # noqa: E712
+        )).all()
+        ips = await collect_node_ips(servers)
 
         panel_ip = await resolve_panel_ip()
         if panel_ip:

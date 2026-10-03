@@ -1502,7 +1502,7 @@
     "watchdog": "Auto-detect",
     "emergency": "Emergency mode",
     "wl_auto_title": "Automatic part",
-    "wl_auto_desc": "All your server IPs and the panel IP are whitelisted automatically and pushed to nodes every hour. They always bypass the limits in emergency mode.",
+    "wl_auto_desc": "All public IPs of your servers (including additional addresses and second network cards) and the panel IP are whitelisted automatically and pushed to nodes every hour. They always bypass the limits in emergency mode.",
     "wl_last_push": "Pushed {{count}} addresses",
     "wl_manual_title": "Manual list (CDN and trusted subnets)",
     "wl_manual_desc": "Add CDN subnets (e.g. Cloudflare) and other trusted IP/CIDR here, one per line. They are merged with the automatic part and pushed to nodes.",
