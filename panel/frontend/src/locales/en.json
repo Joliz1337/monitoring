@@ -1077,6 +1077,7 @@
     "update_everything": "Update Everything",
     "updating_everything": "Updating everything...",
     "update_everything_hint": "Start updating all nodes, then the panel itself",
+    "nodes_loading": "Loading nodes {{loaded}}/{{total}}",
     "everything_nodes_started": "Update started for {{count}} nodes, the panel will update next",
     "everything_panel_skipped": "Node updates started, the panel is already up to date",
     "dev_channel_badge": "Dev channel: updates always available",

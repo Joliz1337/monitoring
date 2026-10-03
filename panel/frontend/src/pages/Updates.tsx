@@ -448,7 +448,7 @@ export default function Updates() {
   const collectNodeUpdateTargets = () => Array.from(nodes.values()).filter(canAgentUpdate)
 
   const handleUpdateAllNodes = async () => {
-    if (updatingAll || !baseInfo) return
+    if (updatingAll || !allNodesLoaded || !baseInfo) return
 
     setUpdatingAll(true)
     await Promise.all(collectNodeUpdateTargets().map(n => handleUpdateNode(n.id, n.name)))
@@ -459,7 +459,7 @@ export default function Updates() {
   // (каждая обновляет себя сама, результат отдельной ноды не блокирует процесс),
   // и как только все запросы отправлены — панель запускает обновление самой себя.
   const handleUpdateEverything = async () => {
-    if (updatingEverything || updatingAll || updatingPanel || !baseInfo) return
+    if (updatingEverything || updatingAll || updatingPanel || !allNodesLoaded || !baseInfo) return
 
     setUpdatingEverything(true)
     try {
@@ -515,7 +515,11 @@ export default function Updates() {
   const panelCanUpdate = isDevChannel || !!baseInfo?.panel.update_available
   const canUpdateEverything = updateAllCount > 0 || panelCanUpdate
 
-  const allNodesLoaded = loadedNodes.every(n => n.loadState === 'loaded' || n.loadState === 'error')
+  // Массовые кнопки ждут ответа от каждой ноды: ещё не загруженную canAgentUpdate пропускает,
+  // и нажатие посреди загрузки молча обновило бы только часть парка
+  const finishedNodesCount = loadedNodes.filter(n => n.loadState === 'loaded' || n.loadState === 'error').length
+  const allNodesLoaded = finishedNodesCount === loadedNodes.length
+  const nodesLoadingLabel = t('updates.nodes_loading', { loaded: finishedNodesCount, total: loadedNodes.length })
 
   const selectedNodes = loadedNodes.filter(n => selected.has(n.id))
   const selectedAgentTargets = selectedNodes.filter(canAgentUpdate)
@@ -721,17 +725,19 @@ export default function Updates() {
             <Tooltip label={t('updates.update_everything_hint')} maxWidth={320}>
             <motion.button
               onClick={handleUpdateEverything}
-              disabled={updatingEverything || updatingAll || updatingPanel || updatingNodes.size > 0}
+              disabled={!allNodesLoaded || updatingEverything || updatingAll || updatingPanel || updatingNodes.size > 0}
               className="btn btn-primary"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
             >
-              {updatingEverything ? (
+              {updatingEverything || !allNodesLoaded ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
               ) : (
                 <Rocket className="w-4 h-4" />
               )}
-              {updatingEverything ? t('updates.updating_everything') : t('updates.update_everything')}
+              {updatingEverything
+                ? t('updates.updating_everything')
+                : allNodesLoaded ? t('updates.update_everything') : nodesLoadingLabel}
             </motion.button>
             </Tooltip>
           )}
@@ -886,17 +892,19 @@ export default function Updates() {
             {updateAllCount > 0 && (
               <motion.button
                 onClick={handleUpdateAllNodes}
-                disabled={updatingAll}
+                disabled={updatingAll || !allNodesLoaded}
                 className="btn btn-secondary"
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
               >
-                {updatingAll ? (
+                {updatingAll || !allNodesLoaded ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <ArrowUpCircle className="w-4 h-4" />
                 )}
-                {t('updates.update_all_nodes')} ({updateAllCount})
+                {updatingAll || allNodesLoaded
+                  ? `${t('updates.update_all_nodes')} (${updateAllCount})`
+                  : nodesLoadingLabel}
               </motion.button>
             )}
           </div>

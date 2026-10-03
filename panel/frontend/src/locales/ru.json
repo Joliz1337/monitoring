@@ -1082,6 +1082,7 @@
     "update_everything": "Обновить всё",
     "updating_everything": "Обновляем всё...",
     "update_everything_hint": "Запустить обновление всех нод, а затем самой панели",
+    "nodes_loading": "Загружаем ноды {{loaded}}/{{total}}",
     "everything_nodes_started": "Запущено обновление {{count}} нод, после этого обновится панель",
     "everything_panel_skipped": "Обновление нод запущено, панель уже актуальна",
     "dev_channel_badge": "Dev-канал: обновление доступно всегда",
