@@ -102,8 +102,11 @@ export default function AccountNode({
   return (
     <div className="mb-2">
       {/* Account header */}
-      <div className="flex items-center gap-2 py-2 px-2 rounded-lg hover:bg-dark-800/50 group transition-colors">
-        <button onClick={onToggle} className="p-0.5 rounded hover:bg-dark-700 text-dark-400 transition-colors">
+      <div
+        onClick={editing ? undefined : onToggle}
+        className={`flex items-center gap-2 py-2 px-2 rounded-lg hover:bg-dark-800/50 group transition-colors ${editing ? '' : 'cursor-pointer'}`}
+      >
+        <button className="p-0.5 rounded hover:bg-dark-700 text-dark-400 transition-colors">
           {collapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
         </button>
         <Mail className="w-4 h-4 text-primary/70 shrink-0" />
@@ -135,7 +138,7 @@ export default function AccountNode({
         )}
 
         {!editing && (
-          <div className="flex items-center gap-0.5 ml-auto opacity-0 group-hover:opacity-100 transition-opacity">
+          <div onClick={e => e.stopPropagation()} className="flex items-center gap-0.5 ml-auto opacity-0 group-hover:opacity-100 transition-opacity">
             <Tooltip label={t('infra.add_server')}>
               <button onClick={() => setShowSearch(!showSearch)} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-primary">
                 <Plus className="w-4 h-4" />

@@ -92,7 +92,7 @@ export default function InfraTree() {
       <div className="flex items-center gap-3 mb-3">
         <button
           onClick={() => setTreeVisible(!treeVisible)}
-          className="flex items-center gap-2 text-dark-300 hover:text-dark-100 transition-colors"
+          className="flex flex-1 items-center gap-2 self-stretch text-dark-300 hover:text-dark-100 transition-colors"
         >
           {treeVisible ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
           <Network className="w-4 h-4" />
@@ -102,7 +102,7 @@ export default function InfraTree() {
         {treeVisible && (
           <button
             onClick={() => { setNewAccountName(''); setShowAddAccount(true) }}
-            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-dark-800 border border-dark-600 hover:border-primary/40 text-dark-300 hover:text-primary transition-all"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-dark-800 border border-dark-600 hover:border-primary/40 text-dark-300 hover:text-primary transition-all"
           >
             <Plus className="w-3.5 h-3.5" />
             {t('infra.add_account')}
