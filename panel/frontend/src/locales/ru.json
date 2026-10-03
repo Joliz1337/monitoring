@@ -19,6 +19,7 @@
     "network": "Сеть",
     "online": "Онлайн",
     "offline": "Оффлайн",
+    "disabled": "Отключено",
     "logout": "Выйти",
     "dashboard": "Дашборд",
     "servers": "Серверы",

@@ -293,10 +293,10 @@ export default function Servers() {
   const unfolderedServers = groupedServers.get(null) ?? NO_SERVERS
 
   // Счётчики в заголовке описывают папку целиком: поиск меняет только показанные карточки
-  const activeByFolder = useMemo(
-    () => groupByFolder(displayedServers.filter(s => s.is_active)),
-    [displayedServers],
-  )
+  const { activeByFolder, disabledByFolder } = useMemo(() => ({
+    activeByFolder: groupByFolder(displayedServers.filter(s => s.is_active)),
+    disabledByFolder: groupByFolder(displayedServers.filter(s => !s.is_active)),
+  }), [displayedServers])
 
   const activeServer = board.activeServerId === null
     ? undefined
@@ -1748,7 +1748,12 @@ export default function Servers() {
                     onToggle={() => toggleFolderCollapsed(name)}
                     onRename={() => board.openRenameFolder(name)}
                     onDelete={() => board.deleteFolder(name)}
-                    badges={<FolderStatusCounts servers={activeByFolder.get(name) ?? NO_SERVERS} />}
+                    badges={
+                      <FolderStatusCounts
+                        servers={activeByFolder.get(name) ?? NO_SERVERS}
+                        disabled={disabledByFolder.get(name)?.length ?? 0}
+                      />
+                    }
                   >
                     {members.length > 0 ? (
                       renderServerGrid(members)

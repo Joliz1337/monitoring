@@ -1,5 +1,5 @@
 import { memo, useMemo, type ReactNode } from 'react'
-import { Cpu, MemoryStick, Network, Wifi, WifiOff } from 'lucide-react'
+import { Cpu, MemoryStick, Network, PowerOff, Wifi, WifiOff } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { ServerWithMetrics } from '../../stores/serversStore'
 import { summarizeLoad } from '../../utils/fleetLoad'
@@ -25,7 +25,7 @@ function Badge({ tooltip, children }: { tooltip: ReactNode; children: ReactNode 
   )
 }
 
-function FolderStatusCountsInner({ servers }: { servers: ServerWithMetrics[] }) {
+function FolderStatusCountsInner({ servers, disabled = 0 }: { servers: ServerWithMetrics[]; disabled?: number }) {
   const { t } = useTranslation()
   const { online, offline } = useMemo(() => {
     let onlineCount = 0
@@ -49,6 +49,12 @@ function FolderStatusCountsInner({ servers }: { servers: ServerWithMetrics[] }) 
         <Badge tooltip={t('common.offline')}>
           <WifiOff className="w-3 h-3 text-danger" />
           <span className="text-danger">{offline}</span>
+        </Badge>
+      )}
+      {disabled > 0 && (
+        <Badge tooltip={t('common.disabled')}>
+          <PowerOff className="w-3 h-3 text-dark-400" />
+          <span className="text-dark-400">{disabled}</span>
         </Badge>
       )}
     </span>
