@@ -54,8 +54,6 @@ export default function AccountNode({
     return [...ids].flatMap(id => servers.get(id) ?? [])
   }, [account.server_ids, account.projects, servers])
 
-  const activeServers = useMemo(() => accountServers.filter(s => s.is_active), [accountServers])
-
   const totalSpeed = useMemo(() => {
     let rx = 0, tx = 0
     for (const srv of accountServers) {
@@ -126,7 +124,7 @@ export default function AccountNode({
           <>
             <span className="text-sm font-semibold text-dark-100">{account.name}</span>
             <span className="text-xs text-dark-500">{account.projects.length} {t('infra.projects_short')} / {accountServers.length} {t('infra.servers_short')}</span>
-            {activeServers.length > 0 && <FolderStatusCounts servers={activeServers} />}
+            {accountServers.length > 0 && <FolderStatusCounts servers={accountServers} />}
             {totalSpeed.hasTraffic && (
               <div className="flex items-center gap-1 text-xs font-mono font-medium text-dark-200 ml-1">
                 <Activity className="w-3.5 h-3.5 text-accent-400" />

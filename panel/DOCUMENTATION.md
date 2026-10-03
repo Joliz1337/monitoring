@@ -1146,7 +1146,7 @@ interface NicInfo {
 - `panel/frontend/src/api/client.ts` — `infraApi`, интерфейсы `InfraAccount`, `InfraProject`, `InfraTree`
 - `panel/frontend/src/stores/infraStore.ts` — Zustand-стор: загрузка дерева, оптимистичные обновления
 - `panel/frontend/src/components/Infra/InfraTree.tsx` — контейнер: сворачиваемое дерево, состояние открытых узлов хранится в localStorage; блок «Без привязки» сворачивается и по умолчанию свёрнут (`infra_unassigned_open`)
-- `panel/frontend/src/components/Infra/AccountNode.tsx` — строка аккаунта: создание/переименование/удаление проектов, привязка/отвязка серверов прямо к аккаунту; счётчики онлайн/офлайн (`FolderStatusCounts`, как у папок) по включённым серверам аккаунта — из его проектов и привязанных напрямую, без повторов
+- `panel/frontend/src/components/Infra/AccountNode.tsx` — строка аккаунта: создание/переименование/удаление проектов, привязка/отвязка серверов прямо к аккаунту; счётчики онлайн/офлайн (`FolderStatusCounts`, как у папок) по всем серверам аккаунта — из его проектов и привязанных напрямую, без повторов; считаются те же статусы, что рисуют точки в строках серверов, включая серверы с выключенным мониторингом
 - `panel/frontend/src/components/Infra/ProjectNode.tsx` — строка проекта: привязка/отвязка серверов
 - `panel/frontend/src/components/Infra/InfraServerRow.tsx` — компактная строка сервера: статус-точка, имя, IP, CPU/RAM/сеть, клик → детали сервера
 - `panel/frontend/src/components/Infra/ServerSearchDropdown.tsx` — поиск по имени/IP при привязке сервера
