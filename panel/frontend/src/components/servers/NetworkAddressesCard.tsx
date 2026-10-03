@@ -590,7 +590,7 @@ function TransactionProgress({ job, transaction, now, busy, canCancel, onCancel,
         </div>
       </div>
 
-      {phase === 'confirming' && job && job.attempts > 0 && (
+      {!done && job && job.attempts > 0 && (
         <p className="mt-2 text-xs text-warning">{t('server_details.network_attempt', { n: job.attempts, error: job.last_error || '' })}</p>
       )}
       {done && message && <p className="mt-2 text-xs text-dark-400">{message}</p>}
