@@ -111,7 +111,7 @@ export default function LossSettings({ servers, exclusions, loadFailed, onSave }
                         <button
                           onClick={() => removeTarget(item.target)}
                           title={t('loss.excluded_target_remove')}
-                          className="p-1 rounded-md text-dark-500 hover:text-danger hover:bg-danger/10 transition-colors"
+                          className="p-1.5 rounded-md text-dark-500 hover:text-danger hover:bg-danger/10 transition-colors"
                         >
                           <X className="w-4 h-4" />
                         </button>

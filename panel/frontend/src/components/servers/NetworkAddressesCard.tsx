@@ -257,7 +257,7 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
             disabled={!canAct || !state}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
           >
-            <Plus className="w-3 h-3" />
+            <Plus className="w-3.5 h-3.5" />
             {t('server_details.network_add')}
           </button>
         </div>
@@ -478,9 +478,9 @@ function AddressRow({ addr, lock, minHosterVersion, withCheckbox, checked, canRe
         <button
           onClick={onRemove}
           disabled={!canRemove}
-          className="ml-auto text-xs text-dark-400 hover:text-danger disabled:opacity-40 flex items-center gap-1"
+          className="ml-auto btn-tool btn-tool-danger"
         >
-          <Trash2 className="w-3.5 h-3.5" />
+          <Trash2 className="w-4 h-4" />
           {t('server_details.network_remove')}
         </button>
       )}
@@ -507,9 +507,9 @@ function SuppressedRow({ entry, withCheckbox, showRestore, canRestore, onRestore
         <button
           onClick={onRestore}
           disabled={!canRestore}
-          className="ml-auto text-xs text-dark-400 hover:text-accent-400 disabled:opacity-40 flex items-center gap-1"
+          className="ml-auto btn-tool"
         >
-          <RotateCcw className="w-3.5 h-3.5" />
+          <RotateCcw className="w-4 h-4" />
           {t('server_details.network_restore')}
         </button>
       )}
@@ -524,7 +524,7 @@ function Badge({ tone, children }: { tone: 'accent' | 'warning' | 'success' | 'm
     success: 'bg-success/15 text-success',
     muted: 'bg-dark-700 text-dark-400',
   }
-  return <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${tones[tone]}`}>{children}</span>
+  return <span className={`text-2xs uppercase tracking-wide px-1.5 py-0.5 rounded ${tones[tone]}`}>{children}</span>
 }
 
 function TransactionProgress({ job, transaction, now, busy, canCancel, onCancel, onHide }: {
@@ -608,11 +608,11 @@ function TransactionProgress({ job, transaction, now, busy, canCancel, onCancel,
 
       {job?.error_log && (
         <div className="mt-2">
-          <button onClick={() => setLogOpen(v => !v)} className="text-xs text-dark-400 hover:text-dark-200 flex items-center gap-1">
-            {logOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          <button onClick={() => setLogOpen(v => !v)} className="btn-disclosure">
+            {logOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
             {t('server_details.network_error_log')}
           </button>
-          {logOpen && <pre className="mt-1 p-2 rounded-lg bg-dark-900 text-[11px] text-dark-300 overflow-x-auto whitespace-pre-wrap">{job.error_log}</pre>}
+          {logOpen && <pre className="mt-1 p-2 rounded-lg bg-dark-900 text-2xs text-dark-300 overflow-x-auto whitespace-pre-wrap">{job.error_log}</pre>}
         </div>
       )}
 
@@ -623,7 +623,7 @@ function TransactionProgress({ job, transaction, now, busy, canCancel, onCancel,
           </button>
         )}
         {done && (
-          <button onClick={onHide} className="text-xs text-dark-400 hover:text-dark-200">{t('server_details.network_hide')}</button>
+          <button onClick={onHide} className="btn-tool">{t('server_details.network_hide')}</button>
         )}
       </div>
     </div>
@@ -782,7 +782,7 @@ function AddAddressesModal({
       </p>
 
       <div className="min-h-[1.5rem] text-xs mb-3">
-        {previewing && <span className="text-dark-500 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />{t('server_details.network_preview_wait')}</span>}
+        {previewing && <span className="text-dark-500 flex items-center gap-1"><Loader2 className="w-3.5 h-3.5 animate-spin" />{t('server_details.network_preview_wait')}</span>}
         {!previewing && previewError && <span className="text-danger">{previewError}</span>}
         {!previewing && preview && (
           <span className="text-dark-300">

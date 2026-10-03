@@ -65,7 +65,7 @@ export function SortableFolder({
             ref={setActivatorNodeRef}
             {...listeners}
             {...attributes}
-            className="p-1 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing transition rounded flex-shrink-0"
+            className="p-1 text-dark-500 hover:text-dark-400 cursor-grab active:cursor-grabbing transition rounded flex-shrink-0"
           >
             <GripVertical className="w-4 h-4" />
           </div>
@@ -75,18 +75,18 @@ export function SortableFolder({
             </div>
             <span className="text-sm font-semibold text-white truncate group-hover:text-blue-300 transition">{name}</span>
             {badges}
-            {collapsed ? <ChevronRight className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />}
+            {collapsed ? <ChevronRight className="w-3.5 h-3.5 text-dark-500 flex-shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-dark-500 flex-shrink-0" />}
           </button>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0 ml-2">
           <Tooltip label={t('common.edit')}>
             <button onClick={onRename} className="p-1.5 text-dark-500 hover:text-dark-300 transition rounded-lg hover:bg-dark-800/50">
-              <Pencil className="w-3.5 h-3.5" />
+              <Pencil className="w-4 h-4" />
             </button>
           </Tooltip>
           <Tooltip label={t('common.delete')}>
             <button onClick={onDelete} className="p-1.5 text-dark-500 hover:text-red-400 transition rounded-lg hover:bg-dark-800/50">
-              <Trash2 className="w-3.5 h-3.5" />
+              <Trash2 className="w-4 h-4" />
             </button>
           </Tooltip>
         </div>

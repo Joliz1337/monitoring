@@ -237,9 +237,9 @@ export default function BatchEditModal({ mode, targets, onClose, onJobStarted }:
           {mode === 'replace' && (
             <button
               onClick={() => setRows(prev => [...prev, { old: '', next: '' }])}
-              className="flex items-center gap-1.5 text-xs text-accent-400 hover:text-accent-300"
+              className="btn-tool btn-tool-accent"
             >
-              <Plus className="w-3.5 h-3.5" /> {t('loss.batch_add_row')}
+              <Plus className="w-4 h-4" /> {t('loss.batch_add_row')}
             </button>
           )}
 

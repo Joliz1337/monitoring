@@ -142,7 +142,7 @@ export default function ServerAddressesEditor({ profileId, server, onSaved }: {
       {rows.length > 0 && (
         <>
           <div className="rounded-lg border border-dark-800/60 divide-y divide-dark-800/60">
-            <div className="grid grid-cols-[1fr_4.5rem_4.5rem] gap-x-2 px-3 py-1.5 text-[11px] text-dark-500">
+            <div className="grid grid-cols-[1fr_4.5rem_4.5rem] gap-x-2 px-3 py-1.5 text-2xs text-dark-500">
               <span>{t('haproxy_configs.addresses_col_ip')}</span>
               <span className="text-center">{t('haproxy_configs.addresses_col_listen')}</span>
               <span className="text-center">{t('haproxy_configs.addresses_col_source')}</span>
@@ -153,10 +153,10 @@ export default function ServerAddressesEditor({ profileId, server, onSaved }: {
                   <span className={`font-mono text-sm ${row.missing ? 'text-dark-500 line-through' : 'text-dark-100'}`}>{row.address}</span>
                   {row.iface && <span className="text-xs text-dark-500">{row.iface}</span>}
                   {row.primary && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-dark-700/60 text-dark-300">{t('haproxy_configs.addresses_primary')}</span>
+                    <span className="text-2xs px-1.5 py-0.5 rounded bg-dark-700/60 text-dark-300">{t('haproxy_configs.addresses_primary')}</span>
                   )}
                   {row.missing && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/10 text-red-400">{t('haproxy_configs.addresses_missing')}</span>
+                    <span className="text-2xs px-1.5 py-0.5 rounded bg-red-500/10 text-red-400">{t('haproxy_configs.addresses_missing')}</span>
                   )}
                 </span>
                 <span className="flex justify-center">

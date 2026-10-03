@@ -583,7 +583,7 @@ export default function Updates() {
     return FOLDER_CHIPS.filter(chip => counts[chip.state] > 0).map(({ state, icon: Icon, spin, className }) => (
       <Tooltip key={state} label={t(`updates.folder_${state}`, { count: counts[state], total: members.length })}>
         <span className={`flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded-md flex-shrink-0 ${className}`}>
-          <Icon className={`w-3 h-3 ${spin ? 'animate-spin' : ''}`} />
+          <Icon className={`w-3.5 h-3.5 ${spin ? 'animate-spin' : ''}`} />
           {counts[state]}
         </span>
       </Tooltip>
@@ -631,7 +631,7 @@ export default function Updates() {
             <span className="text-sm font-semibold text-white truncate group-hover:text-blue-300 transition">{name}</span>
             <span className="text-xs text-dark-500 flex-shrink-0">{members.length}</span>
             {renderFolderChips(members)}
-            <Chevron className="w-3.5 h-3.5 text-dark-600 flex-shrink-0" />
+            <Chevron className="w-3.5 h-3.5 text-dark-500 flex-shrink-0" />
           </button>
         </div>
         <AnimatePresence initial={false}>
@@ -975,7 +975,7 @@ export default function Updates() {
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
           >
-            <ServerIcon className="w-12 h-12 text-dark-600 mx-auto mb-3" />
+            <ServerIcon className="w-12 h-12 text-dark-500 mx-auto mb-3" />
             <p className="text-dark-400">{t('updates.no_nodes')}</p>
           </motion.div>
         ) : (

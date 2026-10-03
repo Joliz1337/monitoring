@@ -106,7 +106,7 @@ export default function AccountNode({
         onClick={editing ? undefined : onToggle}
         className={`flex items-center gap-2 py-2 px-2 rounded-lg hover:bg-dark-800/50 group transition-colors ${editing ? '' : 'cursor-pointer'}`}
       >
-        <button className="p-0.5 rounded hover:bg-dark-700 text-dark-400 transition-colors">
+        <button className="p-1 rounded-lg hover:bg-dark-700 text-dark-400 transition-colors">
           {collapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
         </button>
         <Mail className="w-4 h-4 text-primary/70 shrink-0" />
@@ -120,8 +120,8 @@ export default function AccountNode({
               onKeyDown={e => { if (e.key === 'Enter') handleRename(); if (e.key === 'Escape') setEditing(false) }}
               className="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-sm text-dark-100 outline-none focus:border-primary/50 w-56"
             />
-            <button onClick={handleRename} className="p-1 rounded hover:bg-dark-700 text-success"><Check className="w-4 h-4" /></button>
-            <button onClick={() => setEditing(false)} className="p-1 rounded hover:bg-dark-700 text-dark-400"><X className="w-4 h-4" /></button>
+            <button onClick={handleRename} className="p-1.5 rounded-lg hover:bg-dark-700 text-success"><Check className="w-4 h-4" /></button>
+            <button onClick={() => setEditing(false)} className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-400"><X className="w-4 h-4" /></button>
           </div>
         ) : (
           <>
@@ -138,30 +138,30 @@ export default function AccountNode({
         )}
 
         {!editing && (
-          <div onClick={e => e.stopPropagation()} className="flex items-center gap-0.5 ml-auto opacity-0 group-hover:opacity-100 transition-opacity">
+          <div onClick={e => e.stopPropagation()} className="flex items-center gap-1 ml-auto opacity-60 group-hover:opacity-100 transition-opacity">
             <Tooltip label={t('infra.add_server')}>
-              <button onClick={() => setShowSearch(!showSearch)} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-primary">
+              <button onClick={() => setShowSearch(!showSearch)} className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-primary">
                 <Plus className="w-4 h-4" />
               </button>
             </Tooltip>
             <Tooltip label={t('infra.add_project')}>
-              <button onClick={() => { setNewProjectName(''); setAddingProject(true) }} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-primary">
+              <button onClick={() => { setNewProjectName(''); setAddingProject(true) }} className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-primary">
                 <FolderPlus className="w-4 h-4" />
               </button>
             </Tooltip>
             <Tooltip label={t('common.edit')}>
-              <button onClick={() => { setEditName(account.name); setEditing(true) }} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-dark-200">
+              <button onClick={() => { setEditName(account.name); setEditing(true) }} className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-dark-200">
                 <Edit2 className="w-4 h-4" />
               </button>
             </Tooltip>
             {deleteConfirm ? (
               <div className="flex items-center gap-0.5">
-                <button onClick={handleDelete} className="p-1 rounded hover:bg-dark-700 text-danger"><Check className="w-4 h-4" /></button>
-                <button onClick={() => setDeleteConfirm(false)} className="p-1 rounded hover:bg-dark-700 text-dark-400"><X className="w-4 h-4" /></button>
+                <button onClick={handleDelete} className="p-1.5 rounded-lg hover:bg-dark-700 text-danger"><Check className="w-4 h-4" /></button>
+                <button onClick={() => setDeleteConfirm(false)} className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-400"><X className="w-4 h-4" /></button>
               </div>
             ) : (
               <Tooltip label={t('common.delete')}>
-                <button onClick={() => setDeleteConfirm(true)} className="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-danger">
+                <button onClick={() => setDeleteConfirm(true)} className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-danger">
                   <Trash2 className="w-4 h-4" />
                 </button>
               </Tooltip>
@@ -197,8 +197,8 @@ export default function AccountNode({
                 placeholder={t('infra.project_name')}
                 className="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-sm text-dark-100 placeholder:text-dark-500 outline-none focus:border-primary/50 w-44"
               />
-              <button onClick={handleCreateProject} className="p-1 rounded hover:bg-dark-700 text-success"><Check className="w-4 h-4" /></button>
-              <button onClick={() => setAddingProject(false)} className="p-1 rounded hover:bg-dark-700 text-dark-400"><X className="w-4 h-4" /></button>
+              <button onClick={handleCreateProject} className="p-1.5 rounded-lg hover:bg-dark-700 text-success"><Check className="w-4 h-4" /></button>
+              <button onClick={() => setAddingProject(false)} className="p-1.5 rounded-lg hover:bg-dark-700 text-dark-400"><X className="w-4 h-4" /></button>
             </div>
           </motion.div>
         )}

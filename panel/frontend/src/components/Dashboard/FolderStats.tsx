@@ -42,18 +42,18 @@ function FolderStatusCountsInner({ servers, disabled = 0 }: { servers: ServerWit
   return (
     <span className="flex items-center gap-1 flex-shrink-0">
       <Badge tooltip={t('common.online')}>
-        <Wifi className={`w-3 h-3 ${onlineTone}`} />
+        <Wifi className={`w-3.5 h-3.5 ${onlineTone}`} />
         <span className={onlineTone}>{online}</span>
       </Badge>
       {offline > 0 && (
         <Badge tooltip={t('common.offline')}>
-          <WifiOff className="w-3 h-3 text-danger" />
+          <WifiOff className="w-3.5 h-3.5 text-danger" />
           <span className="text-danger">{offline}</span>
         </Badge>
       )}
       {disabled > 0 && (
         <Badge tooltip={t('common.disabled')}>
-          <PowerOff className="w-3 h-3 text-dark-400" />
+          <PowerOff className="w-3.5 h-3.5 text-dark-400" />
           <span className="text-dark-400">{disabled}</span>
         </Badge>
       )}
@@ -71,15 +71,15 @@ function FolderLoadBadgesInner({ servers, className = '' }: { servers: ServerWit
   return (
     <span className={`flex flex-wrap items-center gap-1 ${className}`}>
       <Badge tooltip={<>{t('common.cpu')} · {t('common.cores_count', { count: load.cores })}{scope}</>}>
-        <Cpu className="w-3 h-3 text-accent-400" />
+        <Cpu className="w-3.5 h-3.5 text-accent-400" />
         <span className={loadTone(load.cpuPercent)}>{load.cpuPercent.toFixed(0)}%</span>
       </Badge>
       <Badge tooltip={<>{t('common.ram')} · {formatBytes(load.ramUsed, 0)} / {formatBytes(load.ramTotal, 0)}{scope}</>}>
-        <MemoryStick className="w-3 h-3 text-purple" />
+        <MemoryStick className="w-3.5 h-3.5 text-purple" />
         <span className={loadTone(load.ramPercent)}>{load.ramPercent.toFixed(0)}%</span>
       </Badge>
       <Badge tooltip={<>{t('common.download')} / {t('common.upload')}{scope}</>}>
-        <Network className="w-3 h-3 text-dark-400" />
+        <Network className="w-3.5 h-3.5 text-dark-400" />
         <span className="text-success">↓ {formatBitsPerSecLocalized(load.rx, t)}</span>
         <span className="text-accent-400 ml-1">↑ {formatBitsPerSecLocalized(load.tx, t)}</span>
       </Badge>

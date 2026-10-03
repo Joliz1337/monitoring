@@ -79,7 +79,7 @@ export function ProjectCard({
               ref={setActivatorNodeRef}
               {...attributes}
               {...listeners}
-              className="p-1 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing transition rounded flex-shrink-0"
+              className="p-1 text-dark-500 hover:text-dark-400 cursor-grab active:cursor-grabbing transition rounded flex-shrink-0"
             >
               <GripVertical className="w-4 h-4" />
             </div>
@@ -95,14 +95,14 @@ export function ProjectCard({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-semibold text-white truncate">{server.name}</h3>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium uppercase ${badgeClass}`}>
+              <span className={`text-2xs px-1.5 py-0.5 rounded-full font-medium uppercase ${badgeClass}`}>
                 {typeLabel}
               </span>
             </div>
             <div className="flex items-center gap-3 mt-1 text-xs text-dark-400 flex-wrap">
               {(server.billing_type === 'resource' || isCloud) && server.account_balance !== null && (
                 <span className="flex items-center gap-1">
-                  <DollarSign className="w-3 h-3" />
+                  <DollarSign className="w-3.5 h-3.5" />
                   {server.account_balance.toFixed(2)} {currencySymbol(server.currency)}
                 </span>
               )}
@@ -113,13 +113,13 @@ export function ProjectCard({
               )}
               {monthlyPrice !== null && monthlyPrice > 0 && (
                 <span className="flex items-center gap-1">
-                  <DollarSign className="w-3 h-3" />
+                  <DollarSign className="w-3.5 h-3.5" />
                   {monthlyPrice.toFixed(2)} {currencySymbol(server.currency)}{t('billing.per_month')}
                 </span>
               )}
               {isCloud && server.cloud_last_error && (
                 <Tooltip label={server.cloud_last_error} maxWidth={320}>
-                  <span className="text-red-400 text-[10px] truncate max-w-[150px]">
+                  <span className="text-red-400 text-2xs truncate max-w-[150px]">
                     {t('billing.sync_error')}
                   </span>
                 </Tooltip>
@@ -215,7 +215,7 @@ export function ProjectCard({
               onClick={onMoveToFolder}
               className="p-1.5 text-dark-500 hover:text-blue-400 transition rounded-lg hover:bg-dark-800/50"
             >
-              <MoveRight className="w-3.5 h-3.5" />
+              <MoveRight className="w-4 h-4" />
             </button>
           </Tooltip>
           <Tooltip label={t('common.edit')}>
@@ -223,7 +223,7 @@ export function ProjectCard({
               onClick={onEdit}
               className="p-1.5 text-dark-500 hover:text-dark-300 transition rounded-lg hover:bg-dark-800/50"
             >
-              <Pencil className="w-3.5 h-3.5" />
+              <Pencil className="w-4 h-4" />
             </button>
           </Tooltip>
           <Tooltip label={t('common.delete')}>
@@ -231,7 +231,7 @@ export function ProjectCard({
               onClick={onDelete}
               className="p-1.5 text-dark-500 hover:text-red-400 transition rounded-lg hover:bg-dark-800/50"
             >
-              <Trash2 className="w-3.5 h-3.5" />
+              <Trash2 className="w-4 h-4" />
             </button>
           </Tooltip>
         </div>

@@ -155,7 +155,7 @@ export default function HAProxyUpgradeModal({ targets, jobId: initialJobId, onSt
                   <span className="text-dark-200 truncate">{target.name}</span>
                   <span className="flex items-center gap-1.5 font-mono text-xs flex-shrink-0">
                     <span className="text-dark-400">{shortHAProxyVersion(target.version) ?? t('updates.unknown')}</span>
-                    <ArrowRight className="w-3 h-3 text-dark-500" />
+                    <ArrowRight className="w-3.5 h-3.5 text-dark-500" />
                     <span className="text-accent-400">{target.targetVersion}</span>
                   </span>
                 </div>

@@ -392,7 +392,7 @@ export default function SystemOptimizations() {
     return (
       <>
         <Tooltip label={t('sys_opt.nic_mq_hint')}>
-          <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border cursor-help ${
+          <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-2xs font-medium rounded-full border cursor-help ${
             nicInfo.multiqueue_supported
               ? 'bg-purple-500/10 text-purple-400 border-purple-500/30'
               : 'bg-dark-700/50 text-dark-400 border-dark-600/50'
@@ -403,8 +403,8 @@ export default function SystemOptimizations() {
           </span>
         </Tooltip>
         <Tooltip label={t('sys_opt.nic_cpu_hint')}>
-          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border bg-dark-700/50 text-dark-300 border-dark-600/50 cursor-help">
-            <Cpu className="w-2.5 h-2.5" />
+          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-2xs font-medium rounded-full border bg-dark-700/50 text-dark-300 border-dark-600/50 cursor-help">
+            <Cpu className="w-3.5 h-3.5" />
             {t('sys_opt.nic_cpu', { cores: nicInfo.cpu_cores, threads: nicInfo.cpu_threads })}
           </span>
         </Tooltip>
@@ -457,20 +457,31 @@ export default function SystemOptimizations() {
                         ? (node.version ? `v${node.version}` : t('sys_opt.legacy'))
                         : t('sys_opt.not_installed')}
                     </span>
+                    {/* Статус версии — рядом с самой версией, чтобы справа оставались только действия */}
+                    {node.status === 'online' && updateAvailable && !isBusy && !result && (
+                      <Tooltip label={node.driftDetail} maxWidth={320}>
+                        <span className="px-2 py-0.5 text-2xs font-medium bg-accent-500/20 text-accent-400 rounded-full whitespace-nowrap">
+                          {node.drift ? t('sys_opt.host_changed') : t('sys_opt.update_available')}
+                        </span>
+                      </Tooltip>
+                    )}
+                    {node.status === 'online' && !updateAvailable && node.installed && !isBusy && !result && (
+                      <span className="flex items-center gap-1 text-xs text-success whitespace-nowrap"><Check className="w-3.5 h-3.5" />{t('sys_opt.up_to_date')}</span>
+                    )}
                     {node.installed && !node.nodeOutdated && (
-                      <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border ${getNicModeBadgeClass(node.nicMode)}`}>
-                        <Cpu className="w-2.5 h-2.5" />
+                      <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-2xs font-medium rounded-full border ${getNicModeBadgeClass(node.nicMode)}`}>
+                        <Cpu className="w-3.5 h-3.5" />
                         {t('sys_opt.nic_label')}: {getNicModeLabel(node.nicMode)}
                       </span>
                     )}
                     {node.installed && !node.nodeOutdated && node.nicInfo && renderNicDiag(node.nicInfo)}
                     {node.nodeOutdated && (
-                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded-full border bg-warning/20 text-warning border-warning/30">
-                        <AlertTriangle className="w-2.5 h-2.5" />
+                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-2xs font-medium rounded-full border bg-warning/20 text-warning border-warning/30">
+                        <AlertTriangle className="w-3.5 h-3.5" />
                         {t('sys_opt.node_outdated')}
                       </span>
                     )}
-                    {node.nicInfoLoading && <Loader2 className="w-2.5 h-2.5 text-dark-500 animate-spin" />}
+                    {node.nicInfoLoading && <Loader2 className="w-3.5 h-3.5 text-dark-500 animate-spin" />}
                   </>
                 )}
               </div>
@@ -486,8 +497,8 @@ export default function SystemOptimizations() {
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.8 }}
                 >
-                  {isBusy ? <Loader2 className="w-3 h-3 animate-spin" />
-                    : result.success ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                  {isBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : result.success ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
                   <span className="max-w-[120px] truncate">{result.message}</span>
                 </motion.div>
               )}
@@ -496,19 +507,7 @@ export default function SystemOptimizations() {
             {isNodeLoading && <Loader2 className="w-3.5 h-3.5 text-dark-500 animate-spin" />}
 
             {!isNodeLoading && node.status === 'offline' && (
-              <span className="flex items-center gap-1 text-xs text-dark-500"><Clock className="w-3 h-3" />{t('sys_opt.offline')}</span>
-            )}
-
-            {!isNodeLoading && node.status === 'online' && updateAvailable && !isBusy && !result && (
-              <Tooltip label={node.driftDetail} maxWidth={320}>
-                <span className="px-2 py-0.5 text-[10px] font-medium bg-accent-500/20 text-accent-400 rounded-full">
-                  {node.drift ? t('sys_opt.host_changed') : t('sys_opt.update_available')}
-                </span>
-              </Tooltip>
-            )}
-
-            {!isNodeLoading && node.status === 'online' && !updateAvailable && node.installed && !isBusy && !result && (
-              <span className="flex items-center gap-1 text-xs text-success"><Check className="w-3 h-3" />{t('sys_opt.up_to_date')}</span>
+              <span className="flex items-center gap-1 text-xs text-dark-500"><Clock className="w-3.5 h-3.5" />{t('sys_opt.offline')}</span>
             )}
 
             {/* Apply button */}
@@ -524,7 +523,7 @@ export default function SystemOptimizations() {
                 >
                   {isApplying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
                   {t('sys_opt.apply')}
-                  <ChevronDown className="w-2.5 h-2.5" />
+                  <ChevronDown className="w-3.5 h-3.5" />
                 </motion.button>
 
                 <AnimatePresence>
@@ -546,9 +545,9 @@ export default function SystemOptimizations() {
                             <div className="flex-1">
                               <div className="text-dark-200 font-medium flex items-center gap-1.5">
                                 {t('sys_opt.profile_vpn')}
-                                {currentProfile === 'vpn' && <span className="text-[9px] text-success">{t('sys_opt.current')}</span>}
+                                {currentProfile === 'vpn' && <span className="text-2xs text-success">{t('sys_opt.current')}</span>}
                               </div>
-                              <div className="text-[10px] text-dark-500">{t('sys_opt.profile_vpn_desc')}</div>
+                              <div className="text-2xs text-dark-500">{t('sys_opt.profile_vpn_desc')}</div>
                             </div>
                           </button>
                           <button
@@ -559,15 +558,15 @@ export default function SystemOptimizations() {
                             <div className="flex-1">
                               <div className="text-dark-200 font-medium flex items-center gap-1.5">
                                 {t('sys_opt.profile_panel')}
-                                {currentProfile === 'panel' && <span className="text-[9px] text-success">{t('sys_opt.current')}</span>}
+                                {currentProfile === 'panel' && <span className="text-2xs text-success">{t('sys_opt.current')}</span>}
                               </div>
-                              <div className="text-[10px] text-dark-500">{t('sys_opt.profile_panel_desc')}</div>
+                              <div className="text-2xs text-dark-500">{t('sys_opt.profile_panel_desc')}</div>
                             </div>
                           </button>
                         </>
                       ) : (
                         <>
-                          <div className="px-3 py-1.5 text-[10px] text-dark-500 border-b border-dark-700 flex items-center gap-1">
+                          <div className="px-3 py-1.5 text-2xs text-dark-500 border-b border-dark-700 flex items-center gap-1">
                             <button onClick={() => setProfileChoice(null)} className="text-accent-400 hover:underline">&larr;</button>
                             {profileChoice === 'vpn' ? t('sys_opt.profile_vpn') : t('sys_opt.profile_panel')}
                             <FAQIcon screen="SYS_OPT_NIC_MODE" size="sm" />
@@ -581,9 +580,9 @@ export default function SystemOptimizations() {
                               <div className="flex-1">
                                 <div className="text-dark-200 flex items-center gap-1.5">
                                   {t('sys_opt.nic_hybrid')}
-                                  {node.nicMode === 'hybrid' && <span className="text-[9px] text-success">{t('sys_opt.current')}</span>}
+                                  {node.nicMode === 'hybrid' && <span className="text-2xs text-success">{t('sys_opt.current')}</span>}
                                 </div>
-                                <div className="text-[10px] text-dark-500">{t('sys_opt.hybrid_desc')}</div>
+                                <div className="text-2xs text-dark-500">{t('sys_opt.hybrid_desc')}</div>
                               </div>
                             </button>
                           )}
@@ -596,9 +595,9 @@ export default function SystemOptimizations() {
                               <div className="flex-1">
                                 <div className="text-dark-200 flex items-center gap-1.5">
                                   {t('sys_opt.nic_multiqueue')}
-                                  {node.nicMode === 'multiqueue' && <span className="text-[9px] text-success">{t('sys_opt.current')}</span>}
+                                  {node.nicMode === 'multiqueue' && <span className="text-2xs text-success">{t('sys_opt.current')}</span>}
                                 </div>
-                                <div className="text-[10px] text-dark-500">{t('sys_opt.mq_desc')}</div>
+                                <div className="text-2xs text-dark-500">{t('sys_opt.mq_desc')}</div>
                               </div>
                             </button>
                           )}
@@ -610,9 +609,9 @@ export default function SystemOptimizations() {
                             <div className="flex-1">
                               <div className="text-dark-200 flex items-center gap-1.5">
                                 {t('sys_opt.nic_rps')}
-                                {node.nicMode === 'rps' && <span className="text-[9px] text-success">{t('sys_opt.current')}</span>}
+                                {node.nicMode === 'rps' && <span className="text-2xs text-success">{t('sys_opt.current')}</span>}
                               </div>
-                              <div className="text-[10px] text-dark-500">{t('sys_opt.rps_desc')}</div>
+                              <div className="text-2xs text-dark-500">{t('sys_opt.rps_desc')}</div>
                             </div>
                           </button>
                         </>
@@ -704,8 +703,8 @@ export default function SystemOptimizations() {
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.8 }}
                 >
-                  {isApplying ? <Loader2 className="w-3 h-3 animate-spin" />
-                    : result.success ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                  {isApplying ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : result.success ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
                   <span className="max-w-[120px] truncate">{result.message}</span>
                 </motion.div>
               )}
@@ -726,7 +725,7 @@ export default function SystemOptimizations() {
                 >
                   {isApplying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
                   {t('sys_opt.apply')}
-                  <ChevronDown className="w-2.5 h-2.5" />
+                  <ChevronDown className="w-3.5 h-3.5" />
                 </motion.button>
 
                 <AnimatePresence>
@@ -747,7 +746,7 @@ export default function SystemOptimizations() {
                             <Shield className="w-4 h-4 text-accent-400" />
                             <div>
                               <div className="text-dark-200 font-medium">{t('sys_opt.profile_vpn')}</div>
-                              <div className="text-[10px] text-dark-500">{t('sys_opt.profile_vpn_desc')}</div>
+                              <div className="text-2xs text-dark-500">{t('sys_opt.profile_vpn_desc')}</div>
                             </div>
                           </button>
                           <button
@@ -757,13 +756,13 @@ export default function SystemOptimizations() {
                             <Monitor className="w-4 h-4 text-emerald-400" />
                             <div>
                               <div className="text-dark-200 font-medium">{t('sys_opt.profile_panel')}</div>
-                              <div className="text-[10px] text-dark-500">{t('sys_opt.profile_panel_desc')}</div>
+                              <div className="text-2xs text-dark-500">{t('sys_opt.profile_panel_desc')}</div>
                             </div>
                           </button>
                         </>
                       ) : (
                         <>
-                          <div className="px-3 py-1.5 text-[10px] text-dark-500 border-b border-dark-700 flex items-center gap-1">
+                          <div className="px-3 py-1.5 text-2xs text-dark-500 border-b border-dark-700 flex items-center gap-1">
                             <button onClick={() => setProfileChoice(null)} className="text-accent-400 hover:underline">&larr;</button>
                             {profileChoice === 'vpn' ? t('sys_opt.profile_vpn') : t('sys_opt.profile_panel')}
                             <FAQIcon screen="SYS_OPT_NIC_MODE" size="sm" />
@@ -778,7 +777,7 @@ export default function SystemOptimizations() {
                                 <div className="text-dark-200 flex items-center gap-1.5">
                                   {t('sys_opt.nic_hybrid')}
                                 </div>
-                                <div className="text-[10px] text-dark-500">{t('sys_opt.hybrid_desc')}</div>
+                                <div className="text-2xs text-dark-500">{t('sys_opt.hybrid_desc')}</div>
                               </div>
                             </button>
                           )}
@@ -790,7 +789,7 @@ export default function SystemOptimizations() {
                               <Cpu className="w-3.5 h-3.5 text-purple-400" />
                               <div>
                                 <div className="text-dark-200">{t('sys_opt.nic_multiqueue')}</div>
-                                <div className="text-[10px] text-dark-500">{t('sys_opt.mq_desc')}</div>
+                                <div className="text-2xs text-dark-500">{t('sys_opt.mq_desc')}</div>
                               </div>
                             </button>
                           )}
@@ -801,7 +800,7 @@ export default function SystemOptimizations() {
                             <Cpu className="w-3.5 h-3.5 text-accent-400" />
                             <div>
                               <div className="text-dark-200">{t('sys_opt.nic_rps')}</div>
-                              <div className="text-[10px] text-dark-500">{t('sys_opt.rps_desc')}</div>
+                              <div className="text-2xs text-dark-500">{t('sys_opt.rps_desc')}</div>
                             </div>
                           </button>
                         </>
@@ -813,8 +812,8 @@ export default function SystemOptimizations() {
             )}
 
             {node.nodeOutdated && (
-              <span className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded-full border bg-warning/20 text-warning border-warning/30">
-                <AlertTriangle className="w-3 h-3" />
+              <span className="inline-flex items-center gap-1 px-2 py-1 text-2xs font-medium rounded-full border bg-warning/20 text-warning border-warning/30">
+                <AlertTriangle className="w-3.5 h-3.5" />
                 {t('sys_opt.node_outdated')}
               </span>
             )}
@@ -1017,7 +1016,7 @@ export default function SystemOptimizations() {
 
       {nodesList.length === 0 ? (
         <div className="card text-center py-12">
-          <ServerIcon className="w-12 h-12 text-dark-600 mx-auto mb-3" />
+          <ServerIcon className="w-12 h-12 text-dark-500 mx-auto mb-3" />
           <p className="text-dark-400">{t('sys_opt.no_nodes')}</p>
         </div>
       ) : (

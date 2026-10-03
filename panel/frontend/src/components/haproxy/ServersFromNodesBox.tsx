@@ -93,8 +93,8 @@ export default function ServersFromNodesBox({
               <Checkbox checked={selected.has(node.id)} onChange={e => setNodesSelected([node.id], e.target.checked)} />
               <span className="text-sm text-dark-200 truncate">{node.name}</span>
               {addresses.length > 0
-                ? <span className="ml-auto pl-2 text-[10px] text-dark-500 font-mono truncate" title={addresses.join(', ')}>{summarizeAddresses(addresses)}</span>
-                : <span className="ml-auto pl-2 text-[10px] text-dark-600 shrink-0">{t('balancer.nodes_no_addresses')}</span>}
+                ? <span className="ml-auto pl-2 text-2xs text-dark-500 font-mono truncate" title={addresses.join(', ')}>{summarizeAddresses(addresses)}</span>
+                : <span className="ml-auto pl-2 text-2xs text-dark-500 shrink-0">{t('balancer.nodes_no_addresses')}</span>}
             </label>
           )
         }}
@@ -102,7 +102,7 @@ export default function ServersFromNodesBox({
 
       <div className="flex flex-wrap items-end gap-3">
         <div>
-          <span className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.nodes_addresses')}</span>
+          <span className="block text-2xs text-dark-500 mb-0.5">{t('balancer.nodes_addresses')}</span>
           <div className="inline-flex rounded-lg border border-dark-700 overflow-hidden">
             {ADDRESS_KINDS.map(option => (
               <button key={option} type="button" onClick={() => setKind(option)}
@@ -113,22 +113,22 @@ export default function ServersFromNodesBox({
           </div>
         </div>
         <label className="w-24">
-          <span className="block text-[10px] text-dark-500 mb-0.5">{t('haproxy.target_port')}</span>
+          <span className="block text-2xs text-dark-500 mb-0.5">{t('haproxy.target_port')}</span>
           <input type="number" value={port} onChange={e => setPort(e.target.value)}
             placeholder="443" min={1} max={MAX_PORT}
             className={`${inp} ${port && targetPort === null ? 'border-red-500/60' : ''}`} />
         </label>
         <label className="w-20">
-          <span className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.weight')}</span>
+          <span className="block text-2xs text-dark-500 mb-0.5">{t('balancer.weight')}</span>
           <input type="number" value={weight} onChange={e => setWeight(e.target.value)}
             min={1} max={MAX_WEIGHT}
             className={`${inp} ${targetWeight === null ? 'border-red-500/60' : ''}`} />
         </label>
       </div>
 
-      <p className="text-[10px] text-dark-500">{t('balancer.nodes_hint')}</p>
+      <p className="text-2xs text-dark-500">{t('balancer.nodes_hint')}</p>
       {selectedNodes.length > 0 && (
-        <p className="text-[10px] text-dark-400">
+        <p className="text-2xs text-dark-400">
           {t('balancer.nodes_summary', { nodes: selectedNodes.length, count: servers.length })}
           {nodesWithoutAddresses.length > 0 && (
             <span className="text-amber-400"> · {t('balancer.nodes_without_addresses', { names: nodesWithoutAddresses.map(node => node.name).join(', ') })}</span>

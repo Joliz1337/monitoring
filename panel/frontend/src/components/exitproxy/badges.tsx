@@ -32,7 +32,7 @@ const INSTALL: Record<ExitProxyInstallStatus, { tone: Tone; Icon: LucideIcon; sp
 function Badge({ tone, Icon, spin, label }: { tone: Tone; Icon: LucideIcon; spin?: boolean; label: string }) {
   return (
     <span className={`${BADGE} ${TONE[tone]}`}>
-      <Icon className={`w-3 h-3 ${spin ? 'animate-spin' : ''}`} />
+      <Icon className={`w-3.5 h-3.5 ${spin ? 'animate-spin' : ''}`} />
       {label}
     </span>
   )

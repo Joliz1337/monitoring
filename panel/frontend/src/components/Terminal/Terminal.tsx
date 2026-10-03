@@ -359,9 +359,9 @@ export default function Terminal({ serverId }: TerminalProps) {
                 }`}
               >
                 {lastResult.success ? (
-                  <CheckCircle2 className="w-3 h-3" />
+                  <CheckCircle2 className="w-3.5 h-3.5" />
                 ) : (
-                  <XCircle className="w-3 h-3" />
+                  <XCircle className="w-3.5 h-3.5" />
                 )}
                 <span>exit {lastResult.exitCode}</span>
                 <span className="text-dark-500">({lastResult.time}ms)</span>
@@ -407,7 +407,7 @@ export default function Terminal({ serverId }: TerminalProps) {
                                    scrollbar-thin scrollbar-thumb-dark-700 scrollbar-track-transparent"
                         spellCheck={false}
                       />
-                      <div className="absolute bottom-3 right-3 text-xs text-dark-600">
+                      <div className="absolute bottom-3 right-3 text-xs text-dark-500">
                         Ctrl+Enter — {t('terminal.execute')}
                       </div>
                     </div>
@@ -489,7 +489,7 @@ export default function Terminal({ serverId }: TerminalProps) {
                         <span className="text-xs text-dark-400">{t('terminal.history')}</span>
                         <button
                           onClick={clearHistory}
-                          className="text-xs text-dark-500 hover:text-danger transition-colors"
+                          className="btn-tool btn-tool-danger"
                         >
                           {t('terminal.clear_history')}
                         </button>
@@ -561,9 +561,9 @@ export default function Terminal({ serverId }: TerminalProps) {
                   {output.length > 0 && (
                     <button
                       onClick={clearOutput}
-                      className="flex items-center gap-1.5 text-xs text-dark-400 hover:text-dark-200 transition-colors"
+                      className="btn-tool"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Trash2 className="w-4 h-4" />
                       {t('terminal.clear')}
                     </button>
                   )}
@@ -572,9 +572,9 @@ export default function Terminal({ serverId }: TerminalProps) {
                   {isRunning && (
                     <button
                       onClick={() => abortControllerRef.current?.abort()}
-                      className="flex items-center gap-1.5 text-xs text-danger hover:text-danger/80 transition-colors"
+                      className="btn-tool btn-tool-danger"
                     >
-                      <X className="w-3.5 h-3.5" />
+                      <X className="w-4 h-4" />
                       {t('terminal.cancel')}
                     </button>
                   )}

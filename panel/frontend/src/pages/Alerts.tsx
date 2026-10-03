@@ -302,7 +302,7 @@ export default function Alerts() {
                           onClick={() => save({ excluded_server_ids: settings.excluded_server_ids.filter(i => i !== id) })}
                           className="ml-0.5 text-dark-500 hover:text-red-400 transition"
                         >
-                          <X className="w-3 h-3" />
+                          <X className="w-4 h-4" />
                         </button>
                       </Tooltip>
                     </span>
@@ -619,13 +619,13 @@ export default function Alerts() {
               className="px-3 py-1 bg-red-500/10 text-red-400 rounded-lg text-xs hover:bg-red-500/20
                          transition disabled:opacity-40 flex items-center gap-1"
             >
-              {clearing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+              {clearing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
               {t('alerts.clear')}
             </button>
             <Tooltip label={t('common.refresh_data')}>
               <button
                 onClick={() => fetchHistory(historyPage * PAGE_SIZE, historyFilter)}
-                className="p-1 text-dark-400 hover:text-dark-200 transition"
+                className="p-1.5 text-dark-400 hover:text-dark-200 transition"
               >
                 <RefreshCw className="w-4 h-4" />
               </button>
@@ -650,7 +650,7 @@ export default function Alerts() {
                     <span className="text-xs font-medium text-dark-300">{alertTypeLabel(item.alert_type)}</span>
                     <span className="text-xs text-dark-500">|</span>
                     <span className="text-xs text-dark-400 flex items-center gap-1">
-                      <Server className="w-3 h-3" />
+                      <Server className="w-3.5 h-3.5" />
                       {item.server_name}
                     </span>
                     {item.notified && (
@@ -755,7 +755,7 @@ function TriggerBlock({ title, icon, enabled, onToggle, expanded, onExpand, chil
         </button>
         <div className="flex items-center gap-1">
           {faqScreen && <FAQIcon screen={faqScreen} size="sm" />}
-          <button onClick={onExpand} className="p-1 text-dark-500">
+          <button onClick={onExpand} className="p-1.5 text-dark-500">
             {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
           </button>
         </div>
@@ -931,14 +931,14 @@ function TriggerIgnoreList({ ids, allServers, onSave, t }: {
                 key={id}
                 className="inline-flex items-center gap-1 px-2 py-1 bg-dark-700 border border-dark-600 rounded-lg text-xs text-dark-300"
               >
-                <Server className="w-3 h-3 text-dark-500" />
+                <Server className="w-3.5 h-3.5 text-dark-500" />
                 {srv?.name || `#${id}`}
                 <Tooltip label={t('common.remove_from_list')}>
                   <button
                     onClick={() => onSave(ids.filter(i => i !== id))}
                     className="ml-0.5 text-dark-500 hover:text-red-400 transition"
                   >
-                    <X className="w-3 h-3" />
+                    <X className="w-4 h-4" />
                   </button>
                 </Tooltip>
               </span>

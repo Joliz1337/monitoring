@@ -306,7 +306,7 @@ function ServerCard({
         </span>
         {locationCount > 1 && (
           <span className="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded bg-dark-800/70 text-dark-400 text-xs shrink-0">
-            <MapPin className="w-3 h-3" />
+            <MapPin className="w-3.5 h-3.5" />
             {locationCount}
           </span>
         )}
@@ -427,10 +427,10 @@ function CheckList({ cells, openCells, onToggleCell, groupBySni }: {
               className="flex items-center gap-3 px-3 py-2.5 pl-8 cursor-pointer hover:bg-dark-800/20 transition-colors"
               onClick={() => onToggleCell(cell.index)}
             >
-              <span className="text-dark-600 shrink-0">
+              <span className="text-dark-500 shrink-0">
                 {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
               </span>
-              <Globe className="w-4 h-4 text-dark-600 shrink-0" />
+              <Globe className="w-4 h-4 text-dark-500 shrink-0" />
 
               <span className="flex-1 min-w-0 flex items-center gap-1.5">
                 <span className="text-sm text-dark-300 truncate">
@@ -537,7 +537,7 @@ function CellDetails({ cell }: { cell: XrayTestCell }) {
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <span className="whitespace-nowrap">
-      <span className="text-dark-600">{label} </span>
+      <span className="text-dark-500">{label} </span>
       <span className="text-dark-300">{value}</span>
     </span>
   )

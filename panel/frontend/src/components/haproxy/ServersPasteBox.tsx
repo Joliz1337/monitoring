@@ -27,9 +27,9 @@ export default function ServersPasteBox({
       <textarea value={text} onChange={e => setText(e.target.value)} autoFocus spellCheck={false} rows={4}
         placeholder={'server srv1 1.2.3.4:443 weight 2 check\n5.6.7.8:443, 9.10.11.12:443'}
         className="w-full px-3 py-2 rounded-lg bg-dark-950 border border-dark-700 text-dark-200 text-xs font-mono focus:outline-none focus:border-accent-500/50 resize-y" />
-      <p className="text-[10px] text-dark-500">{t('balancer.paste_hint')}</p>
+      <p className="text-2xs text-dark-500">{t('balancer.paste_hint')}</p>
       {text.trim() && (
-        <p className="text-[10px] text-dark-400">
+        <p className="text-2xs text-dark-400">
           {t('balancer.paste_recognized', { count: servers.length })}
           {unrecognizedLines.length > 0 && (
             <span className="text-amber-400"> · {t('balancer.paste_unrecognized', { lines: unrecognizedLabel })}</span>

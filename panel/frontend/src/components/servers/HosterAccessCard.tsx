@@ -165,9 +165,9 @@ export default function HosterAccessCard({ serverId, server }: Props) {
           <button
             onClick={rescan}
             disabled={scanning || purging || loading}
-            className="text-xs text-dark-400 hover:text-dark-200 inline-flex items-center gap-1.5 disabled:opacity-50"
+            className="btn-tool"
           >
-            {scanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            {scanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             {t('server_details.hoster_rescan')}
           </button>
         </div>
@@ -310,7 +310,7 @@ function FindingRow({
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-sm font-medium text-dark-100">{finding.title}</span>
           {finding.access_critical && (
-            <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-danger/15 text-danger">
+            <span className="text-2xs uppercase tracking-wide px-1.5 py-0.5 rounded bg-danger/15 text-danger">
               {t('server_details.hoster_badge_critical')}
             </span>
           )}

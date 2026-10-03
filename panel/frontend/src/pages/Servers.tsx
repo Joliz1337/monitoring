@@ -882,7 +882,7 @@ export default function Servers() {
             type="button"
             {...dragHandle?.attributes}
             {...dragHandle?.listeners}
-            className="p-1 -ml-2 -mr-1 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing rounded touch-none flex-shrink-0"
+            className="p-1.5 -ml-2 -mr-1 text-dark-500 hover:text-dark-400 cursor-grab active:cursor-grabbing rounded touch-none flex-shrink-0"
           >
             <GripVertical className="w-4 h-4" />
           </button>
@@ -929,8 +929,8 @@ export default function Servers() {
                     </span>
                   }
                 >
-                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-[10px] font-medium flex-shrink-0">
-                    <Lock className="w-3 h-3" />
+                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-2xs font-medium flex-shrink-0">
+                    <Lock className="w-3.5 h-3.5" />
                     {t('servers.restricted_badge')}
                   </span>
                 </Tooltip>
@@ -945,8 +945,8 @@ export default function Servers() {
                 </Tooltip>
               ) : (
                 <Tooltip label={t('servers.needs_migration_tooltip')}>
-                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-warning/10 text-warning text-[10px] font-medium flex-shrink-0">
-                    <ShieldAlert className="w-3 h-3" />
+                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-warning/10 text-warning text-2xs font-medium flex-shrink-0">
+                    <ShieldAlert className="w-3.5 h-3.5" />
                     {server.auth_kind === 'legacy'
                       ? t('servers.legacy_badge')
                       : t('servers.old_key_badge')}
@@ -963,7 +963,7 @@ export default function Servers() {
                 className="hover:text-accent-400 transition-colors flex-shrink-0"
                 onClick={(e) => e.stopPropagation()}
               >
-                <ExternalLink className="w-3 h-3" />
+                <ExternalLink className="w-3.5 h-3.5" />
               </a>
             </p>
           </div>
@@ -1631,20 +1631,20 @@ export default function Servers() {
                     </div>
                     {primaryStatus === 'success' && (
                       <span className="flex items-center gap-1 text-success">
-                        <CheckCircle2 className="w-3 h-3" />
+                        <CheckCircle2 className="w-3.5 h-3.5" />
                         {t('servers.deploy_extra_ok')}
                       </span>
                     )}
                     {primaryStatus === 'error' && (
                       <span className="flex items-center gap-1 text-danger">
-                        <XCircle className="w-3 h-3" />
+                        <XCircle className="w-3.5 h-3.5" />
                         {t('servers.deploy_extra_failed')}
                       </span>
                     )}
                   </div>
                   <pre
                     ref={deployLogRef}
-                    className="text-[11px] leading-relaxed font-mono text-dark-300 max-h-64 overflow-auto whitespace-pre-wrap"
+                    className="text-2xs leading-relaxed font-mono text-dark-300 max-h-64 overflow-auto whitespace-pre-wrap"
                   >
                     {deployLog.join('\n')}
                   </pre>
@@ -1706,7 +1706,7 @@ export default function Servers() {
             animate={{ opacity: 1 }}
             key="no-results"
           >
-            <Search className="w-12 h-12 text-dark-600 mx-auto mb-3" />
+            <Search className="w-12 h-12 text-dark-500 mx-auto mb-3" />
             <p className="text-dark-400">{t('common.no_results')}</p>
           </motion.div>
         ) : (
@@ -1720,7 +1720,7 @@ export default function Servers() {
               animate={{ y: [0, -6, 0] }}
               transition={{ duration: 2.5, repeat: Infinity, ease: 'easeInOut' }}
             >
-              <ServerIcon className="w-16 h-16 text-dark-600 mx-auto mb-4" />
+              <ServerIcon className="w-16 h-16 text-dark-500 mx-auto mb-4" />
             </motion.div>
             <p className="text-dark-400 mb-4">{t('servers.no_servers')}</p>
             <motion.button

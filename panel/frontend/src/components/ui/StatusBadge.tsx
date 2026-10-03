@@ -38,7 +38,7 @@ export default function StatusBadge({ status, showLabel = true, size = 'md' }: S
   }
 
   const sizeClasses = {
-    sm: 'px-2 py-0.5 text-[10px]',
+    sm: 'px-2 py-0.5 text-2xs',
     md: 'px-2.5 py-1 text-xs',
   }
 
@@ -67,11 +67,11 @@ export default function StatusBadge({ status, showLabel = true, size = 'md' }: S
       </div>
 
       {status === 'loading' ? (
-        <Loader2 className={`${size === 'sm' ? 'w-2.5 h-2.5' : 'w-3 h-3'} icon-spin`} />
+        <Loader2 className="w-3.5 h-3.5 icon-spin" />
       ) : showLabel ? (
         <span>{labels[status]}</span>
       ) : status === 'error' ? (
-        <AlertCircle className={size === 'sm' ? 'w-2.5 h-2.5' : 'w-3 h-3'} />
+        <AlertCircle className={size === 'sm' ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
       ) : null}
     </div>
   )

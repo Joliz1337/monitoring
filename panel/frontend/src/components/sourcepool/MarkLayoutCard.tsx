@@ -93,9 +93,9 @@ export default function MarkLayoutCard({ view, editable, saving, onModeChange, o
           {manual && canEdit && view.addresses.length > 0 && (
             <button
               onClick={() => setDraft(roundRobinAssignments(marks, view.addresses.map(item => item.address)))}
-              className="flex items-center gap-1 text-xs text-accent-400 hover:text-accent-300 transition-colors"
+              className="btn-tool btn-tool-accent"
             >
-              <Shuffle className="w-3.5 h-3.5" />
+              <Shuffle className="w-4 h-4" />
               {t('source_pool.fill_round_robin')}
             </button>
           )}

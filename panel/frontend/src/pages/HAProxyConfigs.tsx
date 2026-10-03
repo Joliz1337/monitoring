@@ -45,16 +45,16 @@ function SyncStatusBadge({ status, online }: { status: string | null; online?: b
   if (status === 'pending' && online === false) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-dark-300 bg-dark-700/40 border-dark-600/40">
-        <Clock className="w-3 h-3" /> {t('haproxy_configs.waiting_server')}
+        <Clock className="w-3.5 h-3.5" /> {t('haproxy_configs.waiting_server')}
       </span>
     )
   }
 
   const map: Record<string, { color: string; icon: React.ReactNode; label: string }> = {
-    synced: { color: 'text-green-400 bg-green-500/10 border-green-500/20', icon: <CheckCircle2 className="w-3 h-3" />, label: t('haproxy_configs.synced') },
-    pending: { color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20', icon: <Clock className="w-3 h-3" />, label: t('haproxy_configs.pending') },
-    failed: { color: 'text-red-400 bg-red-500/10 border-red-500/20', icon: <XCircle className="w-3 h-3" />, label: t('haproxy_configs.failed') },
-    denied: { color: 'text-purple bg-purple/10 border-purple/20', icon: <Lock className="w-3 h-3" />, label: t('node_caps.status_denied') },
+    synced: { color: 'text-green-400 bg-green-500/10 border-green-500/20', icon: <CheckCircle2 className="w-3.5 h-3.5" />, label: t('haproxy_configs.synced') },
+    pending: { color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20', icon: <Clock className="w-3.5 h-3.5" />, label: t('haproxy_configs.pending') },
+    failed: { color: 'text-red-400 bg-red-500/10 border-red-500/20', icon: <XCircle className="w-3.5 h-3.5" />, label: t('haproxy_configs.failed') },
+    denied: { color: 'text-purple bg-purple/10 border-purple/20', icon: <Lock className="w-3.5 h-3.5" />, label: t('node_caps.status_denied') },
   }
   const s = map[status] || map.pending
   return (
@@ -192,10 +192,10 @@ function describeTarget(target: BalancerTarget): string {
 
 function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label?: string }) {
   return (
-    <div className="flex items-center justify-between">
+    <div className="flex items-center justify-between gap-3">
       {label && <span className="text-xs text-dark-300">{label}</span>}
       <button type="button" onClick={() => onChange(!value)}
-        className={`relative w-9 h-5 rounded-full transition-colors duration-200 ${value ? 'bg-green-500' : 'bg-dark-600'}`}>
+        className={`relative w-9 h-5 shrink-0 rounded-full transition-colors duration-200 ${value ? 'bg-green-500' : 'bg-dark-600'}`}>
         <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${value ? 'translate-x-4' : 'translate-x-0'}`} />
       </button>
     </div>
@@ -240,14 +240,14 @@ function BackendServerRow({
           </Tooltip>
         </div>
         <button type="button" onClick={() => setExpanded(e => !e)}
-          className="p-1 text-dark-400 hover:text-dark-200 transition-colors">
-          {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          className="p-1.5 text-dark-400 hover:text-dark-200 transition-colors">
+          {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         </button>
         {canRemove && (
           <Tooltip label={t('common.delete')}>
             <button type="button" onClick={() => onRemove(index)}
-              className="p-1 text-dark-400 hover:text-red-400 transition-colors">
-              <Trash2 className="w-3.5 h-3.5" />
+              className="p-1.5 text-dark-400 hover:text-red-400 transition-colors">
+              <Trash2 className="w-4 h-4" />
             </button>
           </Tooltip>
         )}
@@ -256,12 +256,12 @@ function BackendServerRow({
       {/* Labels row */}
       {!expanded && (
         <div className="grid grid-cols-4 gap-2 -mt-1">
-          <span className="text-[10px] text-dark-500">{t('balancer.server_name')}</span>
+          <span className="text-2xs text-dark-500">{t('balancer.server_name')}</span>
           {owner
-            ? <span className="text-[10px] text-accent-400 truncate" title={owner}>{owner}</span>
-            : <span className="text-[10px] text-dark-500">{t('balancer.address')}</span>}
-          <span className="text-[10px] text-dark-500">{t('haproxy.target_port')}</span>
-          <span className="text-[10px] text-dark-500">{t('balancer.weight')}</span>
+            ? <span className="text-2xs text-accent-400 truncate" title={owner}>{owner}</span>
+            : <span className="text-2xs text-dark-500">{t('balancer.address')}</span>}
+          <span className="text-2xs text-dark-500">{t('haproxy.target_port')}</span>
+          <span className="text-2xs text-dark-500">{t('balancer.weight')}</span>
         </div>
       )}
 
@@ -269,32 +269,32 @@ function BackendServerRow({
         <div className="space-y-2 pt-1 border-t border-dark-700/30">
           <div className="grid grid-cols-3 gap-2">
             <div>
-              <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.maxconn')}</label>
+              <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.maxconn')}</label>
               <input type="number" value={srv.maxconn ?? ''} onChange={e => upd({ maxconn: e.target.value ? parseInt(e.target.value) : undefined })}
                 placeholder="60000" className={inp} />
               {srv.maxconn != null && srv.maxconn > 64000 && (
-                <p className="text-[10px] text-amber-400 mt-0.5">{t('balancer.maxconn_warning')}</p>
+                <p className="text-2xs text-amber-400 mt-0.5">{t('balancer.maxconn_warning')}</p>
               )}
             </div>
             <div>
-              <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.slowstart')}</label>
+              <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.slowstart')}</label>
               <input type="text" value={srv.slowstart ?? ''} onChange={e => upd({ slowstart: e.target.value || undefined })}
                 placeholder="60s" className={inp} />
             </div>
             <div>
-              <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.inter')}</label>
+              <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.inter')}</label>
               <input type="text" value={srv.inter ?? '5s'} onChange={e => upd({ inter: e.target.value || '5s' })}
                 placeholder="5s" className={inp} />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="block text-[10px] text-dark-500 mb-0.5">Fall</label>
+              <label className="block text-2xs text-dark-500 mb-0.5">Fall</label>
               <input type="number" value={srv.fall ?? 3} onChange={e => upd({ fall: parseInt(e.target.value) || 3 })}
                 className={inp} min={1} />
             </div>
             <div>
-              <label className="block text-[10px] text-dark-500 mb-0.5">Rise</label>
+              <label className="block text-2xs text-dark-500 mb-0.5">Rise</label>
               <input type="number" value={srv.rise ?? 2} onChange={e => upd({ rise: parseInt(e.target.value) || 2 })}
                 className={inp} min={1} />
             </div>
@@ -336,7 +336,7 @@ function BalancerSettingsSection({
             <option key={a} value={a}>{t(`balancer.alg.${a.replace('-', '_')}`)}</option>
           ))}
         </select>
-        <p className="text-[10px] text-dark-500 mt-0.5">{t(`balancer.alg.${opts.algorithm.replace('-', '_')}_hint`)}</p>
+        <p className="text-2xs text-dark-500 mt-0.5">{t(`balancer.alg.${opts.algorithm.replace('-', '_')}_hint`)}</p>
       </div>
 
       {ALGO_NEEDS_HASH.has(opts.algorithm) && (
@@ -351,9 +351,8 @@ function BalancerSettingsSection({
       )}
 
       {/* Advanced toggle */}
-      <button type="button" onClick={() => setExpanded(e => !e)}
-        className="flex items-center gap-1.5 text-xs text-dark-400 hover:text-dark-200 transition-colors">
-        {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+      <button type="button" onClick={() => setExpanded(e => !e)} className="btn-disclosure">
+        {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         {t('balancer.advanced')}
       </button>
 
@@ -375,18 +374,18 @@ function BalancerSettingsSection({
           {opts.health_check_type === 'httpchk' && (
             <div className="grid grid-cols-3 gap-2">
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_method')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.httpchk_method')}</label>
                 <select value={opts.httpchk_method ?? 'GET'} onChange={e => upd({ httpchk_method: e.target.value })} className={inp}>
                   <option>GET</option><option>HEAD</option><option>OPTIONS</option>
                 </select>
               </div>
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_uri')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.httpchk_uri')}</label>
                 <input type="text" value={opts.httpchk_uri ?? ''} onChange={e => upd({ httpchk_uri: e.target.value || undefined })}
                   placeholder="/health" className={inp} />
               </div>
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.httpchk_expect')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.httpchk_expect')}</label>
                 <input type="text" value={opts.httpchk_expect ?? ''} onChange={e => upd({ httpchk_expect: e.target.value || undefined })}
                   placeholder="status 200" className={inp} />
               </div>
@@ -409,12 +408,12 @@ function BalancerSettingsSection({
           {opts.sticky_type === 'cookie' && (
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.cookie_name')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.cookie_name')}</label>
                 <input type="text" value={opts.cookie_name ?? ''} onChange={e => upd({ cookie_name: e.target.value || undefined })}
                   placeholder="SERVERID" className={inp} />
               </div>
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">Options</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">Options</label>
                 <input type="text" value={opts.cookie_options ?? ''} onChange={e => upd({ cookie_options: e.target.value || undefined })}
                   placeholder="insert indirect nocache" className={inp} />
               </div>
@@ -424,18 +423,18 @@ function BalancerSettingsSection({
           {opts.sticky_type === 'stick-table' && (
             <div className="grid grid-cols-3 gap-2">
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">Type</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">Type</label>
                 <select value={opts.stick_table_type ?? 'ip'} onChange={e => upd({ stick_table_type: e.target.value })} className={inp}>
                   <option value="ip">ip</option><option value="string">string</option>
                 </select>
               </div>
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.stick_table_size')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.stick_table_size')}</label>
                 <input type="text" value={opts.stick_table_size ?? ''} onChange={e => upd({ stick_table_size: e.target.value || undefined })}
                   placeholder="200k" className={inp} />
               </div>
               <div>
-                <label className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.stick_table_expire')}</label>
+                <label className="block text-2xs text-dark-500 mb-0.5">{t('balancer.stick_table_expire')}</label>
                 <input type="text" value={opts.stick_table_expire ?? ''} onChange={e => upd({ stick_table_expire: e.target.value || undefined })}
                   placeholder="30m" className={inp} />
               </div>
@@ -494,7 +493,7 @@ function SniDomainsInput({ value, onChange }: { value: string; onChange: (v: str
       <textarea value={value} onChange={e => onChange(e.target.value)} spellCheck={false} rows={4}
         placeholder={'www.google.com\n*.example.com'}
         className="w-full px-3 py-2 rounded-lg bg-dark-950 border border-dark-700 text-dark-200 text-xs font-mono focus:outline-none focus:border-accent-500/50 resize-y" />
-      <p className="text-[10px] text-dark-500">{t('haproxy_configs.sni_domains_hint')}</p>
+      <p className="text-2xs text-dark-500">{t('haproxy_configs.sni_domains_hint')}</p>
     </div>
   )
 }
@@ -535,7 +534,7 @@ function SniFilterSection({
       <div className="flex justify-end">
         <button onClick={handleSave} disabled={saving}
           className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5">
-          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
           {t('common.save')}
         </button>
       </div>
@@ -731,7 +730,7 @@ function RuleForm({
               ? <><Copy className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.clone_rule_title', { name: cloneOf })}</>
               : <><Plus className="w-3.5 h-3.5 text-accent-500" /> {t('haproxy_configs.new_rule')}</>}
         </h4>
-        <button onClick={onCancel} className="p-1 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
+        <button onClick={onCancel} className="p-1.5 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
           <X className="w-4 h-4" />
         </button>
       </div>
@@ -769,8 +768,8 @@ function RuleForm({
                 <input type="text" value={form.target_ip} onChange={e => setForm(f => ({ ...f, target_ip: e.target.value }))}
                   placeholder="192.168.1.10" className={inp} />
                 {singleTargetLabel && (
-                  <p className="flex items-center gap-1 mt-1 text-[10px] text-accent-400 min-w-0">
-                    <Server className="w-3 h-3 shrink-0" />
+                  <p className="flex items-center gap-1 mt-1 text-2xs text-accent-400 min-w-0">
+                    <Server className="w-3.5 h-3.5 shrink-0" />
                     <span className="truncate">{singleTargetLabel}</span>
                   </p>
                 )}
@@ -801,45 +800,42 @@ function RuleForm({
             {/* Servers */}
             <div>
               <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                <span className="text-xs text-dark-400 font-medium">{t('balancer.servers')}</span>
-                <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+                <span className="text-sm text-dark-200 font-medium">{t('balancer.servers')}</span>
+                <div className="flex flex-wrap items-center justify-end gap-2">
                   {copyableServers.length > 0 && (
                     <Tooltip label={t('balancer.copy_servers_hint')}>
-                      <button type="button" onClick={copyServers}
-                        className="flex items-center gap-1 text-xs text-dark-400 hover:text-dark-200 transition-colors">
-                        <Copy className="w-3 h-3" /> {t('common.copy')}
+                      <button type="button" onClick={copyServers} className="btn-tool">
+                        <Copy className="w-4 h-4" /> {t('common.copy')}
                       </button>
                     </Tooltip>
                   )}
                   <Tooltip label={t('balancer.paste_servers_hint')}>
                     <button type="button" onClick={() => toggleToolbox('paste')}
-                      className={`flex items-center gap-1 text-xs transition-colors ${toolbox === 'paste' ? 'text-accent-400' : 'text-dark-400 hover:text-dark-200'}`}>
-                      <ClipboardPaste className="w-3 h-3" /> {t('balancer.paste_servers')}
+                      className={`btn-tool ${toolbox === 'paste' ? 'btn-tool-active' : ''}`}>
+                      <ClipboardPaste className="w-4 h-4" /> {t('balancer.paste_servers')}
                     </button>
                   </Tooltip>
                   <Tooltip label={t('balancer.from_nodes_hint')}>
                     <button type="button" onClick={() => toggleToolbox('nodes')}
-                      className={`flex items-center gap-1 text-xs transition-colors ${toolbox === 'nodes' ? 'text-accent-400' : 'text-dark-400 hover:text-dark-200'}`}>
-                      <Server className="w-3 h-3" /> {t('balancer.from_nodes')}
+                      className={`btn-tool ${toolbox === 'nodes' ? 'btn-tool-active' : ''}`}>
+                      <Server className="w-4 h-4" /> {t('balancer.from_nodes')}
                     </button>
                   </Tooltip>
                   <Tooltip label={t('balancer.port_change_tooltip')}>
                     <button type="button" onClick={() => toggleToolbox('port')}
-                      className={`flex items-center gap-1 text-xs transition-colors ${toolbox === 'port' ? 'text-accent-400' : 'text-dark-400 hover:text-dark-200'}`}>
-                      <ArrowRightLeft className="w-3 h-3" /> {t('balancer.port_change')}
+                      className={`btn-tool ${toolbox === 'port' ? 'btn-tool-active' : ''}`}>
+                      <ArrowRightLeft className="w-4 h-4" /> {t('balancer.port_change')}
                     </button>
                   </Tooltip>
                   {form.servers.length > 1 && (
                     <Tooltip label={t('balancer.auto_weight')}>
-                      <button type="button" onClick={autoWeights}
-                        className="flex items-center gap-1 text-xs text-dark-400 hover:text-dark-200 transition-colors">
-                        <Cpu className="w-3 h-3" /> {t('balancer.auto_weight')}
+                      <button type="button" onClick={autoWeights} className="btn-tool">
+                        <Cpu className="w-4 h-4" /> {t('balancer.auto_weight')}
                       </button>
                     </Tooltip>
                   )}
-                  <button type="button" onClick={addServer}
-                    className="flex items-center gap-1 text-xs text-accent-400 hover:text-accent-300 transition-colors">
-                    <Plus className="w-3 h-3" /> {t('balancer.add_server')}
+                  <button type="button" onClick={addServer} className="btn-tool btn-tool-accent">
+                    <Plus className="w-4 h-4" /> {t('balancer.add_server')}
                   </button>
                 </div>
               </div>
@@ -879,7 +875,7 @@ function RuleForm({
           {form.sni_mode === 'custom' && (
             <SniDomainsInput value={form.sni_domains} onChange={v => setForm(f => ({ ...f, sni_domains: v }))} />
           )}
-          <p className="text-[10px] text-dark-500 break-words">{sniHint}</p>
+          <p className="text-2xs text-dark-500 break-words">{sniHint}</p>
         </div>
 
         {/* Actions */}
@@ -889,7 +885,7 @@ function RuleForm({
           </button>
           <button onClick={() => onSave(form)} disabled={saving}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5">
-            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             {isEdit ? t('common.save') : t('haproxy_configs.add_rule')}
           </button>
         </div>
@@ -927,7 +923,7 @@ function ProfileCard({
         <div className="flex items-center gap-3 min-w-0">
           <Tooltip label={t('haproxy_configs.drag_to_reorder')}>
             <div ref={dragHandle.ref} {...dragHandle.listeners} {...dragHandle.attributes} onClick={e => e.stopPropagation()}
-              className="p-1 -ml-2 rounded text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing transition-colors shrink-0">
+              className="p-1 -ml-2 rounded text-dark-500 hover:text-dark-400 cursor-grab active:cursor-grabbing transition-colors shrink-0">
               <GripVertical className="w-4 h-4" />
             </div>
           </Tooltip>
@@ -948,12 +944,12 @@ function ProfileCard({
           )}
           {allSynced && profile.linked_servers_count > 0 && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-green-400 bg-green-500/10 border-green-500/20">
-              <CheckCircle2 className="w-3 h-3" /> {t('haproxy_configs.all_synced')}
+              <CheckCircle2 className="w-3.5 h-3.5" /> {t('haproxy_configs.all_synced')}
             </span>
           )}
           {hasUnsync && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-yellow-400 bg-yellow-500/10 border-yellow-500/20">
-              <AlertCircle className="w-3 h-3" /> {profile.linked_servers_count - profile.synced_servers_count} {t('haproxy_configs.out_of_sync')}
+              <AlertCircle className="w-3.5 h-3.5" /> {profile.linked_servers_count - profile.synced_servers_count} {t('haproxy_configs.out_of_sync')}
             </span>
           )}
           <Tooltip label={t('common.edit')}>
@@ -1400,8 +1396,8 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         <span className="text-sm text-dark-200 font-medium">{r.name}</span>
                         {r.is_balancer ? (
                           <>
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">
-                              <Scale className="w-2.5 h-2.5" /> LB
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-2xs font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">
+                              <Scale className="w-3.5 h-3.5" /> LB
                             </span>
                             <Tooltip
                               label={<div className="space-y-0.5">{targets.map((target, i) => <div key={i}>{describeTarget(target)}</div>)}</div>}
@@ -1413,29 +1409,29 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                                   : `${r.servers?.length ?? 0} ${t('balancer.servers').toLowerCase()}`}
                               </span>
                             </Tooltip>
-                            <span className="text-[10px] text-dark-500 hidden sm:block">{r.balancer_options?.algorithm}</span>
-                            {r.accept_proxy && <span className="text-[10px] text-cyan-400/60 hidden sm:block">ACCEPT</span>}
+                            <span className="text-2xs text-dark-500 hidden sm:block">{r.balancer_options?.algorithm}</span>
+                            {r.accept_proxy && <span className="text-2xs text-cyan-400/60 hidden sm:block">ACCEPT</span>}
                           </>
                         ) : (
                           <>
                             <span className="text-xs text-dark-500 truncate">
                               :{r.listen_port} → {singleTargetLabel && <span className="text-dark-300">{singleTargetLabel} · </span>}{r.target_ip}:{r.target_port}
                             </span>
-                            {r.accept_proxy && <span className="text-[10px] text-cyan-400/60 hidden sm:block">ACCEPT</span>}
-                            {r.send_proxy && <span className="text-[10px] text-yellow-400/60 hidden sm:block">PROXY</span>}
+                            {r.accept_proxy && <span className="text-2xs text-cyan-400/60 hidden sm:block">ACCEPT</span>}
+                            {r.send_proxy && <span className="text-2xs text-yellow-400/60 hidden sm:block">PROXY</span>}
                           </>
                         )}
-                        {sniActive && <span className="text-[10px] text-green-400/60 hidden sm:block">SNI</span>}
+                        {sniActive && <span className="text-2xs text-green-400/60 hidden sm:block">SNI</span>}
                       </div>
-                      <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex items-center gap-1 shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
                         <Tooltip label={t('haproxy_configs.clone_rule')}>
                           <button onClick={e => { e.stopPropagation(); startCloneRule(r) }} className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors">
-                            <Copy className="w-3.5 h-3.5" />
+                            <Copy className="w-4 h-4" />
                           </button>
                         </Tooltip>
                         <Tooltip label={t('common.delete')}>
                           <button onClick={e => { e.stopPropagation(); handleDeleteRule(r.name) }} className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors">
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </Tooltip>
                       </div>
@@ -1615,8 +1611,8 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                       <div className="flex items-center gap-2.5 min-w-0">
                         <Tooltip label={t('haproxy_configs.addresses_toggle')}>
                           <button onClick={() => toggleServerExpanded(s.server_id)}
-                            className="-ml-1 p-0.5 rounded text-dark-500 hover:text-dark-200 transition-colors">
-                            {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                            className="-ml-1 p-1 rounded text-dark-500 hover:text-dark-200 transition-colors">
+                            {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                           </button>
                         </Tooltip>
                         {/* Сигнализатор сервера: живой / мёртвый */}
@@ -1659,20 +1655,20 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                             <Tooltip label={t('haproxy_configs.start_haproxy')}>
                               <button onClick={() => handleStartHaproxy(s.server_id)} disabled={startingServerId === s.server_id}
                                 className="p-1.5 rounded-lg text-dark-400 hover:text-green-400 hover:bg-green-500/10 transition-colors disabled:opacity-50">
-                                {startingServerId === s.server_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                                {startingServerId === s.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
                               </button>
                             </Tooltip>
                           )}
                           <Tooltip label={t('haproxy_configs.sync_server')}>
                             <button onClick={() => handleSyncOne(s.server_id)} disabled={syncingServerId === s.server_id}
                               className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors">
-                              {syncingServerId === s.server_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                              {syncingServerId === s.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                             </button>
                           </Tooltip>
                           <Tooltip label={t('haproxy_configs.unlink_server')}>
                             <button onClick={() => handleUnlinkServer(s.server_id)}
                               className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors">
-                              <Unlink className="w-3.5 h-3.5" />
+                              <Unlink className="w-4 h-4" />
                             </button>
                           </Tooltip>
                         </div>
@@ -1705,7 +1701,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                     {syncLog.map(entry => (
                       <div key={entry.id} className="flex items-center justify-between text-xs px-2 py-1.5 rounded bg-dark-800/50">
                         <div className="flex items-center gap-2 min-w-0">
-                          {entry.status === 'success' ? <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" /> : <XCircle className="w-3 h-3 text-red-400 shrink-0" />}
+                          {entry.status === 'success' ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" /> : <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />}
                           <span className="text-dark-300 truncate">{entry.server_name}</span>
                           {entry.message && <span className="text-dark-500 truncate hidden sm:block">— {entry.message}</span>}
                         </div>

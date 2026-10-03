@@ -59,7 +59,7 @@ export default function ReloadCmdPresetChips({
                 onClick={() => onDelete(p.name)}
                 className="px-1.5 py-1.5 text-dark-500 hover:text-danger hover:bg-danger/10 transition-colors"
               >
-                <X className="w-3 h-3" />
+                <X className="w-4 h-4" />
               </button>
             </Tooltip>
           </div>
@@ -72,7 +72,7 @@ export default function ReloadCmdPresetChips({
           disabled={saving}
           className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-dark-700/50 bg-dark-800/50 text-xs text-dark-200 hover:text-dark-50 transition-colors disabled:opacity-50"
         >
-          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
           {t('wildcard_ssl.reload_preset_save')}
         </button>
       )}

@@ -357,7 +357,7 @@ export default function ServerDetails() {
         {/* Header skeleton */}
         <div className="flex items-center gap-4 mb-6">
           <div className="p-2.5">
-            <ArrowLeft className="w-5 h-5 text-dark-600" />
+            <ArrowLeft className="w-5 h-5 text-dark-500" />
           </div>
           <div className="flex-1 space-y-2">
             <div className="h-6 w-40 bg-dark-700/50 rounded-lg animate-pulse" />

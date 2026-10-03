@@ -332,7 +332,7 @@ export default function SourcePool() {
                           {item.address}
                         </div>
                         {ownMarks.length > 0 && (
-                          <div className="font-mono text-[11px] text-dark-500 mt-0.5 break-words">{formatMarks(ownMarks)}</div>
+                          <div className="font-mono text-2xs text-dark-500 mt-0.5 break-words">{formatMarks(ownMarks)}</div>
                         )}
                       </div>
                       <span className="text-xs text-dark-500 shrink-0">{label}</span>

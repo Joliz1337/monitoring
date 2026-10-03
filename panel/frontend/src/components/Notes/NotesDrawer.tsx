@@ -75,7 +75,7 @@ export default function NotesDrawer() {
                   : <WifiOff className="w-3.5 h-3.5 text-dark-500" />}
                 {isSaving && (
                   <div className="flex items-center gap-1 text-xs text-dark-400">
-                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   </div>
                 )}
               </div>
@@ -177,9 +177,9 @@ export default function NotesDrawer() {
                           <span className="flex-1 text-sm text-dark-200">{task.text}</span>
                           <button
                             onClick={() => deleteTask(task.id)}
-                            className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-dark-700 text-dark-500 hover:text-danger transition-all"
+                            className="opacity-60 group-hover:opacity-100 p-1.5 rounded hover:bg-dark-700 text-dark-500 hover:text-danger transition-all"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </motion.div>
                       ))}
@@ -203,14 +203,14 @@ export default function NotesDrawer() {
                                 onClick={() => toggleTask(task.id, false)}
                                 className="w-4.5 h-4.5 rounded bg-accent-500/20 border border-accent-500/40 shrink-0 flex items-center justify-center"
                               >
-                                <Check className="w-3 h-3 text-accent-400" />
+                                <Check className="w-4 h-4 text-accent-400" />
                               </button>
                               <span className="flex-1 text-sm text-dark-500 line-through">{task.text}</span>
                               <button
                                 onClick={() => deleteTask(task.id)}
-                                className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-dark-700 text-dark-500 hover:text-danger transition-all"
+                                className="opacity-60 group-hover:opacity-100 p-1.5 rounded hover:bg-dark-700 text-dark-500 hover:text-danger transition-all"
                               >
-                                <Trash2 className="w-3.5 h-3.5" />
+                                <Trash2 className="w-4 h-4" />
                               </button>
                             </motion.div>
                           ))}

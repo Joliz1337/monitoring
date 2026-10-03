@@ -351,7 +351,7 @@ export default function DeployTargetFields({
                           onClick={() => onDeleteCert(p.id)}
                           className="px-1.5 py-1.5 text-dark-500 hover:text-danger hover:bg-danger/10 transition-colors"
                         >
-                          <X className="w-3 h-3" />
+                          <X className="w-4 h-4" />
                         </button>
                       </Tooltip>
                     </div>
@@ -369,7 +369,7 @@ export default function DeployTargetFields({
                       : 'border-dark-700/50 bg-dark-800/50 text-dark-200 hover:text-dark-50'
                   }`}
                 >
-                  <Plus className="w-3 h-3" />
+                  <Plus className="w-3.5 h-3.5" />
                   {t('servers.deploy_remna_new')}
                 </button>
               </div>

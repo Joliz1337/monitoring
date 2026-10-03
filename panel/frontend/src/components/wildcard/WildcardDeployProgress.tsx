@@ -42,7 +42,7 @@ export function WildcardDeployProgress({ progress, onClose, onCancel }: Wildcard
         </div>
         <div className="flex items-center gap-3">
           {active && (
-            <button onClick={onCancel} className="text-dark-400 hover:text-dark-200 text-xs">
+            <button onClick={onCancel} className="btn-tool">
               {t('wildcard_ssl.deploy_cancel')}
             </button>
           )}

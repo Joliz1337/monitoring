@@ -41,6 +41,11 @@ export default {
         sans: ['Twemoji Country Flags', 'Outfit', 'system-ui', 'sans-serif'],
         mono: ['Twemoji Country Flags', 'JetBrains Mono', 'monospace'],
       },
+      // Нижняя планка шрифта — 12px (2xs): мельче на тёмном фоне не читается
+      fontSize: {
+        '2xs': ['0.75rem', { lineHeight: '1rem' }],
+        xs: ['0.8125rem', { lineHeight: '1.125rem' }],
+      },
     },
   },
   plugins: [],

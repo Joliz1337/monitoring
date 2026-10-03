@@ -171,12 +171,16 @@ export default function InfraTree() {
               <div className="mt-2 pt-2 border-t border-dark-700/50">
                 <button
                   onClick={() => setUnassignedOpen(!unassignedOpen)}
-                  className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-800/50 transition-colors"
+                  className="flex items-center gap-2 w-full px-2 py-2 rounded-lg text-dark-300 hover:text-dark-100 hover:bg-dark-800/50 transition-colors"
                 >
-                  {unassignedOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                  <ServerIcon className="w-4 h-4" />
-                  <span className="text-xs font-medium">{t('infra.unassigned')}</span>
-                  <span className="text-xs text-dark-500">{tree.unassigned_server_ids.length}</span>
+                  <span className="p-1 text-dark-400">
+                    {unassignedOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                  </span>
+                  <ServerIcon className="w-4 h-4 text-dark-400 shrink-0" />
+                  <span className="text-sm font-semibold">{t('infra.unassigned')}</span>
+                  <span className="px-1.5 py-0.5 rounded-md bg-dark-800 border border-dark-700 text-xs font-medium text-dark-300">
+                    {tree.unassigned_server_ids.length}
+                  </span>
                 </button>
                 <AnimatePresence>
                   {unassignedOpen && (

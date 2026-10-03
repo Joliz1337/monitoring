@@ -478,7 +478,7 @@ export default function BulkActions() {
 
             {servers.length === 0 ? (
               <div className="text-center py-8">
-                <Server className="w-12 h-12 text-dark-600 mx-auto mb-3" />
+                <Server className="w-12 h-12 text-dark-500 mx-auto mb-3" />
                 <p className="text-dark-400">{t('bulk_actions.no_servers')}</p>
               </div>
             ) : (
@@ -652,7 +652,7 @@ export default function BulkActions() {
 
                       {filteredGroups.folders.size === 0 && filteredGroups.noFolder.length === 0 && (
                         <div className="text-center py-6">
-                          <Search className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                          <Search className="w-8 h-8 text-dark-500 mx-auto mb-2" />
                           <p className="text-dark-400 text-sm">{t('bulk_actions.no_results')}</p>
                         </div>
                       )}
@@ -683,7 +683,7 @@ export default function BulkActions() {
                       ))}
                       {filteredGroups.noFolder.length === 0 && (
                         <div className="text-center py-6">
-                          <Search className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                          <Search className="w-8 h-8 text-dark-500 mx-auto mb-2" />
                           <p className="text-dark-400 text-sm">{t('bulk_actions.no_results')}</p>
                         </div>
                       )}
@@ -1170,9 +1170,9 @@ export default function BulkActions() {
                   </h3>
                   <button
                     onClick={clearResults}
-                    className="text-xs text-dark-400 hover:text-dark-200 flex items-center gap-1"
+                    className="btn-tool"
                   >
-                    <X className="w-3 h-3" />
+                    <X className="w-4 h-4" />
                     {t('bulk_actions.clear_results')}
                   </button>
                 </div>

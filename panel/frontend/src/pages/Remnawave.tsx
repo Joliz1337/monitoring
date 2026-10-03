@@ -259,9 +259,9 @@ function SortTh({ label, col, sortBy, sortDir, onSort, align = 'left' }: {
       } ${active ? 'text-accent-400' : ''}`}
     >
       <span className="inline-flex items-center gap-1">
-        {align === 'right' && active && (sortDir === 'desc' ? <ArrowDown className="w-3 h-3" /> : <ArrowUp className="w-3 h-3" />)}
+        {align === 'right' && active && (sortDir === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />)}
         {label}
-        {align === 'left' && active && (sortDir === 'desc' ? <ArrowDown className="w-3 h-3" /> : <ArrowUp className="w-3 h-3" />)}
+        {align === 'left' && active && (sortDir === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />)}
       </span>
     </th>
   )
@@ -488,7 +488,7 @@ function UserRow({ user, expanded, details, detailsLoading, onToggle, onDeleteIp
         <td className="px-5 py-3 text-right text-dark-300">
           {user.device_count > 0 && (
             <span className="inline-flex items-center gap-1">
-              <Smartphone className="w-3 h-3 text-dark-500" />
+              <Smartphone className="w-3.5 h-3.5 text-dark-500" />
               {user.device_count}
             </span>
           )}
@@ -525,7 +525,7 @@ function UserRow({ user, expanded, details, detailsLoading, onToggle, onDeleteIp
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.98 }}
                         >
-                          <Trash2 className="w-3 h-3" />
+                          <Trash2 className="w-3.5 h-3.5" />
                           {t('remnawave.deleteAllIps')}
                         </motion.button>
                       </div>
@@ -533,7 +533,7 @@ function UserRow({ user, expanded, details, detailsLoading, onToggle, onDeleteIp
                       {details.ips?.length > 0 && (
                         <div className="space-y-1">
                           <div className="flex items-center gap-1.5 text-dark-400 text-xs font-medium mb-1.5">
-                            <Globe className="w-3 h-3" />
+                            <Globe className="w-3.5 h-3.5" />
                             {t('remnawave.ipAddresses')}
                           </div>
                           {details.ips.map((ip: any) => (
@@ -559,9 +559,9 @@ function UserRow({ user, expanded, details, detailsLoading, onToggle, onDeleteIp
                                 <Tooltip label={t('common.delete')}>
                                   <button
                                     onClick={(e) => { e.stopPropagation(); onDeleteIp(ip.source_ip) }}
-                                    className="opacity-0 group-hover:opacity-100 p-1 hover:bg-danger/20 rounded-lg text-danger transition-all"
+                                    className="opacity-60 group-hover:opacity-100 p-1.5 hover:bg-danger/20 rounded-lg text-danger transition-all"
                                   >
-                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <Trash2 className="w-4 h-4" />
                                   </button>
                                 </Tooltip>
                               </div>
@@ -573,7 +573,7 @@ function UserRow({ user, expanded, details, detailsLoading, onToggle, onDeleteIp
                       {details.devices?.length > 0 && (
                         <div className="space-y-1">
                           <div className="flex items-center gap-1.5 text-dark-400 text-xs font-medium mb-1.5">
-                            <Smartphone className="w-3 h-3" />
+                            <Smartphone className="w-3.5 h-3.5" />
                             {t('remnawave.hwidDevices')} ({details.devices.length})
                           </div>
                           {details.devices.map((dev: RemnawaveHwidDevice) => (
@@ -808,7 +808,7 @@ function AnomaliesTab() {
                       <span className="text-dark-100 text-sm font-medium">
                         {a.username || (a.email ? `#${a.email}` : 'Unknown')}
                       </span>
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${style.text} ${style.bg}`}>
+                      <span className={`px-1.5 py-0.5 rounded text-2xs font-semibold uppercase ${style.text} ${style.bg}`}>
                         {anomalyTypeLabels[a.type] || a.type}
                       </span>
                       {a.status && (
@@ -839,7 +839,7 @@ function AnomaliesTab() {
                             }}
                             className="p-1.5 hover:bg-dark-700/50 rounded-lg text-dark-500 hover:text-dark-300 transition-colors"
                           >
-                            <X className="w-3.5 h-3.5" />
+                            <X className="w-4 h-4" />
                           </button>
                         </Tooltip>
                         {isExpanded
@@ -876,7 +876,7 @@ function AnomaliesTab() {
                                 whileHover={{ scale: 1.02 }}
                                 whileTap={{ scale: 0.98 }}
                               >
-                                <Trash2 className="w-3 h-3" />
+                                <Trash2 className="w-3.5 h-3.5" />
                                 {t('remnawave.deleteAllIps')}
                               </motion.button>
                             </div>
@@ -884,7 +884,7 @@ function AnomaliesTab() {
                             {userDetails.ips?.length > 0 && (
                               <div className="space-y-1">
                                 <div className="flex items-center gap-1.5 text-dark-400 text-xs font-medium mb-1.5">
-                                  <Globe className="w-3 h-3" />
+                                  <Globe className="w-3.5 h-3.5" />
                                   {t('remnawave.ipAddresses')}
                                 </div>
                                 {userDetails.ips.map((ip: any) => (
@@ -910,9 +910,9 @@ function AnomaliesTab() {
                                       <Tooltip label={t('common.delete')}>
                                         <button
                                           onClick={(e) => { e.stopPropagation(); deleteIp(a.email!, ip.source_ip) }}
-                                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-danger/20 rounded-lg text-danger transition-all"
+                                          className="opacity-60 group-hover:opacity-100 p-1.5 hover:bg-danger/20 rounded-lg text-danger transition-all"
                                         >
-                                          <Trash2 className="w-3.5 h-3.5" />
+                                          <Trash2 className="w-4 h-4" />
                                         </button>
                                       </Tooltip>
                                     </div>
@@ -924,7 +924,7 @@ function AnomaliesTab() {
                             {userDetails.devices?.length > 0 && (
                               <div className="space-y-1">
                                 <div className="flex items-center gap-1.5 text-dark-400 text-xs font-medium mb-1.5">
-                                  <Smartphone className="w-3 h-3" />
+                                  <Smartphone className="w-3.5 h-3.5" />
                                   {t('remnawave.hwidDevices')} ({userDetails.devices.length})
                                 </div>
                                 {userDetails.devices.map((dev: RemnawaveHwidDevice) => (
@@ -1249,9 +1249,9 @@ function InstallTab() {
                       <span className="block text-xs text-dark-500 truncate">{s.url}</span>
                     </span>
                     {!usable ? (
-                      <span className="text-[10px] text-dark-500 shrink-0">{t('remnawave.install_exec_denied')}</span>
+                      <span className="text-2xs text-dark-500 shrink-0">{t('remnawave.install_exec_denied')}</span>
                     ) : s.has_xray_node ? (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">
+                      <span className="text-2xs px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">
                         {t('remnawave.install_already')}
                       </span>
                     ) : null}
@@ -1291,7 +1291,7 @@ function InstallTab() {
                         onClick={() => handleDeleteCert(p.id)}
                         className="px-1.5 py-1.5 text-dark-500 hover:text-danger hover:bg-danger/10 transition-colors"
                       >
-                        <X className="w-3 h-3" />
+                        <X className="w-4 h-4" />
                       </button>
                     </Tooltip>
                   </div>
@@ -1306,7 +1306,7 @@ function InstallTab() {
                     : 'border-dark-700/50 bg-dark-800/50 text-dark-200 hover:text-dark-50'
                 }`}
               >
-                <Plus className="w-3 h-3" />
+                <Plus className="w-3.5 h-3.5" />
                 {t('servers.deploy_remna_new')}
               </button>
             </div>
@@ -1404,20 +1404,20 @@ function InstallTab() {
             </div>
             {phase === 'success' && (
               <span className="flex items-center gap-1 text-success">
-                <Check className="w-3 h-3" />
+                <Check className="w-3.5 h-3.5" />
                 {t('remnawave.install_success')}
               </span>
             )}
             {phase === 'error' && (
               <span className="flex items-center gap-1 text-danger">
-                <X className="w-3 h-3" />
+                <X className="w-3.5 h-3.5" />
                 {t('remnawave.install_failed')}
               </span>
             )}
           </div>
           <pre
             ref={logRef}
-            className="text-[11px] leading-relaxed font-mono text-dark-300 max-h-64 overflow-auto whitespace-pre-wrap"
+            className="text-2xs leading-relaxed font-mono text-dark-300 max-h-64 overflow-auto whitespace-pre-wrap"
           >
             {log.join('\n')}
           </pre>
@@ -1692,19 +1692,19 @@ function SettingsTab() {
                       {key === 'anomaly_ip_enabled' && form.anomaly_ip_enabled && (
                         <div className="grid grid-cols-3 gap-2">
                             <div>
-                              <label className="block text-[11px] text-dark-500 mb-1">{t('remnawave.anomalyIpMargin')}</label>
+                              <label className="block text-2xs text-dark-500 mb-1">{t('remnawave.anomalyIpMargin')}</label>
                               <input type="number" value={form.anomaly_ip_margin} min={0} max={100}
                                 onChange={e => { const v = parseInt(e.target.value); updateField('anomaly_ip_margin', Number.isNaN(v) ? 0 : v) }}
                                 className="input" />
                             </div>
                             <div>
-                              <label className="block text-[11px] text-dark-500 mb-1">{t('remnawave.anomalyIpConfirm')}</label>
+                              <label className="block text-2xs text-dark-500 mb-1">{t('remnawave.anomalyIpConfirm')}</label>
                               <input type="number" value={form.anomaly_ip_confirm_count} min={1} max={20}
                                 onChange={e => { const v = parseInt(e.target.value); updateField('anomaly_ip_confirm_count', Number.isNaN(v) ? 1 : v) }}
                                 className="input" />
                             </div>
                             <div>
-                              <label className="block text-[11px] text-dark-500 mb-1">{t('remnawave.anomalyAsnMargin')}</label>
+                              <label className="block text-2xs text-dark-500 mb-1">{t('remnawave.anomalyAsnMargin')}</label>
                               <input type="number" value={form.anomaly_asn_margin} min={0} max={50}
                                 onChange={e => { const v = parseInt(e.target.value); updateField('anomaly_asn_margin', Number.isNaN(v) ? 0 : v) }}
                                 className="input" />
@@ -1728,7 +1728,7 @@ function SettingsTab() {
                           {form.anomaly_ip_smart_enabled && (
                             <div className="grid grid-cols-3 gap-2">
                               <div>
-                                <label className="block text-[11px] text-dark-500 mb-1">{t('remnawave.anomalySmartTrafficGb')}</label>
+                                <label className="block text-2xs text-dark-500 mb-1">{t('remnawave.anomalySmartTrafficGb')}</label>
                                 <input type="number" value={form.anomaly_ip_smart_traffic_gb} min={1} max={500}
                                   onChange={e => { const v = parseFloat(e.target.value); updateField('anomaly_ip_smart_traffic_gb', Number.isNaN(v) ? 1 : v) }}
                                   className="input" />
@@ -1754,7 +1754,7 @@ function SettingsTab() {
                           {form.anomaly_devdata_smart_enabled && (
                             <div className="grid grid-cols-3 gap-2">
                               <div>
-                                <label className="block text-[11px] text-dark-500 mb-1">{t('remnawave.anomalySmartTrafficGb')}</label>
+                                <label className="block text-2xs text-dark-500 mb-1">{t('remnawave.anomalySmartTrafficGb')}</label>
                                 <input type="number" value={form.anomaly_devdata_smart_traffic_gb} min={1} max={500}
                                   onChange={e => { const v = parseFloat(e.target.value); updateField('anomaly_devdata_smart_traffic_gb', Number.isNaN(v) ? 1 : v) }}
                                   className="input" />
@@ -1766,7 +1766,7 @@ function SettingsTab() {
 
                       {key === 'anomaly_ua_enabled' && form.anomaly_ua_enabled && (
                         <div>
-                          <label className="block text-[11px] text-dark-500 mb-1">{t('remnawave.anomalyUaPatternsLabel')}</label>
+                          <label className="block text-2xs text-dark-500 mb-1">{t('remnawave.anomalyUaPatternsLabel')}</label>
                           <textarea value={form.anomaly_ua_patterns}
                             onChange={e => updateField('anomaly_ua_patterns', e.target.value)}
                             rows={6} spellCheck={false}
@@ -1884,7 +1884,7 @@ function SettingsTab() {
                     <span className="text-dark-100 text-sm">{u.username || `#${u.user_id}`}</span>
                     <Tooltip label={t('common.remove_from_list')}>
                       <button onClick={() => removeIgnoredUser(u.user_id)} className="p-1.5 hover:bg-danger/20 rounded-lg text-danger transition-colors">
-                        <X className="w-3.5 h-3.5" />
+                        <X className="w-4 h-4" />
                       </button>
                     </Tooltip>
                   </div>
@@ -1904,7 +1904,7 @@ function SettingsTab() {
                   <span className="text-dark-100 text-sm">{u.username || `#${u.user_id}`}</span>
                   <Tooltip label={t('common.remove_from_list')}>
                     <button onClick={() => removeFromIgnoreList('ip', u.user_id)} className="p-1.5 hover:bg-danger/20 rounded-lg text-danger transition-colors">
-                      <X className="w-3.5 h-3.5" />
+                      <X className="w-4 h-4" />
                     </button>
                   </Tooltip>
                 </div>
@@ -1923,7 +1923,7 @@ function SettingsTab() {
                   <span className="text-dark-100 text-sm">{u.username || `#${u.user_id}`}</span>
                   <Tooltip label={t('common.remove_from_list')}>
                     <button onClick={() => removeFromIgnoreList('hwid', u.user_id)} className="p-1.5 hover:bg-danger/20 rounded-lg text-danger transition-colors">
-                      <X className="w-3.5 h-3.5" />
+                      <X className="w-4 h-4" />
                     </button>
                   </Tooltip>
                 </div>

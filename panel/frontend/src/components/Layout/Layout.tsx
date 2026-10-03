@@ -105,7 +105,7 @@ function NavBadgePill({ badge }: { badge: NavBadge }) {
   return (
     <Tooltip label={<div className="space-y-0.5">{badge.hints.map(hint => <div key={hint}>{hint}</div>)}</div>} position="right" maxWidth={300}>
       <span className="relative z-10 ml-auto min-w-[1.25rem] h-5 px-1.5 rounded-full bg-accent-500/20 text-accent-300
-                       text-[11px] font-semibold leading-none flex items-center justify-center">
+                       text-2xs font-semibold leading-none flex items-center justify-center">
         {badge.count > MAX_BADGE_COUNT ? `${MAX_BADGE_COUNT}+` : badge.count}
       </span>
     </Tooltip>
@@ -345,7 +345,7 @@ export default function Layout() {
                 <div>
                   <h1 className="font-bold text-dark-100 flex items-center gap-2">
                     {t('common.monitoring')}
-                    <Sparkles className="w-3 h-3 text-accent-400" />
+                    <Sparkles className="w-3.5 h-3.5 text-accent-400" />
                   </h1>
                 </div>
               </motion.div>

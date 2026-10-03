@@ -144,7 +144,7 @@ function ServerCardView({
               <button
                 {...handle?.attributes}
                 {...handle?.listeners}
-                className="p-1.5 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing
+                className="p-1.5 text-dark-500 hover:text-dark-400 cursor-grab active:cursor-grabbing
                            hover:bg-dark-800 rounded-lg transition-colors touch-none"
                 onClick={(e) => e.stopPropagation()}
               >
@@ -156,7 +156,7 @@ function ServerCardView({
                   <h3 className="font-semibold text-dark-400 truncate">
                     {server.name}
                   </h3>
-                  <CopyableIp value={extractHost(server.url)} className="text-xs text-dark-600 font-mono hidden sm:inline" />
+                  <CopyableIp value={extractHost(server.url)} className="text-xs text-dark-500 font-mono hidden sm:inline" />
                   <span className="text-xs px-2 py-0.5 rounded-md bg-dark-700/50 text-dark-500">
                     {t('servers.disabled')}
                   </span>
@@ -164,7 +164,7 @@ function ServerCardView({
               </div>
 
               <div className="flex items-center">
-                <ChevronRight className="w-5 h-5 text-dark-600" />
+                <ChevronRight className="w-5 h-5 text-dark-500" />
               </div>
             </div>
           </div>
@@ -183,7 +183,7 @@ function ServerCardView({
               <button
                 {...handle?.attributes}
                 {...handle?.listeners}
-                className="p-1.5 text-dark-600 hover:text-dark-400 cursor-grab active:cursor-grabbing
+                className="p-1.5 text-dark-500 hover:text-dark-400 cursor-grab active:cursor-grabbing
                            hover:bg-dark-800 rounded-lg transition-colors touch-none"
                 onClick={(e) => e.stopPropagation()}
               >
@@ -194,7 +194,7 @@ function ServerCardView({
                   <h3 className="font-semibold text-dark-400">
                     {server.name}
                   </h3>
-                  <CopyableIp value={extractHost(server.url)} className="text-xs text-dark-600 font-mono" />
+                  <CopyableIp value={extractHost(server.url)} className="text-xs text-dark-500 font-mono" />
                 </div>
               </div>
             </div>
@@ -204,7 +204,7 @@ function ServerCardView({
           </div>
 
           <div className="h-24 flex flex-col items-center justify-center gap-3">
-            <PowerOff className="w-8 h-8 text-dark-600" />
+            <PowerOff className="w-8 h-8 text-dark-500" />
             <span className="text-dark-500 text-sm">{t('servers.monitoring_disabled')}</span>
           </div>
 
@@ -248,8 +248,8 @@ function ServerCardView({
               <div className="hidden sm:flex items-center gap-6 text-sm">
                 {server.status === 'offline' && (
                   <Tooltip label={t('cache.cached')}>
-                    <div className="flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning">
-                      <Database className="w-2.5 h-2.5" />
+                    <div className="flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-2xs text-warning">
+                      <Database className="w-3.5 h-3.5" />
                     </div>
                   </Tooltip>
                 )}
@@ -355,16 +355,16 @@ function ServerCardView({
           <div className="flex items-center gap-2">
             {server.status === 'offline' && metrics && (
               <Tooltip label={server.last_seen ? t('cache.last_update', { time: formatTimeAgo(server.last_seen) }) : t('cache.cached')}>
-                <div className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-[10px] text-warning">
-                  <Database className="w-2.5 h-2.5" />
+                <div className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-2xs text-warning">
+                  <Database className="w-3.5 h-3.5" />
                   <span className="font-medium">{t('cache.cached')}</span>
                 </div>
               </Tooltip>
             )}
             {server.antiddos_emergency_mode && (
               <Tooltip label={t('anti_ddos.mode_emergency')}>
-                <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/25 text-[10px] text-red-400">
-                  <ShieldAlert className="w-2.5 h-2.5" />
+                <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/25 text-2xs text-red-400">
+                  <ShieldAlert className="w-3.5 h-3.5" />
                   <span className="font-medium">{t('anti_ddos.mode_emergency')}</span>
                 </div>
               </Tooltip>
@@ -547,11 +547,11 @@ function ServerCardView({
                       </div>
                       <div className="flex gap-3 text-xs font-mono">
                         <span className="text-success flex items-center gap-1">
-                          <ArrowDownToLine className="w-3 h-3" />
+                          <ArrowDownToLine className="w-3.5 h-3.5" />
                           {formatBytes(server.traffic.rx_bytes)}
                         </span>
                         <span className="text-accent-400 flex items-center gap-1">
-                          <ArrowUpFromLine className="w-3 h-3" />
+                          <ArrowUpFromLine className="w-3.5 h-3.5" />
                           {formatBytes(server.traffic.tx_bytes)}
                         </span>
                       </div>
@@ -624,12 +624,12 @@ function ServerCardView({
               {server.last_error || t('server_card.server_unavailable')}
             </span>
             {server.error_code && (
-              <span className="text-xs text-dark-600 bg-dark-800 px-2 py-0.5 rounded">
+              <span className="text-xs text-dark-500 bg-dark-800 px-2 py-0.5 rounded">
                 {t('server_card.error_code', { code: server.error_code })}
               </span>
             )}
             {server.last_seen && (
-              <span className="text-xs text-dark-600">
+              <span className="text-xs text-dark-500">
                 {t('server_card.last_seen', { time: formatTimeAgo(server.last_seen) })}
               </span>
             )}

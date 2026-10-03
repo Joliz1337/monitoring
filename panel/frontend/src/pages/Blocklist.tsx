@@ -109,9 +109,9 @@ function RulesList({ rules, onDelete, onBulkDelete, emptyMessage }: {
             <Tooltip label={t('common.clear_search')}>
               <button
                 onClick={() => setQuery('')}
-                className="p-0.5 text-dark-400 hover:text-dark-200 transition-colors shrink-0"
+                className="p-1 text-dark-400 hover:text-dark-200 transition-colors shrink-0"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-4 h-4" />
               </button>
             </Tooltip>
           )}
@@ -150,7 +150,7 @@ function RulesList({ rules, onDelete, onBulkDelete, emptyMessage }: {
 
       {filtered.length === 0 ? (
         <div className="text-center py-6">
-          <Search className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+          <Search className="w-8 h-8 text-dark-500 mx-auto mb-2" />
           <p className="text-dark-400 text-sm">{t('blocklist.no_search_results')}</p>
         </div>
       ) : (
@@ -174,9 +174,9 @@ function RulesList({ rules, onDelete, onBulkDelete, emptyMessage }: {
               <Tooltip label={t('common.delete')}>
                 <button
                   onClick={() => onDelete(rule.id)}
-                  className="p-1 text-dark-400 hover:text-danger transition-colors shrink-0"
+                  className="p-1.5 text-dark-400 hover:text-danger transition-colors shrink-0"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
+                  <Trash2 className="w-4 h-4" />
                 </button>
               </Tooltip>
             </div>
@@ -1081,8 +1081,8 @@ export default function Blocklist() {
                           <Server className="w-4 h-4 text-accent-400 shrink-0" />
                           <span className="font-semibold text-dark-100 truncate">{server.name}</span>
                           {!nodeAllows(server, 'ipset', 'write') && (
-                            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-[10px] font-medium shrink-0">
-                              <Lock className="w-3 h-3" />
+                            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-2xs font-medium shrink-0">
+                              <Lock className="w-3.5 h-3.5" />
                               {t('node_caps.row_blocked')}
                             </span>
                           )}
@@ -1092,7 +1092,7 @@ export default function Blocklist() {
                             <div className="flex items-center gap-2 text-xs text-dark-400">
                               <span className="text-blue-400/70">{data.in.length} IN</span>
                               <span className="text-orange-400/70">{data.out.length} OUT</span>
-                              <span className="text-dark-600">|</span>
+                              <span className="text-dark-500">|</span>
                               <span>{data.globalCountIn + data.globalCountOut} G</span>
                             </div>
                           )}
@@ -1365,7 +1365,7 @@ function SourceCard({ source, refreshingSource, onToggle, onRefresh, onDelete, t
             )}
             {source.error_message && (
               <span className="flex items-center gap-1 text-xs text-danger">
-                <AlertCircle className="w-3 h-3" />
+                <AlertCircle className="w-3.5 h-3.5" />
                 {t('common.error')}
               </span>
             )}
@@ -1377,7 +1377,7 @@ function SourceCard({ source, refreshingSource, onToggle, onRefresh, onDelete, t
             rel="noopener noreferrer"
             className="flex items-center gap-1 text-xs text-dark-400 hover:text-accent-400 transition-colors mb-3"
           >
-            <ExternalLink className="w-3 h-3 shrink-0" />
+            <ExternalLink className="w-3.5 h-3.5 shrink-0" />
             <span className="truncate">{source.url}</span>
           </a>
 
@@ -1396,7 +1396,7 @@ function SourceCard({ source, refreshingSource, onToggle, onRefresh, onDelete, t
 
           {!source.error_message && source.ip_count >= LARGE_SOURCE_WARN_THRESHOLD && (
             <p className="flex items-center gap-1 text-xs text-orange-400 mt-2">
-              <AlertCircle className="w-3 h-3 shrink-0" />
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
               {t('blocklist.large_source_ram', { mb: Math.round(source.ip_count / IPSET_ENTRIES_PER_MB) })}
             </p>
           )}

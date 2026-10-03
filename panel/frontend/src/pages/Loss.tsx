@@ -464,7 +464,7 @@ export default function Loss() {
           >
             <ListChecks className="w-4 h-4" /> {t('loss.batch_replace_open')}
           </button>
-          <button onClick={() => setPicked(new Set())} className="ml-auto text-xs text-dark-400 hover:text-dark-200">
+          <button onClick={() => setPicked(new Set())} className="ml-auto btn-tool">
             {t('loss.picked_clear')}
           </button>
         </div>

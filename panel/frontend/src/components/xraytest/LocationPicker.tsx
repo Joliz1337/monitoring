@@ -151,7 +151,7 @@ export function LocationPicker({ servers, value, onChange }: Props) {
                           ? <FolderOpen className="w-4 h-4" />
                           : <Folder className="w-4 h-4" />}
                         {folder}
-                        <span className="text-dark-600">({list.length})</span>
+                        <span className="text-dark-500">({list.length})</span>
                         <ChevronDown
                           className={`w-3.5 h-3.5 transition-transform ${isOpen ? '' : '-rotate-90'}`}
                         />

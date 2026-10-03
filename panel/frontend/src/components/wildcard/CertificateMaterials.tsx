@@ -88,7 +88,7 @@ export default function CertificateMaterials({ certId }: { certId: number }) {
         <span className="text-sm font-medium text-dark-200">{t('wildcard_ssl.materials_title')}</span>
         <span className="text-xs text-dark-500 hidden sm:inline truncate">{t('wildcard_ssl.materials_hint')}</span>
         <ChevronRight className={`w-4 h-4 ml-auto shrink-0 transition-all duration-200 ${
-          open ? 'rotate-90 text-accent-400' : 'text-dark-600 group-hover:text-dark-400'
+          open ? 'rotate-90 text-accent-400' : 'text-dark-500 group-hover:text-dark-400'
         }`} />
       </button>
 
@@ -117,13 +117,13 @@ export default function CertificateMaterials({ certId }: { certId: number }) {
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <div className="min-w-0">
                           <div className="text-xs font-mono text-dark-200">{file.filename}</div>
-                          <div className="text-[11px] text-dark-500">{t(file.hintKey)}</div>
+                          <div className="text-2xs text-dark-500">{t(file.hintKey)}</div>
                         </div>
                         <div className="flex items-center gap-1.5 shrink-0">
                           {file.secret && (
                             <button
                               onClick={() => setKeyRevealed(prev => !prev)}
-                              className="px-2 py-1 rounded-lg text-[11px] text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors flex items-center gap-1"
+                              className="px-2 py-1 rounded-lg text-2xs text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors flex items-center gap-1"
                             >
                               {keyRevealed ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                               {keyRevealed ? t('wildcard_ssl.pem_hide') : t('wildcard_ssl.pem_reveal')}
@@ -132,7 +132,7 @@ export default function CertificateMaterials({ certId }: { certId: number }) {
                           <button
                             onClick={() => handleCopy(file.field, content)}
                             disabled={!content}
-                            className="px-2 py-1 rounded-lg text-[11px] text-dark-400 hover:text-accent-400 hover:bg-dark-700/50 transition-colors disabled:opacity-40 disabled:hover:text-dark-400 flex items-center gap-1"
+                            className="px-2 py-1 rounded-lg text-2xs text-dark-400 hover:text-accent-400 hover:bg-dark-700/50 transition-colors disabled:opacity-40 disabled:hover:text-dark-400 flex items-center gap-1"
                           >
                             {copiedField === file.field
                               ? <Check className="w-3.5 h-3.5 text-green-400" />
@@ -142,7 +142,7 @@ export default function CertificateMaterials({ certId }: { certId: number }) {
                           <button
                             onClick={() => downloadPem(content, filename)}
                             disabled={!content}
-                            className="px-2 py-1 rounded-lg text-[11px] text-dark-400 hover:text-accent-400 hover:bg-dark-700/50 transition-colors disabled:opacity-40 disabled:hover:text-dark-400 flex items-center gap-1"
+                            className="px-2 py-1 rounded-lg text-2xs text-dark-400 hover:text-accent-400 hover:bg-dark-700/50 transition-colors disabled:opacity-40 disabled:hover:text-dark-400 flex items-center gap-1"
                           >
                             <Download className="w-3.5 h-3.5" />
                             {t('wildcard_ssl.pem_download')}
@@ -151,11 +151,11 @@ export default function CertificateMaterials({ certId }: { certId: number }) {
                       </div>
 
                       {!content ? (
-                        <p className="text-[11px] text-dark-600 bg-dark-900/50 rounded-lg px-2.5 py-2">
+                        <p className="text-2xs text-dark-500 bg-dark-900/50 rounded-lg px-2.5 py-2">
                           {t('wildcard_ssl.pem_empty')}
                         </p>
                       ) : (
-                        <pre className={`text-[11px] leading-relaxed font-mono text-dark-400 bg-dark-900/60 rounded-lg px-2.5 py-2 max-h-40 overflow-auto whitespace-pre ${
+                        <pre className={`text-2xs leading-relaxed font-mono text-dark-400 bg-dark-900/60 rounded-lg px-2.5 py-2 max-h-40 overflow-auto whitespace-pre ${
                           hidden ? 'blur-sm select-none' : ''
                         }`}>
                           {content.trim()}
@@ -165,7 +165,7 @@ export default function CertificateMaterials({ certId }: { certId: number }) {
                   )
                 })}
 
-                <p className="text-[11px] text-yellow-300/80 flex items-start gap-1.5">
+                <p className="text-2xs text-yellow-300/80 flex items-start gap-1.5">
                   <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
                   {t('wildcard_ssl.pem_secret_warning')}
                 </p>

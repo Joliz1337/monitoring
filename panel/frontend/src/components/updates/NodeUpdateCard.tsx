@@ -185,7 +185,7 @@ export default function NodeUpdateCard({
       return (
         <Tooltip label={haproxyJob.error || t('updates.haproxy_open_log')} maxWidth={320}>
           <button onClick={onOpenHAProxy} className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md hover:brightness-125 transition ${chip.className}`}>
-            <Icon className={`w-3 h-3 ${chip.spin ? 'animate-spin' : ''}`} />
+            <Icon className={`w-3.5 h-3.5 ${chip.spin ? 'animate-spin' : ''}`} />
             {t(`updates.haproxy_status_${haproxyJob.status}`)}
           </button>
         </Tooltip>
@@ -198,7 +198,7 @@ export default function NodeUpdateCard({
           onClick={onOpenHAProxy}
           className="flex items-center gap-1 px-1.5 py-0.5 rounded-md font-mono text-accent-400 bg-accent-500/10 hover:bg-accent-500/20 transition"
         >
-          <ArrowUpCircle className="w-3 h-3" />
+          <ArrowUpCircle className="w-3.5 h-3.5" />
           {node.haproxyTarget}
         </button>
       </Tooltip>
@@ -319,7 +319,7 @@ export default function NodeUpdateCard({
                 onClick={onOpenProxy}
                 className="flex items-center gap-1.5 text-xs text-warning mt-0.5 max-w-full hover:brightness-125 transition"
               >
-                <Globe className="w-3 h-3 shrink-0" />
+                <Globe className="w-3.5 h-3.5 shrink-0" />
                 <span className="shrink-0">{t('updates.proxy_label')}</span>
                 <span className="font-mono truncate">{node.downloadProxy.urls[0]}</span>
                 {node.downloadProxy.urls.length > 1 && <span className="shrink-0">+{node.downloadProxy.urls.length - 1}</span>}

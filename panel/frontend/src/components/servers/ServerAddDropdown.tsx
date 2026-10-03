@@ -126,7 +126,7 @@ export function ServerAddDropdown({ servers, excludeIds, onAdd, labels, storageK
         <span className="block truncate">{server.name}</span>
         <span className="block text-xs text-dark-500 truncate">{server.url.replace(/^https?:\/\//, '')}</span>
       </span>
-      {isRestricted?.(server) && <Lock className="w-3 h-3 text-purple shrink-0" />}
+      {isRestricted?.(server) && <Lock className="w-3.5 h-3.5 text-purple shrink-0" />}
     </button>
   )
 
@@ -156,9 +156,9 @@ export function ServerAddDropdown({ servers, excludeIds, onAdd, labels, storageK
             <button
               type="button"
               onClick={() => onAdd(list.map(s => s.id))}
-              className="p-1 rounded-md text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors shrink-0"
+              className="p-1.5 rounded-md text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors shrink-0"
             >
-              <Plus className="w-3.5 h-3.5" />
+              <Plus className="w-4 h-4" />
             </button>
           </Tooltip>
         </div>
@@ -202,7 +202,7 @@ export function ServerAddDropdown({ servers, excludeIds, onAdd, labels, storageK
               onClick={e => { e.stopPropagation(); setSearch('') }}
               className="text-dark-500 hover:text-dark-300"
             >
-              <X className="w-3.5 h-3.5" />
+              <X className="w-4 h-4" />
             </button>
           </Tooltip>
         )}

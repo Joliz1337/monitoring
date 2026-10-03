@@ -129,7 +129,7 @@ export default function DownloadProxyModal({ targets, onChanged, onClose }: Prop
                       <span className="text-dark-200">{t(`updates.proxy_source_${entry.source}`)}</span>
                       <span className="font-mono text-xs text-warning truncate">{entry.url}</span>
                     </div>
-                    <div className="font-mono text-[11px] text-dark-500 truncate">{entry.location}</div>
+                    <div className="font-mono text-2xs text-dark-500 truncate">{entry.location}</div>
                   </div>
                 ))}
               </div>

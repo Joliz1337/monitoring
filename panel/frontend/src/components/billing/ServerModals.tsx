@@ -122,7 +122,7 @@ function CredentialFields({ values, setValues, t, server }: {
               placeholder={field.secret && stored ? '••••••••' : field.placeholder}
               className={INPUT_CLASS}
             />
-            <p className="text-[10px] text-dark-500 mt-1">
+            <p className="text-2xs text-dark-500 mt-1">
               {t(field.hintKey)}{' '}
               {field.link && (
                 <a href={field.link.url} target="_blank" rel="noopener noreferrer"
@@ -143,7 +143,7 @@ function CredentialFields({ values, setValues, t, server }: {
           placeholder="0"
           className={INPUT_CLASS}
         />
-        <p className="text-[10px] text-dark-500 mt-1">{t('billing.cloud_threshold_hint')}</p>
+        <p className="text-2xs text-dark-500 mt-1">{t('billing.cloud_threshold_hint')}</p>
       </Field>
       <Field label={`${t('billing.cloud_proxy')} (${t('common.optional')})`}>
         <input
@@ -153,7 +153,7 @@ function CredentialFields({ values, setValues, t, server }: {
           className={INPUT_CLASS}
           autoComplete="off"
         />
-        <p className="text-[10px] text-dark-500 mt-1">{t('billing.cloud_proxy_hint')}</p>
+        <p className="text-2xs text-dark-500 mt-1">{t('billing.cloud_proxy_hint')}</p>
       </Field>
     </>
   )
@@ -195,7 +195,7 @@ function ServerForm({ values, setValues, t, folders, mode, server }: {
                 }`}
               >
                 <div>{t(`billing.type_${bt}`)}</div>
-                <div className={`text-[10px] mt-0.5 ${values.billingType === bt ? 'text-accent-400/60' : 'text-dark-500'}`}>
+                <div className={`text-2xs mt-0.5 ${values.billingType === bt ? 'text-accent-400/60' : 'text-dark-500'}`}>
                   {t(`billing.type_${bt}_hint`)}
                 </div>
               </button>
@@ -291,7 +291,7 @@ function ServerForm({ values, setValues, t, folders, mode, server }: {
             placeholder="0.00"
             className={INPUT_CLASS}
           />
-          <p className="text-[10px] text-dark-500 mt-1">{t('billing.monthly_price_hint')}</p>
+          <p className="text-2xs text-dark-500 mt-1">{t('billing.monthly_price_hint')}</p>
         </Field>
       )}
 
@@ -696,7 +696,7 @@ export function TopupModal({ t, server, onClose, onDone }: {
           {numAmount > 0 && monthlyCost > 0 && (
             <div className="text-xs text-emerald-400/80 bg-emerald-500/10 rounded-lg px-3 py-2 space-y-1">
               <div className="flex items-center gap-1">
-                <Clock className="w-3 h-3" />
+                <Clock className="w-3.5 h-3.5" />
                 ≈ +{Math.round(addedDays)} {t('common.days')}
               </div>
               <PaidTotalHint totalDays={totalDays} t={t} formatDateTime={formatDateTime} />
@@ -825,7 +825,7 @@ export function CloudPlanModal({ t, server, onClose }: {
                 <div className={`text-xs rounded-lg px-3 py-2 space-y-1 ${accent.hintBox}`}>
                   {requiredAmount > 0 ? (
                     <div className="flex items-center gap-1">
-                      <Wallet className="w-3 h-3" />
+                      <Wallet className="w-3.5 h-3.5" />
                       {t('billing.plan_topup')}: <span className="font-semibold">{requiredAmount.toFixed(2)} {currency}</span>
                     </div>
                   ) : (
@@ -834,7 +834,7 @@ export function CloudPlanModal({ t, server, onClose }: {
                   <PaidTotalHint totalDays={lastsDays} labelKey="billing.plan_lasts" t={t} formatDateTime={formatDateTime} />
                 </div>
               )}
-              <p className="text-[11px] text-dark-500">{t('billing.plan_hint')}</p>
+              <p className="text-2xs text-dark-500">{t('billing.plan_hint')}</p>
             </>
           )}
         </div>

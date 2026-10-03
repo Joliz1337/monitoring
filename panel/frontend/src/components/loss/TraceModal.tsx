@@ -210,7 +210,7 @@ export default function TraceModal({ serverId, serverName, target, onClose }: Pr
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-mono text-sm text-dark-100">{hop.host}</span>
                           {hop.owner && (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-accent-500/10 text-accent-300 border border-accent-500/20">{hop.owner}</span>
+                            <span className="px-1.5 py-0.5 rounded text-2xs bg-accent-500/10 text-accent-300 border border-accent-500/20">{hop.owner}</span>
                           )}
                           {isStart && <span className="text-xs text-danger font-medium">{t('loss.trace_starts_here')}</span>}
                         </div>
@@ -234,7 +234,7 @@ export default function TraceModal({ serverId, serverName, target, onClose }: Pr
                       </div>
                       <div className="text-xs text-dark-400 font-mono whitespace-nowrap">
                         {hop.avg_ms != null
-                          ? <>{hop.avg_ms} {t('loss_probe.ms')} <span className="text-dark-600">({hop.best_ms ?? '—'}–{hop.worst_ms ?? '—'})</span></>
+                          ? <>{hop.avg_ms} {t('loss_probe.ms')} <span className="text-dark-500">({hop.best_ms ?? '—'}–{hop.worst_ms ?? '—'})</span></>
                           : '—'}
                       </div>
                     </div>

@@ -165,7 +165,7 @@ export default function BackendEditModal({ ip, port, onClose, onJobStarted }: Pr
             </div>
           )}
 
-          <label className={`flex items-center gap-2 text-xs ${changesPort ? 'text-dark-600' : 'text-dark-300 cursor-pointer'}`}>
+          <label className={`flex items-center gap-2 text-xs ${changesPort ? 'text-dark-500' : 'text-dark-300 cursor-pointer'}`}>
             <Checkbox checked={allPorts} disabled={changesPort} onChange={e => setAllPortsChecked(e.target.checked)} />
             {changesPort ? t('loss.all_ports_port_change') : t('loss.all_ports', { ip })}
           </label>

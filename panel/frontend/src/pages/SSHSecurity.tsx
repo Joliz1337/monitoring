@@ -308,9 +308,9 @@ function PresetCard({ type, icon, iconBg, title, desc, preset, applyingPreset, b
 
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-1.5 text-xs text-dark-500 hover:text-dark-300 transition-colors mb-2 self-start"
+        className="btn-disclosure mb-2 self-start"
       >
-        {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+        {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
         {t('ssh_security.preset_details')}
       </button>
 
@@ -323,14 +323,14 @@ function PresetCard({ type, icon, iconBg, title, desc, preset, applyingPreset, b
             className="overflow-hidden"
           >
             <div className="bg-dark-800/50 rounded-lg p-3 mb-3 text-xs space-y-2">
-              <div className="text-dark-500 font-medium uppercase tracking-wider text-[10px] mb-1">SSH</div>
+              <div className="text-dark-500 font-medium uppercase tracking-wider text-2xs mb-1">SSH</div>
               {sshEntries.map(([key, val]) => (
                 <div key={key} className="flex justify-between items-center">
                   <span className="text-dark-400">{presetKeyLabel(key, t)}</span>
                   <span className="text-dark-200 font-mono">{formatPresetValue(key, val, t)}</span>
                 </div>
               ))}
-              <div className="text-dark-500 font-medium uppercase tracking-wider text-[10px] mt-3 mb-1">Fail2ban</div>
+              <div className="text-dark-500 font-medium uppercase tracking-wider text-2xs mt-3 mb-1">Fail2ban</div>
               {f2bEntries.map(([key, val]) => (
                 <div key={key} className="flex justify-between items-center">
                   <span className="text-dark-400">{presetKeyLabel(key, t)}</span>

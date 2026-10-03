@@ -254,7 +254,7 @@ export default function Dashboard() {
               <>
                 <Zap className="w-3.5 h-3.5 text-accent-500" />
                 <span className="text-accent-400">{t('dashboard.live_mode')}</span>
-                <span className="text-dark-600">•</span>
+                <span className="text-dark-500">•</span>
                 <span>{refreshInterval}s</span>
               </>
             ) : (
@@ -327,7 +327,7 @@ export default function Dashboard() {
         <div className="card text-center py-20 fade-in" key="empty">
           <div>
             <div className="icon-float inline-block">
-              <ServerIcon className="w-20 h-20 text-dark-600 mx-auto mb-6" />
+              <ServerIcon className="w-20 h-20 text-dark-500 mx-auto mb-6" />
             </div>
             <h2 className="text-xl font-semibold text-dark-200 mb-2">{t('dashboard.no_servers')}</h2>
             <p className="text-dark-400 mb-8">{t('dashboard.add_first')}</p>
@@ -339,7 +339,7 @@ export default function Dashboard() {
         </div>
       ) : isFiltering && visibleServers.length === 0 ? (
         <div className="card text-center py-16 fade-in" key="no-results">
-          <Search className="w-12 h-12 text-dark-600 mx-auto mb-3" />
+          <Search className="w-12 h-12 text-dark-500 mx-auto mb-3" />
           <p className="text-dark-400">{t('common.no_results')}</p>
         </div>
       ) : (

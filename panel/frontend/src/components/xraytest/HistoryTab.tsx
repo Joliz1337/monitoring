@@ -95,9 +95,9 @@ export function HistoryTab() {
                   </div>
                   <div className="flex items-center gap-2 text-sm shrink-0">
                     <span className="text-emerald-400">{run.ok}</span>
-                    <span className="text-dark-600">/</span>
+                    <span className="text-dark-500">/</span>
                     <span className="text-amber-400">{run.degraded}</span>
-                    <span className="text-dark-600">/</span>
+                    <span className="text-dark-500">/</span>
                     <span className="text-red-400">{run.fail}</span>
                   </div>
                   <button

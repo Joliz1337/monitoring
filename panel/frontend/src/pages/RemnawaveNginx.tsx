@@ -30,15 +30,15 @@ function SyncStatusBadge({ status, online }: { status: string | null; online?: b
   if (status === 'pending' && online === false) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-dark-300 bg-dark-700/40 border-dark-600/40">
-        <Clock className="w-3 h-3" /> {t('remnawave_nginx.waiting_server')}
+        <Clock className="w-3.5 h-3.5" /> {t('remnawave_nginx.waiting_server')}
       </span>
     )
   }
 
   const map: Record<string, { color: string; icon: React.ReactNode; label: string }> = {
-    synced: { color: 'text-green-400 bg-green-500/10 border-green-500/20', icon: <CheckCircle2 className="w-3 h-3" />, label: t('remnawave_nginx.synced') },
-    pending: { color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20', icon: <Clock className="w-3 h-3" />, label: t('remnawave_nginx.pending') },
-    failed: { color: 'text-red-400 bg-red-500/10 border-red-500/20', icon: <XCircle className="w-3 h-3" />, label: t('remnawave_nginx.failed') },
+    synced: { color: 'text-green-400 bg-green-500/10 border-green-500/20', icon: <CheckCircle2 className="w-3.5 h-3.5" />, label: t('remnawave_nginx.synced') },
+    pending: { color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20', icon: <Clock className="w-3.5 h-3.5" />, label: t('remnawave_nginx.pending') },
+    failed: { color: 'text-red-400 bg-red-500/10 border-red-500/20', icon: <XCircle className="w-3.5 h-3.5" />, label: t('remnawave_nginx.failed') },
   }
   const s = map[status] || map.pending
   return (
@@ -105,7 +105,7 @@ function RuleForm({
         <h4 className="text-sm font-medium text-dark-200 flex items-center gap-2">
           {isEdit ? <><Edit3 className="w-3.5 h-3.5 text-accent-500" /> {t('remnawave_nginx.edit_rule')}</> : <><Plus className="w-3.5 h-3.5 text-accent-500" /> {t('remnawave_nginx.new_rule')}</>}
         </h4>
-        <button onClick={onCancel} className="p-1 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
+        <button onClick={onCancel} className="p-1.5 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
           <X className="w-4 h-4" />
         </button>
       </div>
@@ -137,13 +137,13 @@ function RuleForm({
               <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.service_path')}</label>
               <input type="text" value={form.service_path} onChange={e => setForm(f => ({ ...f, service_path: e.target.value }))}
                 placeholder="trgrpc" className={inp} />
-              <p className="text-[10px] text-dark-500 mt-0.5">{t('remnawave_nginx.service_path_hint')}</p>
+              <p className="text-2xs text-dark-500 mt-0.5">{t('remnawave_nginx.service_path_hint')}</p>
             </div>
             <div>
               <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.xray_port')}</label>
               <input type="number" value={form.port} onChange={e => setForm(f => ({ ...f, port: e.target.value }))}
                 placeholder="8443" className={inp} />
-              <p className="text-[10px] text-dark-500 mt-0.5">{t('remnawave_nginx.xray_port_hint')}</p>
+              <p className="text-2xs text-dark-500 mt-0.5">{t('remnawave_nginx.xray_port_hint')}</p>
             </div>
           </div>
         ) : form.rule_type === 'xhttp' ? (
@@ -152,13 +152,13 @@ function RuleForm({
               <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.xhttp_path')}</label>
               <input type="text" value={form.path} onChange={e => setForm(f => ({ ...f, path: e.target.value }))}
                 placeholder="/api/v2/upload" className={inp} />
-              <p className="text-[10px] text-dark-500 mt-0.5">{t('remnawave_nginx.xhttp_path_hint')}</p>
+              <p className="text-2xs text-dark-500 mt-0.5">{t('remnawave_nginx.xhttp_path_hint')}</p>
             </div>
             <div>
               <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.xray_port')}</label>
               <input type="number" value={form.port} onChange={e => setForm(f => ({ ...f, port: e.target.value }))}
                 placeholder="2081" className={inp} />
-              <p className="text-[10px] text-dark-500 mt-0.5">{t('remnawave_nginx.xray_port_hint')}</p>
+              <p className="text-2xs text-dark-500 mt-0.5">{t('remnawave_nginx.xray_port_hint')}</p>
             </div>
           </div>
         ) : (
@@ -182,7 +182,7 @@ function RuleForm({
           </button>
           <button onClick={() => onSave(form)} disabled={saving}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5">
-            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             {isEdit ? t('common.save') : t('remnawave_nginx.add_rule')}
           </button>
         </div>
@@ -242,7 +242,7 @@ function OptionsSection({
         <label className="block text-xs text-dark-400 mb-1">{t('remnawave_nginx.fallback_url')}</label>
         <input type="text" value={opts.fallback_url} onChange={e => upd({ fallback_url: e.target.value })}
           placeholder="https://example.com" className={`${inp} font-mono text-xs`} spellCheck={false} />
-        <p className="text-[10px] text-dark-500 mt-0.5">{t('remnawave_nginx.fallback_url_hint')}</p>
+        <p className="text-2xs text-dark-500 mt-0.5">{t('remnawave_nginx.fallback_url_hint')}</p>
       </div>
 
       {/* CDN */}
@@ -253,14 +253,14 @@ function OptionsSection({
             <div className="flex items-center justify-between">
               <label className="text-xs text-dark-400">{t('remnawave_nginx.cdn_ranges')}</label>
               <button type="button" onClick={loadCloudflare}
-                className="text-xs text-accent-400 hover:text-accent-300 transition-colors">
+                className="btn-tool btn-tool-accent">
                 {t('remnawave_nginx.cloudflare_defaults')}
               </button>
             </div>
             <textarea value={cdnRangesText} onChange={e => setCdnRangesText(e.target.value)} spellCheck={false}
               placeholder={'173.245.48.0/20\n103.21.244.0/22'} rows={5}
               className="w-full px-3 py-2 rounded-lg bg-dark-950 border border-dark-700 text-dark-200 text-xs font-mono focus:outline-none focus:border-accent-500/50 resize-y" />
-            <p className="text-[10px] text-dark-500">{t('remnawave_nginx.cdn_ranges_hint')}</p>
+            <p className="text-2xs text-dark-500">{t('remnawave_nginx.cdn_ranges_hint')}</p>
           </div>
         )}
       </div>
@@ -280,7 +280,7 @@ function OptionsSection({
               <input type="text" value={opts.haproxy_ip} onChange={e => upd({ haproxy_ip: e.target.value })}
                 placeholder="10.0.0.1" className={inp} />
             </div>
-            <p className="text-[10px] text-dark-500 col-span-2">{t('remnawave_nginx.pp_hint')}</p>
+            <p className="text-2xs text-dark-500 col-span-2">{t('remnawave_nginx.pp_hint')}</p>
           </div>
         )}
       </div>
@@ -292,13 +292,13 @@ function OptionsSection({
           <Toggle value={opts.acme_enabled} onChange={v => upd({ acme_enabled: v })} label={t('remnawave_nginx.acme')} />
           <Toggle value={opts.reject_default_server} onChange={v => upd({ reject_default_server: v })} label={t('remnawave_nginx.reject_default')} />
         </div>
-        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.acme_hint')}</p>
+        <p className="text-2xs text-dark-500">{t('remnawave_nginx.acme_hint')}</p>
       </div>
 
       {/* TLS и соединения */}
       <div className="space-y-2">
         <Toggle value={opts.tls_session_tickets} onChange={v => upd({ tls_session_tickets: v })} label={t('remnawave_nginx.tls_session_tickets')} />
-        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.tls_session_tickets_hint')}</p>
+        <p className="text-2xs text-dark-500">{t('remnawave_nginx.tls_session_tickets_hint')}</p>
         <Toggle value={opts.client_tcp_keepalive !== ''} onChange={v => upd({ client_tcp_keepalive: v ? DEFAULT_CLIENT_KEEPALIVE : '' })} label={t('remnawave_nginx.client_keepalive')} />
         {opts.client_tcp_keepalive !== '' && (
           <div className="pl-2 border-l-2 border-dark-700/40">
@@ -307,9 +307,9 @@ function OptionsSection({
               placeholder={DEFAULT_CLIENT_KEEPALIVE} className={`${inp} font-mono text-xs`} spellCheck={false} />
           </div>
         )}
-        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.client_keepalive_hint')}</p>
+        <p className="text-2xs text-dark-500">{t('remnawave_nginx.client_keepalive_hint')}</p>
         <Toggle value={opts.access_log_enabled} onChange={v => upd({ access_log_enabled: v })} label={t('remnawave_nginx.access_log')} />
-        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.access_log_hint')}</p>
+        <p className="text-2xs text-dark-500">{t('remnawave_nginx.access_log_hint')}</p>
       </div>
 
       {/* Wildcard-домен: один на все ноды профиля */}
@@ -317,7 +317,7 @@ function OptionsSection({
         <label className="block text-xs text-dark-400">{t('remnawave_nginx.wildcard_domain')}</label>
         <input type="text" value={opts.wildcard_domain} onChange={e => upd({ wildcard_domain: e.target.value })}
           placeholder="example.com" className={`${inp} font-mono text-xs`} spellCheck={false} />
-        <p className="text-[10px] text-dark-500">{t('remnawave_nginx.wildcard_domain_hint')}</p>
+        <p className="text-2xs text-dark-500">{t('remnawave_nginx.wildcard_domain_hint')}</p>
         {opts.wildcard_domain.trim() !== '' && (
           <div className="flex items-start gap-2 px-3 py-2 rounded-lg text-xs text-yellow-400 bg-yellow-500/10 border border-yellow-500/20">
             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
@@ -346,7 +346,7 @@ function OptionsSection({
         </div>
         <button onClick={handleSave} disabled={saving}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50">
-          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />} {t('remnawave_nginx.apply_options')}
+          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />} {t('remnawave_nginx.apply_options')}
         </button>
       </div>
     </div>
@@ -381,12 +381,12 @@ function ProfileCard({
           <div className="flex items-center gap-1.5 text-xs text-dark-400"><Server className="w-3.5 h-3.5" /><span>{profile.linked_servers_count}</span></div>
           {allSynced && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-green-400 bg-green-500/10 border-green-500/20">
-              <CheckCircle2 className="w-3 h-3" /> {t('remnawave_nginx.all_synced')}
+              <CheckCircle2 className="w-3.5 h-3.5" /> {t('remnawave_nginx.all_synced')}
             </span>
           )}
           {hasUnsync && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-yellow-400 bg-yellow-500/10 border-yellow-500/20">
-              <AlertCircle className="w-3 h-3" /> {profile.linked_servers_count - profile.synced_servers_count} {t('remnawave_nginx.out_of_sync')}
+              <AlertCircle className="w-3.5 h-3.5" /> {profile.linked_servers_count - profile.synced_servers_count} {t('remnawave_nginx.out_of_sync')}
             </span>
           )}
           <Tooltip label={t('common.edit')}>
@@ -711,7 +711,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
       <span className="flex items-center gap-2">
         <Server className="w-3.5 h-3.5 text-dark-400" />{s.name}
         {s.detected && (
-          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-500/10 text-green-400 border border-green-500/20">
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-2xs font-medium bg-green-500/10 text-green-400 border border-green-500/20">
             {t('remnawave_nginx.detected')}
           </span>
         )}
@@ -816,25 +816,25 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         <span className="text-sm text-dark-200 font-medium">{r.name}</span>
                         {r.rule_type === 'grpc' ? (
                           <>
-                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">gRPC</span>
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-2xs font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">gRPC</span>
                             <span className="text-xs text-dark-500 truncate">{grpcLocationPath(r.service_path ?? '')} → 127.0.0.1:{r.port}</span>
                           </>
                         ) : r.rule_type === 'xhttp' ? (
                           <>
-                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">XHTTP</span>
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-2xs font-medium bg-accent-500/10 text-accent-400 border border-accent-500/20">XHTTP</span>
                             <span className="text-xs text-dark-500 truncate">{r.path} → 127.0.0.1:{r.port}</span>
                           </>
                         ) : (
                           <>
-                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-dark-700/60 text-dark-300 border border-dark-600/40">PROXY</span>
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-2xs font-medium bg-dark-700/60 text-dark-300 border border-dark-600/40">PROXY</span>
                             <span className="text-xs text-dark-500 truncate">{r.path} → {r.target_url}</span>
                           </>
                         )}
                       </div>
-                      <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex items-center gap-1 shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
                         <Tooltip label={t('common.delete')}>
                           <button onClick={e => { e.stopPropagation(); handleDeleteRule(r.name) }} className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors">
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </Tooltip>
                       </div>
@@ -909,7 +909,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                             {linkedDetectedServers.map(s => (
                               <button key={s.id} onClick={() => handleImportFromNode(s.id)} disabled={importing}
                                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-dark-200 bg-dark-800 hover:bg-dark-700 border border-dark-700 transition-colors disabled:opacity-50">
-                                {importing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Server className="w-3 h-3 text-dark-400" />} {s.name}
+                                {importing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Server className="w-3.5 h-3.5 text-dark-400" />} {s.name}
                               </button>
                             ))}
                           </div>
@@ -983,12 +983,12 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         <span className="text-xs text-dark-300 flex items-center gap-2">
                           <Server className="w-3.5 h-3.5 text-dark-400" /> {linkingServer.name}
                         </span>
-                        <button onClick={() => { setLinkingServer(null); setLinkDomain('') }} className="p-1 text-dark-400 hover:text-dark-200"><X className="w-3.5 h-3.5" /></button>
+                        <button onClick={() => { setLinkingServer(null); setLinkDomain('') }} className="p-1.5 text-dark-400 hover:text-dark-200"><X className="w-4 h-4" /></button>
                       </div>
                       {wildcardDomain ? (
                         <div className="flex items-center justify-between gap-2">
                           <span className="flex items-center gap-1.5 text-xs text-dark-400">
-                            <Globe className="w-3 h-3" />
+                            <Globe className="w-3.5 h-3.5" />
                             {t('remnawave_nginx.wildcard_link_hint', { domain: wildcardDomain })}
                           </span>
                           <button onClick={handleLinkServer} autoFocus
@@ -1009,11 +1009,11 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                               {t('remnawave_nginx.link')}
                             </button>
                           </div>
-                          <p className="text-[10px] text-dark-500">{t('remnawave_nginx.node_domain_hint')}</p>
+                          <p className="text-2xs text-dark-500">{t('remnawave_nginx.node_domain_hint')}</p>
                         </>
                       )}
-                      <div className="flex items-start gap-2 px-2.5 py-2 rounded-lg text-[10px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/20">
-                        <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> {t('remnawave_nginx.link_replaces_config_warning')}
+                      <div className="flex items-start gap-2 px-2.5 py-2 rounded-lg text-2xs text-yellow-400 bg-yellow-500/10 border border-yellow-500/20">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" /> {t('remnawave_nginx.link_replaces_config_warning')}
                       </div>
                     </div>
                   ) : (
@@ -1065,21 +1065,21 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                       )}
                       {wildcardDomain ? (
                         <span className="flex items-center gap-1 text-xs font-mono text-dark-400">
-                          <Globe className="w-3 h-3" /> *.{wildcardDomain}
+                          <Globe className="w-3.5 h-3.5" /> *.{wildcardDomain}
                         </span>
                       ) : editingDomainId === s.server_id ? (
                         <span className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                           <input type="text" value={domainEdit} onChange={e => setDomainEdit(e.target.value)}
                             onKeyDown={e => { if (e.key === 'Enter') handleSaveDomain(s.server_id); if (e.key === 'Escape') setEditingDomainId(null) }}
                             className="px-2 py-0.5 rounded bg-dark-800 border border-accent-500/50 text-dark-100 text-xs font-mono focus:outline-none w-48" autoFocus />
-                          <button onClick={() => handleSaveDomain(s.server_id)} className="p-1 text-green-400 hover:text-green-300"><CheckCircle2 className="w-3.5 h-3.5" /></button>
-                          <button onClick={() => setEditingDomainId(null)} className="p-1 text-dark-400 hover:text-dark-200"><X className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => handleSaveDomain(s.server_id)} className="p-1.5 text-green-400 hover:text-green-300"><CheckCircle2 className="w-4 h-4" /></button>
+                          <button onClick={() => setEditingDomainId(null)} className="p-1.5 text-dark-400 hover:text-dark-200"><X className="w-4 h-4" /></button>
                         </span>
                       ) : (
                         <button onClick={() => { setEditingDomainId(s.server_id); setDomainEdit(s.domain || '') }}
                           className="flex items-center gap-1 text-xs font-mono text-dark-400 hover:text-dark-200 transition-colors group/domain">
-                          <Globe className="w-3 h-3" /> {s.domain || t('remnawave_nginx.no_domain')}
-                          <Edit3 className="w-2.5 h-2.5 opacity-0 group-hover/domain:opacity-100 transition-opacity" />
+                          <Globe className="w-3.5 h-3.5" /> {s.domain || t('remnawave_nginx.no_domain')}
+                          <Edit3 className="w-3.5 h-3.5 opacity-0 group-hover/domain:opacity-100 transition-opacity" />
                         </button>
                       )}
                       <SyncStatusBadge status={s.sync_status} online={s.online} />
@@ -1089,20 +1089,20 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         <Tooltip label={t('remnawave_nginx.restart_container')}>
                           <button onClick={() => handleRestartNode(s.server_id)} disabled={restartingServerId === s.server_id}
                             className="p-1.5 rounded-lg text-dark-400 hover:text-yellow-400 hover:bg-yellow-500/10 transition-colors disabled:opacity-50">
-                            {restartingServerId === s.server_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Power className="w-3.5 h-3.5" />}
+                            {restartingServerId === s.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
                           </button>
                         </Tooltip>
                       )}
                       <Tooltip label={t('remnawave_nginx.sync_server')}>
                         <button onClick={() => handleSyncOne(s.server_id)} disabled={syncingServerId === s.server_id}
                           className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors">
-                          {syncingServerId === s.server_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCw className="w-3.5 h-3.5" />}
+                          {syncingServerId === s.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCw className="w-4 h-4" />}
                         </button>
                       </Tooltip>
                       <Tooltip label={t('remnawave_nginx.unlink_server')}>
                         <button onClick={() => handleUnlinkServer(s.server_id)}
                           className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors">
-                          <Unlink className="w-3.5 h-3.5" />
+                          <Unlink className="w-4 h-4" />
                         </button>
                       </Tooltip>
                     </div>
@@ -1126,7 +1126,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                     {syncLog.map(entry => (
                       <div key={entry.id} className="flex items-center justify-between text-xs px-2 py-1.5 rounded bg-dark-800/50">
                         <div className="flex items-center gap-2 min-w-0">
-                          {entry.status === 'success' ? <CheckCircle2 className="w-3 h-3 text-green-400 shrink-0" /> : <XCircle className="w-3 h-3 text-red-400 shrink-0" />}
+                          {entry.status === 'success' ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" /> : <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />}
                           <span className="text-dark-300 truncate">{entry.server_name}</span>
                           {entry.message && <span className="text-dark-500 truncate hidden sm:block">— {entry.message}</span>}
                         </div>

@@ -39,13 +39,13 @@ export default function NodeRow({ node, open, onToggleOpen, minNodeVersion }: Pr
         <span className={`w-2 h-2 rounded-full shrink-0 ${node.online ? 'bg-green-400 animate-pulse' : 'bg-dark-600'}`} />
         <div className="min-w-[160px]">
           <div className="text-sm text-dark-100">{node.name}</div>
-          <div className="text-[11px] text-dark-500">{node.node_version ? `v${node.node_version}` : '—'}</div>
+          <div className="text-2xs text-dark-500">{node.node_version ? `v${node.node_version}` : '—'}</div>
         </div>
         <InstallBadge status={status} hint={hint} />
 
         <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[200px] text-sm text-dark-300">
           {node.enabled && node.check_in_progress && (
-            <span className="inline-flex items-center gap-1 text-xs text-dark-400"><Loader2 className="w-3 h-3 animate-spin" />{t('exit_proxy.checking')}</span>
+            <span className="inline-flex items-center gap-1 text-xs text-dark-400"><Loader2 className="w-3.5 h-3.5 animate-spin" />{t('exit_proxy.checking')}</span>
           )}
           {node.enabled && node.current_exit && (
             <>
@@ -54,7 +54,7 @@ export default function NodeRow({ node, open, onToggleOpen, minNodeVersion }: Pr
               {node.current_exit.country && <span>{getFlag(node.current_exit.country)} {node.current_exit.country}</span>}
               <HealthBadge healthy={node.current_exit.healthy} />
               <SelfTestBadge ok={node.self_test ? node.self_test.ok : null} />
-              <span className="text-[11px] text-dark-500">{t('exit_proxy.connections', { count: node.stats.active_connections })}</span>
+              <span className="text-2xs text-dark-500">{t('exit_proxy.connections', { count: node.stats.active_connections })}</span>
             </>
           )}
           {!node.enabled && <span className="text-xs text-dark-500">—</span>}

@@ -109,29 +109,29 @@ function syncStatusBadge(status: DnatSyncStatus, t: TranslateFn) {
     pending: {
       color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20',
       label: t('dnat_profiles.status_pending'),
-      icon: <Clock className="w-3 h-3" />,
+      icon: <Clock className="w-3.5 h-3.5" />,
     },
     synced: {
       color: 'text-green-400 bg-green-500/10 border-green-500/20',
       label: t('dnat_profiles.status_synced'),
-      icon: <CheckCircle2 className="w-3 h-3" />,
+      icon: <CheckCircle2 className="w-3.5 h-3.5" />,
     },
     failed: {
       color: 'text-red-400 bg-red-500/10 border-red-500/20',
       label: t('dnat_profiles.status_failed'),
-      icon: <XCircle className="w-3 h-3" />,
+      icon: <XCircle className="w-3.5 h-3.5" />,
     },
     denied: {
       color: 'text-purple bg-purple/10 border-purple/20',
       label: t('node_caps.status_denied'),
-      icon: <Lock className="w-3 h-3" />,
+      icon: <Lock className="w-3.5 h-3.5" />,
     },
   }
   const s = status ? map[status] : null
   if (!s) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-dark-400 bg-dark-700/30 border-dark-600/40">
-        <Clock className="w-3 h-3" /> —
+        <Clock className="w-3.5 h-3.5" /> —
       </span>
     )
   }
@@ -218,7 +218,7 @@ function RuleForm({
                 ? <><Copy className="w-3.5 h-3.5 text-accent-400" /> {t('dnat_profiles.clone_rule_title', { name: cloneOf })}</>
                 : <><Plus className="w-3.5 h-3.5 text-accent-400" /> {t('dnat_profiles.new_rule')}</>}
           </h4>
-          <button onClick={onCancel} className="p-1 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
+          <button onClick={onCancel} className="p-1.5 hover:bg-dark-700 rounded-lg text-dark-400 transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -285,7 +285,7 @@ function RuleForm({
               placeholder="10.0.0.2, 10.0.0.3"
               className={inputCls}
             />
-            <p className="text-[11px] text-dark-500 mt-1">{t('dnat_profiles.target_ip_hint')}</p>
+            <p className="text-2xs text-dark-500 mt-1">{t('dnat_profiles.target_ip_hint')}</p>
           </div>
           {splitTargets(form.target_ip).length > 1 && (
             <div className="col-span-2 sm:col-span-4">
@@ -293,7 +293,7 @@ function RuleForm({
               <select value={form.distribution} onChange={e => update({ distribution: e.target.value as DnatDistribution })} className={inputCls}>
                 {DISTRIBUTION_OPTIONS.map(d => <option key={d} value={d}>{t(`dnat_profiles.distribution_${d}`)}</option>)}
               </select>
-              <p className="text-[11px] text-dark-500 mt-1">{t(`dnat_profiles.distribution_${form.distribution}_hint`)}</p>
+              <p className="text-2xs text-dark-500 mt-1">{t(`dnat_profiles.distribution_${form.distribution}_hint`)}</p>
             </div>
           )}
           <div>
@@ -307,7 +307,7 @@ function RuleForm({
               placeholder="0"
               className={inputCls}
             />
-            <p className="text-[11px] text-dark-500 mt-1">{t('dnat_profiles.target_port_hint')}</p>
+            <p className="text-2xs text-dark-500 mt-1">{t('dnat_profiles.target_port_hint')}</p>
           </div>
 
           <div className="col-span-2 sm:col-span-4">
@@ -348,7 +348,7 @@ function RuleForm({
             disabled={saving}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
           >
-            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             {isEdit ? t('common.save') : t('common.add')}
           </button>
         </div>
@@ -497,7 +497,7 @@ function ProfileListItem({
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <span className="inline-flex items-center gap-1 text-xs text-dark-400">
-            <Server className="w-3 h-3" /> {synced}/{linked}
+            <Server className="w-3.5 h-3.5" /> {synced}/{linked}
           </span>
           {hasUnsync && (
             <Tooltip label={t('dnat_profiles.has_unsynced')}>
@@ -567,7 +567,7 @@ function ProfileHeader({
             disabled={saving}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
           >
-            {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+            {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
             {t('common.save')}
           </button>
         </div>
@@ -585,7 +585,7 @@ function ProfileHeader({
               onClick={() => setEditing(true)}
               className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-800 transition-colors"
             >
-              <Edit3 className="w-3.5 h-3.5" />
+              <Edit3 className="w-4 h-4" />
             </button>
           </Tooltip>
         </div>
@@ -751,32 +751,32 @@ function RulesTab({
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         {!rule.enabled && (
-                          <span className="px-2 py-0.5 rounded-md text-[11px] bg-dark-700/50 text-dark-400 border border-dark-600/40">
+                          <span className="px-2 py-0.5 rounded-md text-2xs bg-dark-700/50 text-dark-400 border border-dark-600/40">
                             {t('dnat_profiles.disabled_badge')}
                           </span>
                         )}
                         {!rule.masquerade && (
                           <Tooltip label={t('dnat_profiles.masquerade_hint')} maxWidth={360}>
-                            <span className="px-2 py-0.5 rounded-md text-[11px] bg-warning/10 text-warning border border-warning/20">
+                            <span className="px-2 py-0.5 rounded-md text-2xs bg-warning/10 text-warning border border-warning/20">
                               {t('dnat_profiles.no_masq_badge')}
                             </span>
                           </Tooltip>
                         )}
                         {rule.mask_ttl && (
                           <Tooltip label={t('dnat_profiles.mask_ttl_hint')} maxWidth={380}>
-                            <span className="px-2 py-0.5 rounded-md text-[11px] bg-dark-700/60 text-dark-200 border border-dark-600/50">
+                            <span className="px-2 py-0.5 rounded-md text-2xs bg-dark-700/60 text-dark-200 border border-dark-600/50">
                               {t('dnat_profiles.mask_ttl_badge')}
                             </span>
                           </Tooltip>
                         )}
                         {splitTargets(rule.target_ip).length > 1 && (
                           <Tooltip label={t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}_hint`)} maxWidth={360}>
-                            <span className="px-2 py-0.5 rounded-md text-[11px] bg-accent-500/10 text-accent-400 border border-accent-500/20">
+                            <span className="px-2 py-0.5 rounded-md text-2xs bg-accent-500/10 text-accent-400 border border-accent-500/20">
                               {t('dnat_profiles.balancer_badge', { count: splitTargets(rule.target_ip).length })} · {t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}`)}
                             </span>
                           </Tooltip>
                         )}
-                        {rule.enabled && rule.masquerade && !rule.mask_ttl && splitTargets(rule.target_ip).length <= 1 && <span className="text-dark-600">—</span>}
+                        {rule.enabled && rule.masquerade && !rule.mask_ttl && splitTargets(rule.target_ip).length <= 1 && <span className="text-dark-500">—</span>}
                       </div>
                     </td>
                     <td className="px-3 py-2 text-dark-400 truncate max-w-xs">{rule.comment || '—'}</td>
@@ -787,7 +787,7 @@ function RulesTab({
                             onClick={() => toggleEnabled(index, rule)}
                             className={`p-1.5 rounded-lg transition-colors ${rule.enabled ? 'text-green-400 hover:bg-green-500/10' : 'text-dark-500 hover:text-dark-300 hover:bg-dark-700/50'}`}
                           >
-                            {rule.enabled ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                            {rule.enabled ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
                           </button>
                         </Tooltip>
                         <Tooltip label={t('common.edit')}>
@@ -795,7 +795,7 @@ function RulesTab({
                             onClick={() => openEdit(index)}
                             className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors"
                           >
-                            <Edit3 className="w-3.5 h-3.5" />
+                            <Edit3 className="w-4 h-4" />
                           </button>
                         </Tooltip>
                         <Tooltip label={t('dnat_profiles.clone_rule')}>
@@ -803,7 +803,7 @@ function RulesTab({
                             onClick={() => openClone(index)}
                             className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors"
                           >
-                            <Copy className="w-3.5 h-3.5" />
+                            <Copy className="w-4 h-4" />
                           </button>
                         </Tooltip>
                         <Tooltip label={t('common.delete')}>
@@ -813,7 +813,7 @@ function RulesTab({
                             }}
                             className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </Tooltip>
                       </div>
@@ -1059,7 +1059,7 @@ function ServersTab({
                     {Object.keys(srv.targets ?? {}).length > 0 && (
                       <div className="flex flex-wrap gap-1 mt-1">
                         {Object.entries(srv.targets).map(([ruleName, ip]) => (
-                          <span key={ruleName} className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-accent-500/10 text-accent-300 border border-accent-500/20">
+                          <span key={ruleName} className="px-1.5 py-0.5 rounded text-2xs font-mono bg-accent-500/10 text-accent-300 border border-accent-500/20">
                             {ruleName} → {ip}
                           </span>
                         ))}
@@ -1078,7 +1078,7 @@ function ServersTab({
                       disabled={syncingServerId === srv.server_id}
                       className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors disabled:opacity-50"
                     >
-                      {syncingServerId === srv.server_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                      {syncingServerId === srv.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                     </button>
                   </Tooltip>
                   <Tooltip label={t('dnat_profiles.unlink')}>
@@ -1088,7 +1088,7 @@ function ServersTab({
                       }}
                       className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
                     >
-                      <Unlink className="w-3.5 h-3.5" />
+                      <Unlink className="w-4 h-4" />
                     </button>
                   </Tooltip>
                 </div>
@@ -1603,7 +1603,7 @@ export default function DnatProfiles() {
           {openProfileIds.length === 0 ? (
             <div className="card">
               <div className="flex flex-col items-center justify-center py-16 text-dark-500">
-                <RouteIcon className="w-10 h-10 mb-3 text-dark-600" />
+                <RouteIcon className="w-10 h-10 mb-3 text-dark-500" />
                 <p className="text-sm">{t('dnat_profiles.select_profile')}</p>
               </div>
             </div>

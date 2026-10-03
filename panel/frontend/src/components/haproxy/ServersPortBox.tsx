@@ -54,7 +54,7 @@ export default function ServersPortBox({
     <div className="p-3 mb-2 bg-dark-900/40 rounded-lg border border-dark-700/40 space-y-3">
       <div className="flex flex-wrap items-end gap-3">
         <div>
-          <span className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.port_change_scope')}</span>
+          <span className="block text-2xs text-dark-500 mb-0.5">{t('balancer.port_change_scope')}</span>
           <div className="inline-flex rounded-lg border border-dark-700 overflow-hidden">
             {PORT_CHANGE_MODES.map(option => (
               <button key={option} type="button" onClick={() => setMode(option)}
@@ -66,14 +66,14 @@ export default function ServersPortBox({
         </div>
         {mode === 'one' && (
           <label className="w-24">
-            <span className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.port_from')}</span>
+            <span className="block text-2xs text-dark-500 mb-0.5">{t('balancer.port_from')}</span>
             <input type="number" value={fromPort} onChange={e => setFromPort(e.target.value)}
               placeholder="443" min={1} max={MAX_PORT}
               className={`${inp} ${fromPort && source === null ? 'border-red-500/60' : ''}`} />
           </label>
         )}
         <label className="w-24">
-          <span className="block text-[10px] text-dark-500 mb-0.5">{t('balancer.port_to')}</span>
+          <span className="block text-2xs text-dark-500 mb-0.5">{t('balancer.port_to')}</span>
           <input type="number" value={toPort} onChange={e => setToPort(e.target.value)} autoFocus
             placeholder="8443" min={1} max={MAX_PORT}
             className={`${inp} ${toPort && target === null ? 'border-red-500/60' : ''}`} />
@@ -82,10 +82,10 @@ export default function ServersPortBox({
 
       {mode === 'one' && ports.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] text-dark-500">{t('balancer.port_in_list')}</span>
+          <span className="text-2xs text-dark-500">{t('balancer.port_in_list')}</span>
           {ports.map(({ port, count }) => (
             <button key={port} type="button" onClick={() => setFromPort(String(port))}
-              className={`px-2 py-0.5 rounded-md text-[11px] font-mono border transition-colors ${source === port
+              className={`px-2 py-0.5 rounded-md text-2xs font-mono border transition-colors ${source === port
                 ? 'border-accent-500/60 text-accent-300 bg-accent-500/10'
                 : 'border-dark-700 text-dark-300 bg-dark-800 hover:text-dark-100'}`}>
               {port} <span className="text-dark-500">×{count}</span>
@@ -94,9 +94,9 @@ export default function ServersPortBox({
         </div>
       )}
 
-      <p className="text-[10px] text-dark-500">{t('balancer.port_change_hint')}</p>
+      <p className="text-2xs text-dark-500">{t('balancer.port_change_hint')}</p>
       {target !== null && (
-        <p className="text-[10px] text-dark-400">{t('balancer.port_change_summary', { count: changed, total: servers.length })}</p>
+        <p className="text-2xs text-dark-400">{t('balancer.port_change_summary', { count: changed, total: servers.length })}</p>
       )}
 
       <div className="flex flex-wrap justify-end gap-2">

@@ -79,9 +79,9 @@ function ReloadCmdField({
         />
       </div>
       {!value ? (
-        <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_empty_hint')}</p>
+        <p className="text-2xs text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_empty_hint')}</p>
       ) : (
-        <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_hint')}</p>
+        <p className="text-2xs text-dark-500 mt-1">{t('wildcard_ssl.reload_cmd_hint')}</p>
       )}
     </div>
   )
@@ -247,7 +247,7 @@ function ServerCard({
             <Lock className="w-3.5 h-3.5 text-purple shrink-0 ml-2" />
           )}
           <ChevronRight className={`w-4 h-4 shrink-0 transition-all duration-200 ${
-            expanded ? 'rotate-90 text-accent-400' : 'text-dark-600 group-hover:text-dark-400'
+            expanded ? 'rotate-90 text-accent-400' : 'text-dark-500 group-hover:text-dark-400'
           }`} />
         </button>
 
@@ -280,7 +280,7 @@ function ServerCard({
               <div className="flex items-center justify-between gap-3 px-1">
                 <div className="min-w-0">
                   <div className="text-xs text-dark-300 font-medium">{t('wildcard_ssl.custom_path_mode')}</div>
-                  <div className="text-[11px] text-dark-500 mt-0.5">{t('wildcard_ssl.custom_path_hint')}</div>
+                  <div className="text-2xs text-dark-500 mt-0.5">{t('wildcard_ssl.custom_path_hint')}</div>
                 </div>
                 <button
                   type="button"
@@ -308,9 +308,9 @@ function ServerCard({
                         className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500"
                       />
                       {!localPath ? (
-                        <p className="text-[11px] text-accent-400/70 mt-1">{t('wildcard_ssl.deploy_path_default')}</p>
+                        <p className="text-2xs text-accent-400/70 mt-1">{t('wildcard_ssl.deploy_path_default')}</p>
                       ) : (
-                        <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.deploy_path_hint')}</p>
+                        <p className="text-2xs text-dark-500 mt-1">{t('wildcard_ssl.deploy_path_hint')}</p>
                       )}
                     </div>
                     <ReloadCmdField
@@ -333,7 +333,7 @@ function ServerCard({
                         placeholder={DEFAULT_FULLCHAIN_NAME}
                         className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono"
                       />
-                      <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.fullchain_filename_hint')}</p>
+                      <p className="text-2xs text-dark-500 mt-1">{t('wildcard_ssl.fullchain_filename_hint')}</p>
                     </div>
                     <div>
                       <label className="block text-xs text-dark-400 mb-1">{t('wildcard_ssl.privkey_filename')}</label>
@@ -344,7 +344,7 @@ function ServerCard({
                         placeholder={DEFAULT_PRIVKEY_NAME}
                         className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono"
                       />
-                      <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.privkey_filename_hint')}</p>
+                      <p className="text-2xs text-dark-500 mt-1">{t('wildcard_ssl.privkey_filename_hint')}</p>
                     </div>
                   </div>
                 </>
@@ -359,7 +359,7 @@ function ServerCard({
                       placeholder="/etc/pve/local/pveproxy-ssl.pem"
                       className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono"
                     />
-                    <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.custom_fullchain_path_hint')}</p>
+                    <p className="text-2xs text-dark-500 mt-1">{t('wildcard_ssl.custom_fullchain_path_hint')}</p>
                   </div>
                   <div>
                     <label className="block text-xs text-dark-400 mb-1">{t('wildcard_ssl.custom_privkey_path')}</label>
@@ -370,7 +370,7 @@ function ServerCard({
                       placeholder="/etc/pve/local/pveproxy-ssl.key"
                       className="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500 font-mono"
                     />
-                    <p className="text-[11px] text-dark-500 mt-1">{t('wildcard_ssl.custom_privkey_path_hint')}</p>
+                    <p className="text-2xs text-dark-500 mt-1">{t('wildcard_ssl.custom_privkey_path_hint')}</p>
                   </div>
                   <div className="sm:col-span-2">
                     <ReloadCmdField
@@ -386,7 +386,7 @@ function ServerCard({
                 </div>
               )}
 
-              <p className="text-[11px] text-dark-600 font-mono bg-dark-900/50 px-2.5 py-1.5 rounded-lg break-all">
+              <p className="text-2xs text-dark-500 font-mono bg-dark-900/50 px-2.5 py-1.5 rounded-lg break-all">
                 ssl_certificate {previewFullchain};<br />
                 ssl_certificate_key {previewPrivkey};
               </p>
@@ -560,7 +560,7 @@ function WildcardBulkEditForm({
           })}
         </div>
 
-        <p className="text-[11px] text-dark-500">{t('wildcard_ssl.bulk_field_clear_hint')}</p>
+        <p className="text-2xs text-dark-500">{t('wildcard_ssl.bulk_field_clear_hint')}</p>
 
         <div className="flex justify-end">
           <button
@@ -1329,7 +1329,7 @@ export default function WildcardSSL() {
                   onChange={toggleSelectAllVisible}
                 />
                 {t('wildcard_ssl.select_all')}
-                <span className="text-dark-600">({filteredServers.length})</span>
+                <span className="text-dark-500">({filteredServers.length})</span>
               </label>
             </div>
 
@@ -1347,8 +1347,8 @@ export default function WildcardSSL() {
                       {t('wildcard_ssl.bulk_selected', { count: selectedIds.length })}
                     </span>
                     {blockedCount > 0 && (
-                      <span className="text-[11px] text-purple flex items-center gap-1">
-                        <Lock className="w-3 h-3" />
+                      <span className="text-2xs text-purple flex items-center gap-1">
+                        <Lock className="w-3.5 h-3.5" />
                         {t('wildcard_ssl.bulk_deploy_blocked', { count: blockedCount })}
                       </span>
                     )}
@@ -1391,7 +1391,7 @@ export default function WildcardSSL() {
                       <Settings2 className="w-3.5 h-3.5" />
                       {t('wildcard_ssl.bulk_edit')}
                     </button>
-                    <button onClick={clearSelection} className="p-1 text-dark-400 hover:text-dark-200 transition-colors">
+                    <button onClick={clearSelection} className="p-1.5 text-dark-400 hover:text-dark-200 transition-colors">
                       <X className="w-4 h-4" />
                     </button>
                   </div>
@@ -1427,7 +1427,7 @@ export default function WildcardSSL() {
 
             {filteredServers.length === 0 ? (
               <div className="text-center py-6">
-                <Search className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                <Search className="w-8 h-8 text-dark-500 mx-auto mb-2" />
                 <p className="text-dark-400 text-sm">{t('wildcard_ssl.search_empty')}</p>
               </div>
             ) : !hasFolders ? (

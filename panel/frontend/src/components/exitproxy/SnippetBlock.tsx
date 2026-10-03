@@ -43,7 +43,7 @@ export function CopyField({ label, value, rows }: { label: string; value: string
         readOnly
         value={value}
         rows={rows}
-        className="input font-mono text-[11px] resize-none w-full"
+        className="input font-mono text-2xs resize-none w-full"
         onClick={(e) => (e.target as HTMLTextAreaElement).select()}
       />
     </div>

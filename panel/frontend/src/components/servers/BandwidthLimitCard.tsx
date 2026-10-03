@@ -138,7 +138,7 @@ export default function BandwidthLimitCard({ serverId, server }: Props) {
           disabled={!writable || saving || loading}
           className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
         >
-          {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+          {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
           {t('server_details.bandwidth_apply')}
         </button>
       </div>
