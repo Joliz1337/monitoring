@@ -1,14 +1,18 @@
 """Транзакции доп. IP: гейт версии ноды, адрес и порт ноды из URL, дедлайн с
 запасом на расхождение часов, вычитание уже стоящих адресов, отбор адресов
-хостера для удаления и снятых — для возврата, снимок задачи.
+хостера для удаления и снятых — для возврата, снимок задачи, отказ старой ноде
+в адресах на опущенной карте.
 
 Запуск из panel/backend:  python -m unittest discover -s tests -p "test_*.py"
 """
 
+import asyncio
 import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -19,8 +23,10 @@ try:
         MIN_NODE_VERSION_NETWORK,
         MIN_NODE_VERSION_NETWORK_GATEWAY,
         MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL,
+        MIN_NODE_VERSION_NETWORK_LINK_UP,
         ROLLBACK_TIMEOUT_SEC,
         JobPhase,
+        LinkUpUnsupportedError,
         NetworkJob,
         TransactionStatus,
         deadline_passed,
@@ -30,10 +36,12 @@ try:
         node_api_port,
         node_host,
         node_supports_hoster_removal,
+        node_supports_link_up,
         node_supports_network,
         node_supports_network_gateway,
         parse_deadline,
         present_on_interface,
+        start_apply,
         suppressed_on_interface,
     )
 except ImportError as e:  # pragma: no cover
@@ -101,6 +109,23 @@ class InterfaceFilterTests(unittest.TestCase):
         self.assertTrue(node_supports_hoster_removal(MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL))
         self.assertFalse(node_supports_hoster_removal("10.30.9"))
         self.assertFalse(node_supports_hoster_removal(None))
+
+
+class LinkUpGateTests(unittest.TestCase):
+    STATE = {"interfaces": [{"name": "eth0", "is_up": True, "addresses": []},
+                            {"name": "ens4", "is_up": False, "addresses": []}]}
+
+    def test_gate(self):
+        self.assertTrue(node_supports_link_up(MIN_NODE_VERSION_NETWORK_LINK_UP))
+        self.assertFalse(node_supports_link_up("10.31.9"))
+        self.assertFalse(node_supports_link_up(None))
+
+    def test_old_node_gets_no_addresses_on_a_down_card(self):
+        server = SimpleNamespace(id=9001, node_version="10.31.0", url="https://1.2.3.4:9100")
+        with patch("app.services.network_transactions.fetch_state", AsyncMock(return_value=self.STATE)):
+            with self.assertRaises(LinkUpUnsupportedError):
+                asyncio.run(start_apply(server, interface="ens4", add=[AddressSpec("5.6.7.8", 32)],
+                                        remove=[], restore=[]))
 
 
 class GatewayTests(unittest.TestCase):

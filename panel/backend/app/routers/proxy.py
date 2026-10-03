@@ -765,6 +765,7 @@ async def get_network_state(
     state["min_node_version"] = network_transactions.MIN_NODE_VERSION_NETWORK
     state["min_node_version_gateway"] = network_transactions.MIN_NODE_VERSION_NETWORK_GATEWAY
     state["min_node_version_hoster_removal"] = network_transactions.MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL
+    state["min_node_version_link_up"] = network_transactions.MIN_NODE_VERSION_NETWORK_LINK_UP
     state["access_address"] = await network_transactions.access_address(server)
     state["node_version"] = server.node_version
     state["job"] = network_transactions.job_snapshot(server.id)
@@ -827,6 +828,14 @@ async def apply_network_addresses(
             status_code=400,
             detail=(
                 f"Удалять адреса хостера умеет нода {network_transactions.MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL} "
+                f"и новее (сейчас {exc.node_version or 'неизвестно'}) — обновите ноду"
+            ),
+        )
+    except network_transactions.LinkUpUnsupportedError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Включать выключенную карту вместе с адресами умеет нода {network_transactions.MIN_NODE_VERSION_NETWORK_LINK_UP} "
                 f"и новее (сейчас {exc.node_version or 'неизвестно'}) — обновите ноду"
             ),
         )

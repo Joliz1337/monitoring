@@ -22,6 +22,10 @@ At most 256 addresses per apply. Addresses already present on the interface are 
 
 Usually the field stays empty: replies from the new address leave through the primary address gateway. A gateway is needed when the hoster gave addresses from another network and told you which gateway to send them through. Traffic from those addresses then goes through that gateway, while the primary address keeps working as before. One gateway covers the whole list; addresses with other gateways are added in separate runs and all work at the same time. To change the gateway of an address, remove it and add it again. Requires node 10.31.0 or newer.
 
+## A new network card
+
+If the cloud attached another network to the server, for example the external network as a second interface in VK Cloud, the new card shows up in the list as down. Pick it when adding addresses: the node brings the card up together with them, keeps it up after every reboot and takes it down again once you remove its last address. If the addresses come from another network, fill in the gateway too, so replies from them leave through the new card. Requires node 10.32.0 or newer.
+
 ## How the change is applied
 
 1. The node backs up its config, writes the addresses, applies them and starts a 120-second rollback timer.

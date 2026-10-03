@@ -44,6 +44,8 @@ MIN_NODE_VERSION_NETWORK = "10.29.0"
 MIN_NODE_VERSION_NETWORK_GATEWAY = "10.31.0"
 # Старая нода отказывает в удалении адреса, который добавила не панель
 MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL = "10.31.0"
+# Старая нода отказывает в адресах на опущенной карте («interface is down»)
+MIN_NODE_VERSION_NETWORK_LINK_UP = "10.32.0"
 ROLLBACK_TIMEOUT_SEC = 120
 STATE_TIMEOUT_SECONDS = 10.0
 # Не больше proxy_read_timeout у location /api/system/network/ на ноде (тест-инвариант)
@@ -125,6 +127,12 @@ class HosterRemovalUnsupportedError(Exception):
         self.node_version = node_version
 
 
+class LinkUpUnsupportedError(Exception):
+    def __init__(self, node_version: Optional[str]):
+        super().__init__(f"node {node_version or 'unknown'} cannot bring a down interface up")
+        self.node_version = node_version
+
+
 @dataclass
 class NetworkJob:
     id: str
@@ -199,6 +207,12 @@ def node_supports_hoster_removal(node_version: Optional[str]) -> bool:
     if not node_version:
         return False
     return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL)
+
+
+def node_supports_link_up(node_version: Optional[str]) -> bool:
+    if not node_version:
+        return False
+    return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_NETWORK_LINK_UP)
 
 
 def node_host(server_url: str) -> Optional[str]:
@@ -400,6 +414,8 @@ async def start_apply(server: Server, *, interface: str, add: list[AddressSpec],
         iface_state = next((i for i in state.get("interfaces") or [] if i.get("name") == interface), None)
         if iface_state is None:
             raise InterfaceNotFoundError(interface)
+        if add and not iface_state.get("is_up", True) and not node_supports_link_up(server.node_version):
+            raise LinkUpUnsupportedError(server.node_version)
         conflicts = gateway_conflicts(add, iface_state, state.get("default_gateway") or {})
         if conflicts:
             raise GatewayConflictError(conflicts)

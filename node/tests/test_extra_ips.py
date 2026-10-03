@@ -46,6 +46,8 @@ from app.services.extra_ips import (  # noqa: E402
     ExtraIpUnsupportedError,
     ExtraIpValidationError,
     GatewayRoute,
+    LiveAddr,
+    LiveInterface,
     PlanFile,
     build_plan,
     check_request,
@@ -56,13 +58,16 @@ from app.services.extra_ips import (  # noqa: E402
     parse_history,
     parse_address_list,
     parse_ip_addr,
+    parse_link_list,
     parse_netplan_definitions,
     parse_routes,
     parse_transaction,
+    plan_link,
     plan_routes,
     primary_addresses,
     render_address_list,
     render_ifupdown_stanzas,
+    render_link_list,
     render_netplan,
     render_networkd_dropin,
     render_routes,
@@ -379,11 +384,17 @@ class GuardTests(unittest.TestCase):
                        suppressed=[("eth0", "198.51.100.9/32")])
         self.assertIn("restore it instead", str(ctx.exception))
 
-    def test_interface_must_be_physical_and_up(self):
+    def test_interface_must_carry_addresses(self):
         with self.assertRaises(ExtraIpValidationError):
             self.check(self.request(interface="docker0", add=[{"address": "203.0.113.12", "prefix": 32}]))
-        with self.assertRaises(ExtraIpValidationError):
-            self.check(self.request(interface="eth2", add=[{"address": "203.0.113.12", "prefix": 32}]))
+
+    def test_down_interface_takes_only_new_addresses(self):
+        change = self.check(self.request(interface="eth2", add=[{"address": "198.51.100.7", "prefix": 32}]))
+        self.assertEqual([s.cidr for s in change.add], ["198.51.100.7/32"])
+        with self.assertRaises(ExtraIpValidationError) as ctx:
+            self.check(self.request(interface="eth2", restore=[{"address": "198.51.100.8", "prefix": 32}]),
+                       suppressed=[("eth2", "198.51.100.8/32")])
+        self.assertIn("is down", str(ctx.exception))
 
     def test_model_rejects_overlap_empty_and_bad_addresses(self):
         with self.assertRaises(ValueError):
@@ -435,6 +446,43 @@ class GuardTests(unittest.TestCase):
             self.assertIn("remove it and add it again", str(ctx.exception))
 
 
+class LinkPlanTests(unittest.TestCase):
+    def spec(self, address: str) -> AddressSpec:
+        return AddressSpec(address=address, prefix=32)
+
+    def addr(self, cidr: str, dynamic: bool = False) -> LiveAddr:
+        address, prefix = cidr.split("/")
+        return LiveAddr(address=address, prefix=int(prefix), family="ipv4", scope="global", dynamic=dynamic)
+
+    def test_first_addresses_bring_a_down_card_up(self):
+        change = AddressChange(add=[self.spec("198.51.100.7")])
+        live = LiveInterface("eth2")
+        self.assertEqual(plan_link("eth2", False, change, ["eth3"], [("eth2", "198.51.100.7/32")], live),
+                         ("up", ["eth3", "eth2"]))
+        # Уже в списке (линк уронили руками) — поднимаем, список не дублируем
+        self.assertEqual(plan_link("eth2", False, change, ["eth2"], [], live), ("up", ["eth2"]))
+
+    def test_cards_the_panel_did_not_bring_up_stay_as_they_are(self):
+        change = AddressChange(remove=[self.spec("203.0.113.11")])
+        self.assertEqual(plan_link("eth0", True, change, [], [], LiveInterface("eth0")), ("", []))
+
+    def test_card_with_panel_addresses_left_stays_up(self):
+        change = AddressChange(remove=[self.spec("198.51.100.7")])
+        live = LiveInterface("eth2", [self.addr("198.51.100.7/32"), self.addr("198.51.100.8/32")])
+        self.assertEqual(plan_link("eth2", True, change, ["eth2"], [("eth2", "198.51.100.8/32")], live),
+                         ("", ["eth2"]))
+
+    def test_last_panel_address_brings_the_card_down(self):
+        change = AddressChange(remove=[self.spec("198.51.100.7")])
+        live = LiveInterface("eth2", [self.addr("198.51.100.7/32")])
+        self.assertEqual(plan_link("eth2", True, change, ["eth2", "eth3"], [], live), ("down", ["eth3"]))
+
+    def test_foreign_address_keeps_the_link_up_but_not_ours(self):
+        change = AddressChange(remove=[self.spec("198.51.100.7")])
+        live = LiveInterface("eth2", [self.addr("198.51.100.7/32"), self.addr("10.0.0.20/24", dynamic=True)])
+        self.assertEqual(plan_link("eth2", True, change, ["eth2"], [], live), ("", []))
+
+
 class GatewayRouteTests(unittest.TestCase):
     def spec(self, address: str, gateway: str | None = None) -> AddressSpec:
         return AddressSpec(address=address, prefix=128 if ":" in address else 32, gateway=gateway)
@@ -481,6 +529,11 @@ class StateFileTests(unittest.TestCase):
         self.assertEqual(parse_address_list(render_address_list(entries)), entries)
         self.assertEqual(parse_address_list("eth0 1.2.3.4/32\neth0 1.2.3.4/32\n\nbroken\n"), [("eth0", "1.2.3.4/32")])
 
+    def test_link_list_round_trip(self):
+        self.assertEqual(parse_link_list(render_link_list(["eth2", "ens4"])), ["eth2", "ens4"])
+        self.assertEqual(parse_link_list("eth2\n\n eth2 \nens4\n"), ["eth2", "ens4"])
+        self.assertEqual(render_link_list([]), "")
+
     def test_transaction_parse(self):
         text = ("TX_ID=20260902-101500-ab12\nTX_STATUS=pending\nTX_IFACE=eth0\nTX_BACKEND=netplan\n"
                 "TX_ADD=203.0.113.11/32 2001:db8::10/64\nTX_REMOVE=\nTX_STARTED_AT=1788000000\n"
@@ -517,6 +570,7 @@ class PlanTests(unittest.TestCase):
         plan = build_plan(
             "20260902-101500-ab12", "eth0", backend, change,
             ["203.0.113.10"], 120, "eth0 203.0.113.11/32\n", "eth0 203.0.113.13/32\n", "eth0 203.0.113.11 198.51.100.1 1001\n",
+            "eth2\n", "up",
             [PlanFile("/etc/netplan/60-monitoring-extra-ips.yaml", "600", "network:\n"), PlanFile("/etc/systemd/network/x.d/m.conf", "644", None)],
         )
         self.assertIn("TX_ID=20260902-101500-ab12\nIFACE=eth0\nBACKEND=networkmanager\nDETAIL=Wired\nTIMEOUT=120\n", plan)
@@ -524,6 +578,7 @@ class PlanTests(unittest.TestCase):
         self.assertIn("MANAGED_B64=" + base64.b64encode(b"eth0 203.0.113.11/32\n").decode(), plan)
         self.assertIn("SUPPRESSED_B64=" + base64.b64encode(b"eth0 203.0.113.13/32\n").decode(), plan)
         self.assertIn("ROUTES_B64=" + base64.b64encode(b"eth0 203.0.113.11 198.51.100.1 1001\n").decode(), plan)
+        self.assertIn("LINKS_B64=" + base64.b64encode(b"eth2\n").decode() + "\nLINK=up\n", plan)
         self.assertIn("NM_CONNECTION=Wired\nNM_KEYFILE=/etc/NetworkManager/system-connections/w.nmconnection\n", plan)
         # В соединение NetworkManager уходят только свои адреса, адрес хостера в нём остаётся
         self.assertIn("NM_ADD=203.0.113.11/32\nNM_REMOVE=203.0.113.12/32\n", plan)
@@ -700,6 +755,46 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual((plan["ADD"], plan["REMOVE"]), ("198.51.100.9/32", ""))
         self.assertEqual(base64.b64decode(plan["SUPPRESSED_B64"]).decode(), "eth1 10.0.0.9/32\n")
         self.assertEqual(base64.b64decode(plan["MANAGED_B64"]).decode(), "")
+
+    def with_down_card(self) -> dict[str, FakeResult]:
+        answers = self.live_answers()
+        answers["for d in /sys/class/net/*"] = FakeResult(stdout="eth0 up physical no\neth2 down physical no\n")
+        answers["extra-ips.sh apply"] = FakeResult(stdout="TX_ID=20260902-101500-ab12\nTX_STATUS=pending\n")
+        return answers
+
+    def test_apply_brings_a_down_card_up_with_its_first_address(self):
+        manager, executor = self.manager(self.with_down_card())
+        request = NetworkApplyRequest(interface="eth2", protected=["203.0.113.10"], add=[
+            {"address": "198.51.100.7", "prefix": 32, "gateway": "198.51.100.1"},
+        ])
+        with unittest.mock.patch.object(ExtraIpManager, "_mac", return_value=""):
+            self.assertTrue(run(manager.apply(request)).success)
+        plan = self.plan_of(executor)
+        # Карту не описывает ни один конфиг: адреса держит fallback, линк — links.list
+        self.assertEqual((plan["BACKEND"], plan["LINK"]), ("fallback", "up"))
+        self.assertEqual(base64.b64decode(plan["LINKS_B64"]).decode(), "eth2\n")
+        self.assertEqual(base64.b64decode(plan["ROUTES_B64"]).decode(), "eth2 198.51.100.7 198.51.100.1 1001\n")
+
+    def test_apply_brings_the_card_down_with_its_last_address(self):
+        (self.state_dir / "managed.list").write_text("eth2 198.51.100.7/32\n")
+        (self.state_dir / "links.list").write_text("eth2\n")
+        answers = self.with_down_card()
+        answers["for d in /sys/class/net/*"] = FakeResult(stdout="eth0 up physical no\neth2 up physical no\n")
+        manager, executor = self.manager(answers)
+        request = NetworkApplyRequest(interface="eth2", protected=["203.0.113.10"],
+                                      remove=[{"address": "198.51.100.7", "prefix": 32}])
+        with unittest.mock.patch.object(ExtraIpManager, "_mac", return_value=""):
+            self.assertTrue(run(manager.apply(request)).success)
+        plan = self.plan_of(executor)
+        self.assertEqual((plan["LINK"], plan["REMOVE"]), ("down", "198.51.100.7/32"))
+        self.assertEqual(base64.b64decode(plan["LINKS_B64"]).decode(), "")
+
+    def test_state_marks_cards_the_panel_brought_up(self):
+        (self.state_dir / "links.list").write_text("eth2\n")
+        manager, _ = self.manager(self.with_down_card())
+        with unittest.mock.patch.object(extra_ips, "default_interface", return_value="eth0"):
+            state = run(manager.state())
+        self.assertEqual({i.name: i.brought_up for i in state.interfaces}, {"eth0": False, "eth2": True})
 
     def test_state_lists_removed_hoster_addresses(self):
         (self.state_dir / "suppressed.list").write_text("eth0 198.51.100.9/32\n")

@@ -27,6 +27,7 @@ const PREVIEW_DEBOUNCE_MS = 400
 const DEFAULT_ROLLBACK_SEC = 120
 const MIN_NODE_VERSION_GATEWAY = '10.31.0'
 const MIN_NODE_VERSION_HOSTER_REMOVAL = '10.31.0'
+const MIN_NODE_VERSION_LINK_UP = '10.32.0'
 // Потолок ноды на одну транзакцию (добавление + удаление)
 const MAX_ADDRESSES_PER_APPLY = 256
 
@@ -219,6 +220,8 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
   const gatewaySupported = versionAtLeast(state?.node_version, minGatewayVersion)
   const minHosterVersion = state?.min_node_version_hoster_removal ?? MIN_NODE_VERSION_HOSTER_REMOVAL
   const hosterRemoval = versionAtLeast(state?.node_version, minHosterVersion)
+  const minLinkUpVersion = state?.min_node_version_link_up ?? MIN_NODE_VERSION_LINK_UP
+  const linkUpSupported = versionAtLeast(state?.node_version, minLinkUpVersion)
 
   if (!readable || unsupported) {
     return (
@@ -320,6 +323,8 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
             defaultGateway={state.default_gateway ?? {}}
             gatewaySupported={gatewaySupported}
             minGatewayVersion={minGatewayVersion}
+            linkUpSupported={linkUpSupported}
+            minLinkUpVersion={minLinkUpVersion}
             rollbackTimeout={rollbackTimeout}
             busy={busy}
             onClose={() => setAddOpen(false)}
@@ -389,6 +394,11 @@ function InterfaceBlock({
         {iface.kind !== 'physical' && <Badge tone="muted">{iface.kind}</Badge>}
         {iface.is_default && <Badge tone="accent">{t('server_details.network_default_badge')}</Badge>}
         {!iface.is_up && <Badge tone="warning">{t('server_details.network_down_badge')}</Badge>}
+        {iface.brought_up && (
+          <Tooltip label={t('server_details.network_brought_up_hint')} maxWidth={320}>
+            <span className="cursor-help"><Badge tone="muted">{t('server_details.network_brought_up_badge')}</Badge></span>
+          </Tooltip>
+        )}
         {chosen.length > 0 && (
           <div className="ml-auto flex items-center gap-2 text-xs font-normal">
             <span className="text-dark-400">{t('server_details.network_selected_count', { count: chosen.length })}</span>
@@ -675,7 +685,7 @@ function RollbackWarning({ seconds }: { seconds: number }) {
 
 function AddAddressesModal({
   serverId, interfaces, defaultInterface, defaultGateway, gatewaySupported, minGatewayVersion,
-  rollbackTimeout, busy, onClose, onApply,
+  linkUpSupported, minLinkUpVersion, rollbackTimeout, busy, onClose, onApply,
 }: {
   serverId: number
   interfaces: NetworkInterface[]
@@ -683,6 +693,8 @@ function AddAddressesModal({
   defaultGateway: Partial<Record<NetworkAddressFamily, string>>
   gatewaySupported: boolean
   minGatewayVersion: string
+  linkUpSupported: boolean
+  minLinkUpVersion: string
   rollbackTimeout: number
   busy: boolean
   onClose: () => void
@@ -725,10 +737,9 @@ function AddAddressesModal({
   const mainGateway = defaultGateway[family]
   const sameAsMain = !!gatewayValue && gatewayValue.toLowerCase() === mainGateway?.toLowerCase()
 
-  const present = useMemo(() => {
-    const target = interfaces.find(i => i.name === iface)
-    return new Set((target?.addresses ?? []).map(a => a.address))
-  }, [interfaces, iface])
+  const target = interfaces.find(i => i.name === iface)
+  const present = useMemo(() => new Set((target?.addresses ?? []).map(a => a.address)), [target])
+  const hasDownCards = interfaces.some(i => !i.is_up)
   const alreadyPresent = preview ? preview.addresses.filter(a => present.has(a.address)).length : 0
   const willAdd = preview ? preview.count - alreadyPresent : 0
 
@@ -747,11 +758,17 @@ function AddAddressesModal({
         className="w-full mb-3 px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-dark-100 text-sm focus:outline-none focus:border-accent-500/50"
       >
         {interfaces.map(i => (
-          <option key={i.name} value={i.name} disabled={!i.is_up}>
+          <option key={i.name} value={i.name} disabled={!i.is_up && !linkUpSupported}>
             {i.name}{i.is_default ? ` — ${t('server_details.network_default_badge')}` : ''}{i.is_up ? '' : ` (${t('server_details.network_down_badge')})`}
           </option>
         ))}
       </select>
+      {target && !target.is_up && (
+        <p className="text-xs text-warning -mt-2 mb-3">{t('server_details.network_link_up_hint')}</p>
+      )}
+      {hasDownCards && !linkUpSupported && (
+        <p className="text-xs text-dark-500 -mt-2 mb-3">{t('server_details.network_link_up_needs_node', { version: minLinkUpVersion })}</p>
+      )}
 
       <label className="block text-xs text-dark-400 mb-1">{t('server_details.network_addresses_label')}</label>
       <textarea

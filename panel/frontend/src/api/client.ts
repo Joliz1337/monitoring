@@ -3309,6 +3309,8 @@ export interface NetworkInterface {
   is_default: boolean
   kind: 'physical' | 'bond' | 'vlan' | 'bridge'
   addresses: NetworkAddress[]
+  /** Опущенную карту подняла панель вместе с адресами; с последним адресом опустит */
+  brought_up?: boolean
 }
 
 export interface NetworkAddressRef {
@@ -3359,6 +3361,7 @@ export interface NetworkState {
   min_node_version: string
   min_node_version_gateway?: string
   min_node_version_hoster_removal?: string
+  min_node_version_link_up?: string
   // Адрес, по которому панель ходит на ноду: его удалить нельзя
   access_address?: string | null
   node_version?: string | null
