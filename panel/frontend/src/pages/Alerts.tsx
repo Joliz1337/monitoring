@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, type ChangeEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -11,6 +11,7 @@ import { toast } from 'sonner'
 import { alertsApi, serversApi, AlertSettingsData, AlertHistoryItem, AlertStatus, Server as ServerType } from '../api/client'
 import { formatBitsPerSec } from '../utils/format'
 import { Tooltip } from '../components/ui/Tooltip'
+import { SecretInput } from '../components/ui/SecretInput'
 import { FAQIcon, type FAQScreen } from '../components/FAQ'
 
 type TriggerSection = 'offline' | 'cpu' | 'ram' | 'network' | 'load_avg' | 'conntrack' | 'packet_loss' | 'tcp'
@@ -213,7 +214,7 @@ export default function Alerts() {
               label={t('alerts.bot_token')}
               value={settings.telegram_bot_token}
               placeholder="123456:ABC-DEF..."
-              type="password"
+              secret
               onSave={v => save({ telegram_bot_token: v })}
             />
             <InputRow
@@ -955,28 +956,29 @@ function TriggerIgnoreList({ ids, allServers, onSave, t }: {
   )
 }
 
-function InputRow({ label, value, placeholder, type, onSave }: {
+function InputRow({ label, value, placeholder, secret, onSave }: {
   label: string
   value: string
   placeholder?: string
-  type?: string
+  secret?: boolean
   onSave: (v: string) => void
 }) {
   const [local, setLocal] = useState(value)
   useEffect(() => setLocal(value), [value])
 
+  const inputProps = {
+    value: local,
+    placeholder,
+    onChange: (e: ChangeEvent<HTMLInputElement>) => setLocal(e.target.value),
+    onBlur: () => { if (local !== value) onSave(local) },
+    className: `w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
+                placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition`,
+  }
+
   return (
     <div className="space-y-1">
       <label className="text-sm text-dark-300">{label}</label>
-      <input
-        type={type || 'text'}
-        value={local}
-        placeholder={placeholder}
-        onChange={e => setLocal(e.target.value)}
-        onBlur={() => { if (local !== value) onSave(local) }}
-        className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                   placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition"
-      />
+      {secret ? <SecretInput {...inputProps} /> : <input type="text" {...inputProps} />}
     </div>
   )
 }

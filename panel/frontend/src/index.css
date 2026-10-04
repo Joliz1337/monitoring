@@ -124,6 +124,15 @@ body {
     box-shadow: 0 0 20px rgba(34, 211, 238, 0.1);
   }
 
+  /* Маска SecretInput; подсказка (placeholder) остаётся читаемой */
+  .secret-masked {
+    -webkit-text-security: disc;
+  }
+
+  .secret-masked::placeholder {
+    -webkit-text-security: none;
+  }
+
   .card {
     /* backdrop-blur-md убран: компонует каждый кадр под слоем — самое тяжёлое на мобильном.
        Цвет фона чуть плотнее, визуально разница минимальна. */

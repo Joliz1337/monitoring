@@ -8,6 +8,7 @@ import { backupApi, type BackupInfo, type BackupStatus } from '../../api/client'
 import { formatBytes } from '../../utils/format'
 import { Tooltip } from '../ui/Tooltip'
 import ProgressBar from '../ui/ProgressBar'
+import { SecretInput } from '../ui/SecretInput'
 import { SettingsSection } from './SettingsSection'
 
 const STATUS_POLL_MS = 2000
@@ -391,8 +392,7 @@ export function BackupCard() {
                 {multiplePlainFiles && <RestoreWarning text={t('settings.backup_restore_multi_plain')} />}
                 {volumeSet && (
                   <div className="mb-4">
-                    <input
-                      type="password"
+                    <SecretInput
                       autoFocus
                       value={restorePassword}
                       onChange={e => setRestorePassword(e.target.value)}

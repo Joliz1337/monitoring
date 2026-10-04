@@ -1,5 +1,6 @@
 import { useTranslation } from 'react-i18next'
 import type { ImageDeliveryCreds, ImageDeliverySettings } from '../../api/client'
+import { SecretInput } from '../ui/SecretInput'
 
 export interface SshCredsValue {
   host: string
@@ -101,11 +102,11 @@ export default function SshCredsFields({ value, onChange, disabled = false, show
         </label>
       </div>
       {value.authMethod === 'password' ? (
-        <input type="password" className="input w-full" placeholder={t('imageDelivery.password')} value={value.password} onChange={(e) => onChange({ password: e.target.value })} disabled={disabled} />
+        <SecretInput className="input w-full" placeholder={t('imageDelivery.password')} value={value.password} onChange={(e) => onChange({ password: e.target.value })} disabled={disabled} />
       ) : (
         <>
           <textarea className="input w-full font-mono text-xs" rows={4} placeholder={t('imageDelivery.private_key')} value={value.privateKey} onChange={(e) => onChange({ privateKey: e.target.value })} disabled={disabled} />
-          <input type="password" className="input w-full" placeholder={t('imageDelivery.passphrase')} value={value.passphrase} onChange={(e) => onChange({ passphrase: e.target.value })} disabled={disabled} />
+          <SecretInput className="input w-full" placeholder={t('imageDelivery.passphrase')} value={value.passphrase} onChange={(e) => onChange({ passphrase: e.target.value })} disabled={disabled} />
         </>
       )}
     </div>

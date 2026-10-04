@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useState, type ChangeEvent } from 'react'
 import { Clock, Loader2, Wallet, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { billingApi, BillingServerData } from '../../api/client'
 import { isValidProxyInput } from '../../utils/proxy'
+import { SecretInput } from '../ui/SecretInput'
 import { CloudProviderId, PROVIDER_IDS, PROVIDERS, getProvider } from './providers'
 import {
   Field, INPUT_CLASS, Overlay, PaidTotalHint, QUICK_DAYS, Translate,
@@ -107,6 +108,14 @@ function CredentialFields({ values, setValues, t, server }: {
     <>
       {provider.fields.map(field => {
         const stored = field.key === 'cloud_credential' && server?.has_cloud_credential
+        const inputProps = {
+          value: values.credentials[field.key] || '',
+          onChange: (e: ChangeEvent<HTMLInputElement>) => setValues({
+            credentials: { ...values.credentials, [field.key]: e.target.value },
+          }),
+          placeholder: field.secret && stored ? '••••••••' : field.placeholder,
+          className: INPUT_CLASS,
+        }
         return (
           <Field
             key={field.key}
@@ -116,15 +125,7 @@ function CredentialFields({ values, setValues, t, server }: {
                 : t(field.labelKey)
             }
           >
-            <input
-              type={field.secret ? 'password' : 'text'}
-              value={values.credentials[field.key] || ''}
-              onChange={e => setValues({
-                credentials: { ...values.credentials, [field.key]: e.target.value },
-              })}
-              placeholder={field.secret && stored ? '••••••••' : field.placeholder}
-              className={INPUT_CLASS}
-            />
+            {field.secret ? <SecretInput {...inputProps} /> : <input type="text" {...inputProps} />}
             <p className="text-2xs text-dark-500 mt-1">
               {t(field.hintKey)}{' '}
               {field.link && (
