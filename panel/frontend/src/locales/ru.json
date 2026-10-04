@@ -222,7 +222,7 @@
     "migration_manual_hint": "Эти legacy-ноды нельзя мигрировать удалённо. Переустановите их через mon → Install Node с общим токеном, затем нажмите «Я переустановил».",
     "migration_confirm_done": "Я переустановил",
     "migration_confirm_failed": "Серверов всё ещё недоступно по mTLS: {{count}}",
-    "search_placeholder": "Поиск серверов...",
+    "search_placeholder": "Поиск по имени или IP...",
     "search_drag_hint": "Перетаскивание отключено на время поиска",
     "done": "Готово",
     "deploy_title": "Автоустановка ноды по SSH",

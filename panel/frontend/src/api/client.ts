@@ -269,6 +269,7 @@ export interface ServerMetrics {
       tx_peak_per_sec?: number
       is_up: boolean
       is_virtual?: boolean
+      addresses?: Array<{ type: 'ipv4' | 'ipv6'; address: string; netmask?: string }>
     }>
     total: {
       rx_bytes: number

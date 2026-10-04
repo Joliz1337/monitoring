@@ -38,6 +38,7 @@ import { Tooltip } from '../components/ui/Tooltip'
 import { useTranslation } from 'react-i18next'
 import { FAQIcon } from '../components/FAQ'
 import { collectFolders, groupByFolder } from '../utils/folders'
+import { matchesServerSearch } from '../utils/serverSearch'
 
 const COLLAPSED_KEY = 'dashboard_collapsed_folders'
 
@@ -50,9 +51,6 @@ const STATUS_FILTERS: { key: StatusFilter; Icon: LucideIcon; text: string; activ
 ]
 
 const NO_SERVERS: ServerWithMetrics[] = []
-
-const matchesSearch = (server: ServerWithMetrics, query: string): boolean =>
-  server.name.toLowerCase().includes(query) || server.url.toLowerCase().includes(query)
 
 export default function Dashboard() {
   const { uid } = useParams()
@@ -123,7 +121,7 @@ export default function Dashboard() {
   }, [activeServers, disabledServers, statusFilter])
 
   const visibleServers = useMemo(
-    () => (isSearching ? statusServers.filter(s => matchesSearch(s, normalizedQuery)) : statusServers),
+    () => (isSearching ? statusServers.filter(s => matchesServerSearch(s, normalizedQuery)) : statusServers),
     [statusServers, isSearching, normalizedQuery],
   )
 

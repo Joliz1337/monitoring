@@ -71,6 +71,7 @@ import { useFolderBoard, FOLDER_SORTABLE_PREFIX } from '../hooks/useFolderBoard'
 import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import { writeStorage } from '../utils/storage'
 import { collectFolders, groupByFolder } from '../utils/folders'
+import { matchesServerSearch } from '../utils/serverSearch'
 import { cleanInstallLogLine } from '../utils/installLog'
 import { isValidProxyInput } from '../utils/proxy'
 
@@ -277,9 +278,7 @@ export default function Servers() {
 
   const filteredServers = useMemo(() => {
     if (!normalizedQuery) return displayedServers
-    return displayedServers.filter(s =>
-      s.name.toLowerCase().includes(normalizedQuery) || s.url.toLowerCase().includes(normalizedQuery)
-    )
+    return displayedServers.filter(s => matchesServerSearch(s, normalizedQuery))
   }, [normalizedQuery, displayedServers])
 
   // Папки как на дашборде: общий порядок папок, внутри — порядок карточек.

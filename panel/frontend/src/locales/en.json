@@ -218,7 +218,7 @@
     "migration_manual_hint": "These legacy nodes can't be migrated remotely. Reinstall them with the shared token via mon → Install Node, then click «I reinstalled them».",
     "migration_confirm_done": "I reinstalled them",
     "migration_confirm_failed": "{{count}} server(s) still unreachable via mTLS",
-    "search_placeholder": "Search servers...",
+    "search_placeholder": "Search by name or IP...",
     "search_drag_hint": "Drag-and-drop is disabled while searching",
     "done": "Done",
     "deploy_title": "Auto-deploy node over SSH",
