@@ -12,7 +12,7 @@ import docker
 import psutil
 from app.services.http_client import get_node_client, get_external_client, node_auth_headers
 from docker.errors import DockerException, ImageNotFound
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,11 +20,13 @@ from app.auth import verify_auth
 from app.config import get_settings
 from app.database import get_db, async_session
 from app.models import Server, PanelSettings
+from app.security import is_direct_local_request
 from app.services import node_update_watcher, release_versions, update_channel
 from app.services.haproxy_upgrade import describe_haproxy
 from app.services.net_utils import panel_ip_info
 from app.services.panel_host_metrics import HostHistoryPeriod, load_host_history
 from app.services.server_status import get_offline_threshold, resolve_status
+from app.services.shutdown_hooks import run_shutdown_hooks
 from app.services.wildcard_ssl import USE_FOR_PANEL_SETTING
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -556,6 +558,19 @@ async def trigger_panel_update(
         "message": "Panel update started. The panel will restart shortly.",
         "target": target_ref or update_channel.current_branch()
     }
+
+
+@router.post("/prepare-shutdown")
+async def prepare_shutdown(request: Request):
+    """Скрипт обновления зовёт это изнутри контейнера перед `docker compose down`
+    и ждёт ответа: фоновые задачи доводят начатое, пока панель целиком работает."""
+    if not is_direct_local_request(request):
+        raise HTTPException(status_code=404)
+
+    logger.info("Prepare shutdown: finishing background tasks before update")
+    await run_shutdown_hooks()
+    logger.info("Prepare shutdown: done")
+    return {"success": True}
 
 
 # SSL Certificate management
