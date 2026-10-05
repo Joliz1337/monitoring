@@ -14,7 +14,7 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 
 - Add any server or hosting account, even one not connected to monitoring.
 - Extend by a number of days or top up the balance — before you confirm, you see the total paid period and the resulting end date.
-- Refresh a cloud account from its card, or all of them at once with “Sync clouds” in the header.
+- Refresh a cloud account from its card, or all of them at once with “Sync clouds” in the header. A newly added cloud project is refreshed automatically.
 - Plan a cloud top-up: “Calculate” shows how much to add so the balance lasts a given number of days, or how long a given amount will last.
 - Get Telegram reminders in advance, through the same bot as alerts.
 - Keep notes: credentials, plan number, who pays for it.
@@ -31,7 +31,7 @@ How to connect Yandex Cloud:
 1. Create a service account in any folder of the cloud.
 2. Open [center.yandex.cloud/billing/accounts](https://center.yandex.cloud/billing/accounts), pick the billing account, then “Access management” → “Assign roles” on the left. Select the service account and add the `billing.accounts.viewer` role. The role has to be granted right here: if it's granted in the folder or cloud permissions, Yandex answers the panel with “Forbidden: need billing.accounts.viewer role”. If the service account isn't in the list, grant it the role on the whole organization in Cloud Center — it applies to all of the organization's billing accounts.
 3. On the service account page click “Create new key” → “Create authorized key” and download the JSON file.
-4. Paste the whole file into the key field, enter the billing account ID and click “Sync” on the project card.
+4. Paste the whole file into the key field and enter the billing account ID. Once saved, the panel fetches the balance and spending right away.
 
 Keys are stored encrypted and never returned to the interface: the field in the edit form stays empty — leave it empty to keep the current key.
 
