@@ -17,6 +17,7 @@ interface AccountNodeProps {
   servers: Map<number, ServerWithMetrics>
   allServers: ServerWithMetrics[]
   allAssignedIds: Set<number>
+  highlightedServerId: number | null
   collapsedProjects: Set<string>
   onToggleProject: (key: string) => void
   collapsed: boolean
@@ -33,7 +34,7 @@ interface AccountNodeProps {
 }
 
 export default function AccountNode({
-  account, servers, allServers, allAssignedIds,
+  account, servers, allServers, allAssignedIds, highlightedServerId,
   collapsedProjects, onToggleProject,
   collapsed, onToggle,
   onRename, onDelete, onCreateProject,
@@ -221,6 +222,7 @@ export default function AccountNode({
                 servers={servers}
                 allServers={allServers}
                 allAssignedIds={allAssignedIds}
+                highlightedServerId={highlightedServerId}
                 collapsed={collapsedProjects.has(`p-${proj.id}`)}
                 onToggle={() => onToggleProject(`p-${proj.id}`)}
                 onRename={(name) => onRenameProject(proj.id, name)}
@@ -237,6 +239,7 @@ export default function AccountNode({
                   <InfraServerRow
                     key={sid}
                     server={srv}
+                    highlighted={sid === highlightedServerId}
                     onRemove={() => onRemoveAccountServer(sid)}
                   />
                 )

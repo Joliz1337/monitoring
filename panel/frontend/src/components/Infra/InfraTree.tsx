@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Network, Plus, ChevronDown, ChevronRight, Check, X, Server as ServerIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -8,6 +8,7 @@ import { useServersStore } from '../../stores/serversStore'
 import AccountNode from './AccountNode'
 import InfraServerRow from './InfraServerRow'
 import { readStorage, writeStorage } from '../../utils/storage'
+import type { InfraTree as InfraTreeData } from '../../api/client'
 
 const COLLAPSED_KEY = 'infra_collapsed'
 const UNASSIGNED_OPEN_KEY = 'infra_unassigned_open'
@@ -23,7 +24,24 @@ function saveCollapsed(set: Set<string>) {
   writeStorage(COLLAPSED_KEY, JSON.stringify([...set]))
 }
 
-export default function InfraTree() {
+// Ключи аккаунтов и проектов, которые надо раскрыть, чтобы строка сервера стала видна
+function findServerNodeKeys(tree: InfraTreeData, serverId: number): string[] {
+  const keys: string[] = []
+  for (const acc of tree.accounts) {
+    const projectKeys = acc.projects
+      .filter(proj => proj.server_ids.includes(serverId))
+      .map(proj => `p-${proj.id}`)
+    if (projectKeys.length === 0 && !acc.server_ids.includes(serverId)) continue
+    keys.push(`a-${acc.id}`, ...projectKeys)
+  }
+  return keys
+}
+
+interface InfraTreeProps {
+  highlightedServerId?: number | null
+}
+
+export default function InfraTree({ highlightedServerId = null }: InfraTreeProps) {
   const { t } = useTranslation()
   const {
     tree, isLoading, fetchTree,
@@ -54,6 +72,33 @@ export default function InfraTree() {
       return next
     })
   }, [])
+
+  // Путь к выделенному серверу раскрывается один раз на выделение: если потом свернуть
+  // узел вручную, обновление дерева не должно раскрывать его обратно
+  const revealedServerIdRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (highlightedServerId === null) {
+      revealedServerIdRef.current = null
+      return
+    }
+    if (!tree || revealedServerIdRef.current === highlightedServerId) return
+    revealedServerIdRef.current = highlightedServerId
+
+    const keysToOpen = findServerNodeKeys(tree, highlightedServerId)
+    const isUnassigned = tree.unassigned_server_ids.includes(highlightedServerId)
+    if (keysToOpen.length === 0 && !isUnassigned) return
+
+    setTreeVisible(true)
+    if (isUnassigned) setUnassignedOpen(true)
+    setCollapsed(prev => {
+      if (!keysToOpen.some(key => prev.has(key))) return prev
+      const next = new Set(prev)
+      for (const key of keysToOpen) next.delete(key)
+      saveCollapsed(next)
+      return next
+    })
+  }, [highlightedServerId, tree])
 
   const serverMap = useMemo(() => {
     const map = new Map<number, (typeof servers)[0]>()
@@ -150,6 +195,7 @@ export default function InfraTree() {
                 servers={serverMap}
                 allServers={servers}
                 allAssignedIds={allAssignedIds}
+                highlightedServerId={highlightedServerId}
                 collapsedProjects={collapsed}
                 onToggleProject={toggle}
                 collapsed={collapsed.has(`a-${acc.id}`)}
@@ -188,7 +234,7 @@ export default function InfraTree() {
                       {tree.unassigned_server_ids.map(sid => {
                         const srv = serverMap.get(sid)
                         if (!srv) return null
-                        return <InfraServerRow key={sid} server={srv} />
+                        return <InfraServerRow key={sid} server={srv} highlighted={sid === highlightedServerId} />
                       })}
                     </motion.div>
                   )}
