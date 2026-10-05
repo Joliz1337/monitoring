@@ -129,12 +129,18 @@ HOSTER_KEY_MARKERS: tuple[str, ...] = (
 # Юзеры, которых заводит cloud-init/облако по умолчанию.
 CLOUD_DEFAULT_USERS: tuple[str, ...] = ("ubuntu", "cloud-user", "admin", "user1", "debian")
 
-CLOUD_INIT_UNITS = "cloud-init cloud-init-local cloud-config cloud-final"
+# Новые cloud-init переименовали cloud-init в cloud-init-network и добавили
+# cloud-init-main — маскируем все поколения имён.
+CLOUD_INIT_UNITS: tuple[str, ...] = (
+    "cloud-init-local", "cloud-init", "cloud-init-main", "cloud-init-network",
+    "cloud-config", "cloud-final",
+)
 
 
 @dataclass
 class HostFacts:
     vendor: str = ""
+    bios: str = ""
     packages: set[str] = field(default_factory=set)
     unit_files: set[str] = field(default_factory=set)
     unit_states: dict[str, str] = field(default_factory=dict)  # base-имя юнита → состояние
@@ -185,6 +191,8 @@ set +e
 echo "@@VENDOR"
 cat /sys/class/dmi/id/sys_vendor 2>/dev/null
 cat /sys/class/dmi/id/product_name 2>/dev/null
+echo "@@BIOS"
+cat /sys/class/dmi/id/bios_version 2>/dev/null
 echo "@@PKGS"
 dpkg-query -W -f='${db:Status-Abbrev}\t${Package}\n' 2>/dev/null
 echo "@@UNITS"
@@ -252,6 +260,9 @@ def parse_scan_output(raw: str) -> HostFacts:
         if section == "VENDOR":
             if line.strip():
                 vendor_parts.append(line.strip())
+        elif section == "BIOS":
+            if line.strip():
+                facts.bios = line.strip()
         elif section == "PKGS":
             # `${db:Status-Abbrev}` — напр. `ii`/`hi` (установлен), `rc` (снят,
             # остались конфиги), `un`. Считаем установленным только 2-й символ 'i'.
@@ -312,7 +323,11 @@ def parse_scan_output(raw: str) -> HostFacts:
                 facts.dropins.append((parts[1], _b64_decode(parts[2])))
 
     facts.vendor = " ".join(vendor_parts)
-    facts.cloudinit_installed = "cloud-init" in facts.packages
+    # Cloud.ru Advanced (Huawei) ставит cloud-init в обход apt, в /usr/local —
+    # dpkg его не видит, выдают только юниты.
+    facts.cloudinit_installed = "cloud-init" in facts.packages or any(
+        _unit_live(facts, unit) for unit in CLOUD_INIT_UNITS
+    )
     return facts
 
 
@@ -454,6 +469,15 @@ def _unit_live(facts: HostFacts, base: str) -> bool:
     return state not in ("masked", "masked-runtime")
 
 
+def _disable_and_mask_cmds(units: tuple[str, ...]) -> list[str]:
+    # По одному юниту на команду: имена есть не на каждой системе, и ошибка на
+    # отсутствующем не должна срывать остальные. Маска нужна для софта в обход apt —
+    # purge его не снимет.
+    commands = [f"systemctl disable --now {u} 2>/dev/null || true" for u in units]
+    commands += [f"systemctl mask {u} 2>/dev/null || true" for u in units]
+    return commands
+
+
 def _agent_items(facts: HostFacts) -> list[DetectedItem]:
     """Найденные агенты — одна находка на сигнатуру, даже если имя пакета и юнита
     различаются (zabbix-agent-timeweb / zabbix-agent). Purge гасит все юниты и
@@ -464,8 +488,7 @@ def _agent_items(facts: HostFacts) -> list[DetectedItem]:
         units = [u for u in sig.units if _unit_live(facts, u)]
         if not pkgs and not units:
             continue
-        commands = [f"systemctl disable --now {u} 2>/dev/null || true" for u in sig.units]
-        commands += [f"systemctl mask {u} 2>/dev/null || true" for u in sig.units]
+        commands = _disable_and_mask_cmds(sig.units)
         commands += [
             f"DEBIAN_FRONTEND=noninteractive apt-get {APT_LOCK_WAIT} purge -y {p} 2>/dev/null || true"
             for p in sig.packages
@@ -520,22 +543,25 @@ def detect(facts: HostFacts) -> list[DetectedItem]:
 
     # --- cloud-init ---
     if facts.cloudinit_installed and not facts.cloudinit_disabled:
+        detail = (
+            "cloud-init установлен и активен. На перезагрузке из seed/метаданных "
+            "хостера он может заново прописать root-пароль, SSH-ключи и юзеров."
+        )
+        if "cloud-init" not in facts.packages:
+            detail += " Поставлен в обход apt — пакетом не удаляется, юниты будут замаскированы."
         items.append(DetectedItem(
             id="cloud_init",
             category="cloud_init",
             title="cloud-init",
-            detail=(
-                "cloud-init установлен и активен. На перезагрузке из seed/метаданных "
-                "хостера он может заново прописать root-пароль, SSH-ключи и юзеров."
-            ),
+            detail=detail,
             severity="danger",
             access_critical=True,
             default_selected=True,
-            remove_hint="disabled-флаг + purge; сеть в netplan остаётся файлом и переживёт удаление",
+            remove_hint="disabled-флаг + mask юнитов + purge; сеть в netplan остаётся файлом и переживёт удаление",
             kind="shell",
             commands=[
                 "mkdir -p /etc/cloud && touch /etc/cloud/cloud-init.disabled",
-                f"systemctl disable --now {CLOUD_INIT_UNITS} 2>/dev/null || true",
+                *_disable_and_mask_cmds(CLOUD_INIT_UNITS),
                 f"DEBIAN_FRONTEND=noninteractive apt-get {APT_LOCK_WAIT} purge -y cloud-init 2>/dev/null || true",
                 "rm -rf /etc/cloud/cloud.cfg.d/*_ec2* /etc/cloud/cloud.cfg.d/*datasource* 2>/dev/null || true",
             ],
@@ -646,12 +672,14 @@ def detect(facts: HostFacts) -> list[DetectedItem]:
 
 
 def _hoster_hint(facts: HostFacts) -> str | None:
-    haystack = (facts.vendor + " " + " ".join(c for _, c in facts.apt)).lower()
+    haystack = " ".join((facts.vendor, facts.bios, *(c for _, c in facts.apt))).lower()
     for key, label in (
         ("selectel", "Selectel"),
         ("yandex", "Yandex Cloud"),
         ("timeweb", "Timeweb"),
         ("vkcs", "VK Cloud"),
+        # DMI у Huawei-стека — просто «OpenStack Nova»; выдаёт его хост сборки SeaBIOS.
+        ("szxrtosci", "Cloud.ru Advanced (Huawei Cloud)"),
         ("openstack", "OpenStack (VK/облако)"),
     ):
         if key in haystack:

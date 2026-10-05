@@ -20,6 +20,7 @@ from app.services.ssh_config_manager import (  # noqa: E402
     SSHD_DEFAULTS,
     SSHD_KEY_MAP,
     SSHConfigManager,
+    socket_port_override,
 )
 
 
@@ -212,6 +213,16 @@ class Fail2banParsingTests(unittest.TestCase):
         self.assertEqual(self.manager._convert_ban_time("30m"), 1800)
         self.assertEqual(self.manager._convert_ban_time("1h"), 3600)
         self.assertEqual(self.manager._convert_ban_time("1d"), 86400)
+
+
+class SocketOverrideTests(unittest.TestCase):
+    def test_single_dual_stack_listener(self):
+        # Пара 0.0.0.0:port + [::]:port валила ssh.socket с EADDRINUSE (Cloud.ru):
+        # сокет на [::] по умолчанию берёт и IPv4.
+        content = socket_port_override(1794)
+        listens = [line for line in content.splitlines() if line.startswith("ListenStream=")]
+        self.assertEqual(listens, ["ListenStream=", "ListenStream=1794"])
+        self.assertIn("BindIPv6Only=both", content.splitlines())
 
 
 if __name__ == "__main__":
