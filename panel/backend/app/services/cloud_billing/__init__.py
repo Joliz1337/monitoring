@@ -27,7 +27,7 @@ PROVIDERS: dict[str, CloudProvider] = {
     for p in (YandexCloudProvider(), SelectelProvider(), TimewebProvider(), VkCloudProvider())
 }
 
-# История баланса для провайдеров без API списаний: окно то же, что у окна
+# История баланса для провайдеров без текущего расхода в API: окно то же, что у окна
 # потребления Yandex Cloud, — оценка реагирует на нагрузку за те же 3 дня
 HISTORY_WINDOW_DAYS = 3
 # Ручные «Обновить» чаще, чем раз в 15 минут, двигают последнюю точку,

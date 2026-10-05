@@ -432,7 +432,7 @@ class VkCloudProviderTests(unittest.TestCase):
 
 
 class BalanceHistoryTests(unittest.TestCase):
-    """Расход по снимкам баланса — для провайдеров без API истории списаний."""
+    """Расход по снимкам баланса — для провайдеров без текущего расхода в API."""
 
     def setUp(self):
         self.now = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
@@ -496,6 +496,20 @@ class BalanceHistoryTests(unittest.TestCase):
             CloudSnapshot(balance=1000.0, currency="RUB", daily_cost=9.84),
             self.now,
             provider=get_provider("timeweb"),
+        )
+        self.assertEqual(server.cloud_daily_cost, 240.0)
+
+    def test_vk_cloud_history_wins_over_report_average(self):
+        # Отчёт VK видит только закрытые сутки, а первые из них у проекта неполные
+        server = billing_server(
+            cloud_provider="vk_cloud",
+            cloud_balance_history=self._history([(24, 1240), (12, 1120)]),
+        )
+        _apply_snapshot(
+            server,
+            CloudSnapshot(balance=1000.0, currency="RUB", daily_cost=158.06),
+            self.now,
+            provider=get_provider("vk_cloud"),
         )
         self.assertEqual(server.cloud_daily_cost, 240.0)
 
