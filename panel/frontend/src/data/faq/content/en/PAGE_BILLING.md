@@ -21,10 +21,17 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 
 ## Cloud credentials
 
-- **Yandex Cloud** — the billing account ID and a service account authorized key. Create the service account in any folder of the cloud. In the billing account (“Access management”) grant it the `billing.accounts.viewer` role. Then create an authorized key on the service account page and paste the downloaded JSON file into the form as a whole. Yandex Cloud stopped accepting new OAuth tokens on June 1, 2026. A token issued earlier keeps working in an existing project until it expires, but it's better to replace it with a key in advance.
+- **Yandex Cloud** — the billing account ID and a service account authorized key, see the steps below. Yandex Cloud stopped accepting new OAuth tokens on June 1, 2026. A token issued earlier keeps working in an existing project until it expires, but it's better to replace it with a key in advance.
 - **Selectel** — a single static API key: in the Selectel panel go to “Profile → Access → API keys”. The key is shown once, so copy it right away. The user owning the key must have access to the Billing section.
 - **Timeweb Cloud** — an API token from the “API & Terraform” section of the Timeweb Cloud panel.
 - **VK Cloud** — login, password and Project ID (console → “Project settings” → “API access”). VK Cloud has no API keys, so the panel gets a short-lived token on every check. Use the account email or a service account created just for the panel. Two-factor authentication and API access must be enabled in the account.
+
+How to connect Yandex Cloud:
+
+1. Create a service account in any folder of the cloud.
+2. Open [center.yandex.cloud/billing/accounts](https://center.yandex.cloud/billing/accounts), pick the billing account, then “Access management” → “Assign roles” on the left. Select the service account and add the `billing.accounts.viewer` role. The role has to be granted right here: if it's granted in the folder or cloud permissions, Yandex answers the panel with “Forbidden: need billing.accounts.viewer role”. If the service account isn't in the list, grant it the role on the whole organization in Cloud Center — it applies to all of the organization's billing accounts.
+3. On the service account page click “Create new key” → “Create authorized key” and download the JSON file.
+4. Paste the whole file into the key field, enter the billing account ID and click “Sync” on the project card.
 
 Keys are stored encrypted and never returned to the interface: the field in the edit form stays empty — leave it empty to keep the current key.
 

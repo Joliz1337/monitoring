@@ -1994,7 +1994,7 @@
     "yc_key": "Service account authorized key",
     "cloud_threshold": "Balance Threshold",
     "cloud_account_id_hint": "Found in Billing section →",
-    "yc_key_hint": "Grant the service account the billing.accounts.viewer role in the billing account (Access management), create an authorized key and paste the whole JSON file →",
+    "yc_key_hint": "Grant the service account the billing.accounts.viewer role in the billing account itself (Billing → Access management): a role on the folder won't work. Then create an authorized key and paste the whole JSON file →",
     "yc_key_link": "How to create a key",
     "cloud_threshold_hint": "Negative balance limit at which resources are suspended (e.g. -1000)",
     "cloud_token_change_hint": "leave empty to keep current",
