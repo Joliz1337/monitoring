@@ -101,13 +101,13 @@ export const PROVIDERS: Record<CloudProviderId, CloudProviderMeta> = {
       },
       {
         key: 'cloud_credential',
-        labelKey: 'billing.yc_token',
-        hintKey: 'billing.yc_token_hint',
-        placeholder: 'y0__xCr5em...',
+        labelKey: 'billing.yc_key',
+        hintKey: 'billing.yc_key_hint',
+        placeholder: '{"id": "aje...", "service_account_id": "aje...", "private_key": "..."}',
         secret: true,
         link: {
-          url: 'https://oauth.yandex.ru/authorize?response_type=token&client_id=1a6990aa636648e9b2ef855fa7bec2fb',
-          labelKey: 'billing.yc_get_token_link',
+          url: 'https://yandex.cloud/docs/iam/operations/authentication/manage-authorized-keys',
+          labelKey: 'billing.yc_key_link',
         },
       },
     ],

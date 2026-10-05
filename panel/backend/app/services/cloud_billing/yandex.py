@@ -1,14 +1,26 @@
-"""Yandex Cloud: остаток по REST, средний дневной расход по gRPC.
+"""Yandex Cloud: остаток по REST, средний дневной расход по gRPC-отчёту о потреблении.
+
+Вход — авторизованный ключ сервисного аккаунта с ролью billing.accounts.viewer
+на платёжном аккаунте (или ещё не истёкший OAuth-токен), обмен на IAM-токен —
+в yc_token_manager.
 
 Готового Python-SDK биллинга в зависимостях панели нет, а тянуть его ради одного
 метода — лишний вес, поэтому запрос отчёта потребления сериализуется в protobuf
 вручную по схеме consumption_core_service.proto. Унарный gRPC-вызов идёт
 обычным HTTP/2-запросом через тот же httpx-клиент, что и REST: grpcio не умеет
 SOCKS5, а у проекта может быть задан прокси.
+
+Отчёт посуточный: время в границах периода Yandex отбрасывает и включает обе
+даты целиком, поэтому окно — последние закрытые сутки UTC, а среднее считается
+по дням, за которые в отчёте есть списания. Отдаёт отчёт Yandex не чаще раза
+в минуту с одного IP — очередь и кэш в UsageReportScheduler.
 """
+import asyncio
 import logging
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Iterator, Optional
 from urllib.parse import unquote
 
 import httpx
@@ -34,6 +46,17 @@ CONSUMPTION_WINDOW_DAYS = 3
 BALANCE_TIMEOUT = 15.0
 CONSUMPTION_TIMEOUT = 15.0
 
+# Лимит ConsumptionCoreService — запрос в минуту с IP; запас на то, что окно
+# лимита у Yandex отсчитывается не от наших часов
+REPORT_RATE_INTERVAL = 65.0
+# Кнопка «Обновить» в интерфейсе сдаётся через 30 с — дольше отчёт синхронизация
+# не ждёт, он дожидается своей очереди в фоне
+REPORT_WAIT_LIMIT = 20.0
+# Закрытые сутки Yandex ещё досчитывает задним числом, поэтому кэш живёт
+# несколько часов, а не до смены даты
+REPORT_CACHE_TTL = 6 * 3600.0
+SECONDS_PER_DAY = 86400
+
 # Коды google.rpc.Code по порядку: индекс = числовой grpc-status
 GRPC_STATUS_NAMES = (
     "OK", "CANCELLED", "UNKNOWN", "INVALID_ARGUMENT", "DEADLINE_EXCEEDED",
@@ -54,16 +77,29 @@ GRPC_FRAME_HEADER_SIZE = 5
 #   field 10 = aggregation_period (TimeGrouping enum, DAY=1)
 #
 # BillingAccountUsageReportResponse (consumption_core_service.proto):
-#   field 1  = currency        (Currency enum)
-#   field 2  = cost            (StringDecimal)
-#   field 3  = credit_details  (CreditDetails)
-#   field 4  = expense         (StringDecimal)
+#   field 4  = expense         (StringDecimal) — итог за весь период
+#   field 5  = entities_data   (repeated BillingAccountUsageReportEntityData)
+#
+# BillingAccountUsageReportEntityData (consumption_core.proto):
+#   field 5  = periodic        (repeated UsageReportPeriodicData)
+#
+# UsageReportPeriodicData (consumption_core.proto):
+#   field 3  = expense         (StringDecimal)
+#   field 4  = timestamp       (google.protobuf.Timestamp, начало суток)
 #
 # StringDecimal (common_types.proto):
 #   field 1  = value (string)
 #
 # google.protobuf.Timestamp:
 #   field 1  = seconds (int64)
+
+WIRE_VARINT, WIRE_FIXED64, WIRE_LEN, WIRE_FIXED32 = 0, 1, 2, 5
+
+REPORT_EXPENSE = 4
+REPORT_ENTITIES = 5
+ENTITY_PERIODIC = 5
+PERIOD_EXPENSE = 3
+PERIOD_TIMESTAMP = 4
 
 
 def _varint(value: int) -> bytes:
@@ -89,15 +125,15 @@ def _read_varint(data: bytes, pos: int) -> tuple[int, int]:
 
 def _pb_string(field: int, value: str) -> bytes:
     raw = value.encode("utf-8")
-    return _varint(field << 3 | 2) + _varint(len(raw)) + raw
+    return _varint(field << 3 | WIRE_LEN) + _varint(len(raw)) + raw
 
 
 def _pb_submessage(field: int, inner: bytes) -> bytes:
-    return _varint(field << 3 | 2) + _varint(len(inner)) + inner
+    return _varint(field << 3 | WIRE_LEN) + _varint(len(inner)) + inner
 
 
 def _pb_varint_field(field: int, value: int) -> bytes:
-    return _varint(field << 3) + _varint(value)
+    return _varint(field << 3 | WIRE_VARINT) + _varint(value)
 
 
 def _pb_timestamp(field: int, dt: datetime) -> bytes:
@@ -113,59 +149,87 @@ def _build_usage_request(account_id: str, start: datetime, end: datetime) -> byt
     return msg
 
 
-def _extract_expense(data: bytes) -> Optional[str]:
-    """expense (field 4) → StringDecimal.value (field 1)."""
+def _pb_fields(data: bytes) -> Iterator[tuple[int, int | bytes]]:
+    """Поля сообщения по порядку: varint — числом, length-delimited — байтами.
+    fixed32/fixed64 отчёту не нужны и пропускаются."""
     pos = 0
     while pos < len(data):
         tag, pos = _read_varint(data, pos)
-        fn = tag >> 3
-        wt = tag & 7
-
-        if wt == 0:
-            _, pos = _read_varint(data, pos)
-        elif wt == 2:
+        field, wire_type = tag >> 3, tag & 7
+        if wire_type == WIRE_VARINT:
+            value, pos = _read_varint(data, pos)
+            yield field, value
+        elif wire_type == WIRE_LEN:
             length, pos = _read_varint(data, pos)
-            payload = data[pos:pos + length]
-            if fn == 4:
-                val = _extract_string_value(payload)
-                if val is not None:
-                    try:
-                        float(val)
-                        return val
-                    except ValueError:
-                        pass
+            yield field, data[pos:pos + length]
             pos += length
-        elif wt == 1:
+        elif wire_type == WIRE_FIXED64:
             pos += 8
-        elif wt == 5:
+        elif wire_type == WIRE_FIXED32:
             pos += 4
         else:
-            break
+            raise CloudBillingError("Malformed usage report")
+
+
+def _pb_field(data: bytes, number: int) -> int | bytes | None:
+    return next((value for field, value in _pb_fields(data) if field == number), None)
+
+
+def _pb_messages(data: bytes, number: int) -> Iterator[bytes]:
+    for field, value in _pb_fields(data):
+        if field == number and isinstance(value, bytes):
+            yield value
+
+
+def _pb_decimal(message: int | bytes | None) -> Optional[float]:
+    """StringDecimal → число; None, если поля нет или в нём не число."""
+    raw = _pb_field(message, 1) if isinstance(message, bytes) else None
+    if not isinstance(raw, bytes):
+        return None
+    try:
+        return float(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
+def _daily_expenses(report: bytes) -> dict[int, float]:
+    """Списания по суткам UTC из entities_data[].periodic[]; ключ — номер суток от эпохи."""
+    by_day: dict[int, float] = {}
+    for entity in _pb_messages(report, REPORT_ENTITIES):
+        for period in _pb_messages(entity, ENTITY_PERIODIC):
+            expense = _pb_decimal(_pb_field(period, PERIOD_EXPENSE))
+            timestamp = _pb_field(period, PERIOD_TIMESTAMP)
+            if expense is None or not isinstance(timestamp, bytes):
+                continue
+            seconds = _pb_field(timestamp, 1)
+            day = (seconds if isinstance(seconds, int) else 0) // SECONDS_PER_DAY
+            by_day[day] = by_day.get(day, 0.0) + abs(expense)
+    return by_day
+
+
+def _average_daily_expense(report: bytes) -> Optional[float]:
+    """Средний расход за сутки со списаниями.
+
+    Делим на число таких суток, а не на всё окно: у аккаунта, созданного вчера,
+    деление на три занизило бы расход втрое. Сутки без списаний (до создания
+    аккаунта или покрытые грантом) в среднее не входят."""
+    spent = [value for value in _daily_expenses(report).values() if value > 0]
+    if spent:
+        return round(sum(spent) / len(spent), 4)
+
+    # Разбивки по дням в ответе нет — итог периода делится на всё окно
+    total = _pb_decimal(_pb_field(report, REPORT_EXPENSE))
+    if total:
+        return round(abs(total) / CONSUMPTION_WINDOW_DAYS, 4)
     return None
 
 
-def _extract_string_value(data: bytes) -> Optional[str]:
-    """field 1 (string) из StringDecimal submessage."""
-    pos = 0
-    while pos < len(data):
-        tag, pos = _read_varint(data, pos)
-        fn = tag >> 3
-        wt = tag & 7
-
-        if wt == 0:
-            _, pos = _read_varint(data, pos)
-        elif wt == 2:
-            length, pos = _read_varint(data, pos)
-            if fn == 1:
-                return data[pos:pos + length].decode("utf-8")
-            pos += length
-        elif wt == 1:
-            pos += 8
-        elif wt == 5:
-            pos += 4
-        else:
-            break
-    return None
+def _report_window(now: datetime) -> tuple[datetime, datetime]:
+    """Последние закрытые сутки UTC, обе границы включительно: время Yandex
+    отбрасывает, а текущие сутки ещё не досчитаны."""
+    day = now.astimezone(timezone.utc).date()
+    today = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    return today - timedelta(days=CONSUMPTION_WINDOW_DAYS), today - timedelta(days=1)
 
 
 def _grpc_frame(message: bytes) -> bytes:
@@ -220,10 +284,96 @@ async def _grpc_unary_call(
     return _grpc_unframe(resp.content)
 
 
+@dataclass(slots=True)
+class _CachedCost:
+    window_end: datetime
+    fetched_at: float
+    daily_cost: Optional[float]
+
+
+class UsageReportScheduler:
+    """Отчёт о потреблении под лимит Yandex — запрос в минуту с IP.
+
+    Запросы через одну точку выхода (общий клиент или клиент своего прокси —
+    у каждого свой IP) идут по очереди с интервалом. Синхронизация ждёт отчёт
+    не дольше wait_limit: дальше он дожидается очереди в фоне и попадает в кэш
+    к следующей синхронизации, а у проекта пока остаётся прежний расход."""
+
+    def __init__(
+        self,
+        interval: float = REPORT_RATE_INTERVAL,
+        wait_limit: float = REPORT_WAIT_LIMIT,
+        cache_ttl: float = REPORT_CACHE_TTL,
+    ) -> None:
+        self._interval = interval
+        self._wait_limit = wait_limit
+        self._cache_ttl = cache_ttl
+        self._next_slot: dict[httpx.AsyncClient, float] = {}
+        self._cache: dict[str, _CachedCost] = {}
+        self._pending: dict[str, asyncio.Task] = {}
+
+    async def daily_cost(
+        self, client: httpx.AsyncClient, iam_token: str, account_id: str, now: datetime
+    ) -> tuple[Optional[float], Optional[str]]:
+        """Средний расход в сутки и предупреждение. Ошибка не фатальна — баланс
+        уже получен, без расхода теряется только прогноз."""
+        start, end = _report_window(now)
+        cached = self._cache.get(account_id)
+        if (
+            cached is not None
+            and cached.window_end == end
+            and time.monotonic() - cached.fetched_at < self._cache_ttl
+        ):
+            return cached.daily_cost, None
+
+        task = self._pending.get(account_id)
+        if task is None:
+            task = asyncio.create_task(self._fetch(client, iam_token, account_id, start, end))
+            self._pending[account_id] = task
+            task.add_done_callback(lambda _: self._pending.pop(account_id, None))
+
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), self._wait_limit)
+        except asyncio.TimeoutError:
+            return None, None
+
+    async def _fetch(
+        self,
+        client: httpx.AsyncClient,
+        iam_token: str,
+        account_id: str,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[Optional[float], Optional[str]]:
+        await self._wait_turn(client)
+        request = _build_usage_request(account_id, start, end)
+        try:
+            response = await _grpc_unary_call(client, YC_USAGE_URL, iam_token, request)
+            daily_cost = _average_daily_expense(response)
+        except CloudBillingError as e:
+            logger.warning("YC consumption API failed for %s: %s", account_id, e)
+            return None, str(e)
+
+        self._cache[account_id] = _CachedCost(end, time.monotonic(), daily_cost)
+        return daily_cost, None
+
+    async def _wait_turn(self, client: httpx.AsyncClient) -> None:
+        # Слот бронируется до ожидания: следующий запрос через тот же выход
+        # встанет за этим, даже если придёт, пока этот ещё спит
+        now = time.monotonic()
+        slot = max(now, self._next_slot.get(client, now))
+        self._next_slot[client] = slot + self._interval
+        if slot > now:
+            await asyncio.sleep(slot - now)
+
+
 class YandexCloudProvider(CloudProvider):
     id = "yandex_cloud"
     default_currency = "RUB"
     requires_account_id = True
+
+    def __init__(self, reports: Optional[UsageReportScheduler] = None) -> None:
+        self._reports = reports or UsageReportScheduler()
 
     async def fetch(
         self,
@@ -237,7 +387,9 @@ class YandexCloudProvider(CloudProvider):
 
         iam_token = await self._iam_token(client, credential)
         balance, currency = await self._fetch_balance(client, iam_token, account_id)
-        daily_cost, warning = await self._fetch_daily_cost(client, iam_token, account_id)
+        daily_cost, warning = await self._reports.daily_cost(
+            client, iam_token, account_id, datetime.now(timezone.utc)
+        )
 
         return CloudSnapshot(
             balance=balance,
@@ -246,9 +398,9 @@ class YandexCloudProvider(CloudProvider):
             warning=warning,
         )
 
-    async def _iam_token(self, client: httpx.AsyncClient, oauth_token: str) -> str:
+    async def _iam_token(self, client: httpx.AsyncClient, credential: str) -> str:
         try:
-            return await get_yc_token_manager().get_iam_token(client, oauth_token)
+            return await get_yc_token_manager().get_iam_token(client, credential)
         except YCTokenError as e:
             raise CloudAuthError(str(e)) from e
         except httpx.HTTPError as e:
@@ -271,7 +423,7 @@ class YandexCloudProvider(CloudProvider):
         if resp.status_code == 401:
             raise CloudAuthError("Auth failed: invalid or expired IAM token")
         if resp.status_code == 403:
-            raise CloudAuthError("Forbidden: need billing.accounts.viewer role")
+            raise CloudAuthError("Forbidden: need billing.accounts.viewer role on the billing account")
         if resp.status_code == 404:
             raise CloudBillingError(f"Billing account {account_id} not found")
         if resp.status_code != 200:
@@ -279,28 +431,3 @@ class YandexCloudProvider(CloudProvider):
 
         data = resp.json()
         return float(data.get("balance", "0")), data.get("currency") or self.default_currency
-
-    async def _fetch_daily_cost(
-        self, client: httpx.AsyncClient, iam_token: str, account_id: str
-    ) -> tuple[Optional[float], Optional[str]]:
-        """Средний расход в сутки за окно потребления; ошибка здесь не фатальна —
-        баланс уже получен, без расхода теряется только прогноз."""
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=CONSUMPTION_WINDOW_DAYS)
-        request = _build_usage_request(account_id, start, now)
-
-        try:
-            response = await _grpc_unary_call(client, YC_USAGE_URL, iam_token, request)
-        except CloudBillingError as e:
-            logger.warning("YC consumption API failed for %s: %s", account_id, e)
-            return None, str(e)
-
-        expense_str = _extract_expense(response)
-        if expense_str is None:
-            return None, "No expense data in response"
-
-        total = abs(float(expense_str))
-        if total <= 0:
-            return None, None
-
-        return round(total / CONSUMPTION_WINDOW_DAYS, 4), None

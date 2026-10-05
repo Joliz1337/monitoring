@@ -21,7 +21,7 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 
 ## Cloud credentials
 
-- **Yandex Cloud** — an OAuth token (link is in the form) and the billing account ID from the cloud console.
+- **Yandex Cloud** — the billing account ID and a service account authorized key. Create the service account in any folder of the cloud. In the billing account (“Access management”) grant it the `billing.accounts.viewer` role. Then create an authorized key on the service account page and paste the downloaded JSON file into the form as a whole. Yandex Cloud stopped accepting new OAuth tokens on June 1, 2026. A token issued earlier keeps working in an existing project until it expires, but it's better to replace it with a key in advance.
 - **Selectel** — a single static API key: in the Selectel panel go to “Profile → Access → API keys”. The key is shown once, so copy it right away. The user owning the key must have access to the Billing section.
 - **Timeweb Cloud** — an API token from the “API & Terraform” section of the Timeweb Cloud panel.
 - **VK Cloud** — login, password and Project ID (console → “Project settings” → “API access”). VK Cloud has no API keys, so the panel gets a short-lived token on every check. Use the account email or a service account created just for the panel. Two-factor authentication and API access must be enabled in the account.
