@@ -18,11 +18,11 @@ from typing import Optional
 
 import httpx
 from sqlalchemy import select, and_
-from urllib.parse import urlparse
 
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_external_client, node_auth_headers
-from app.services.net_utils import is_public_range, resolve_panel_ip, host_to_ip
+from app.services.net_utils import is_public_range, resolve_panel_ip
+from app.services.node_ips import collect_node_ips
 from app.services.node_capabilities import Capability, server_allows
 from app.services.node_sync_queue import KIND_BLOCKLIST, enqueue
 from app.services.ping_block import PingBlockScope, load_scope
@@ -45,8 +45,8 @@ ALLOW_SYNC_TIMEOUT = 20.0
 # Три запроса: белый список in, out и настройка ping
 ALLOW_PUSH_BUDGET = 3 * ALLOW_SYNC_TIMEOUT + 5
 SYNC_TIMEOUT_IPS_PER_SEC = 40_000  # +1 сек к таймауту синка на каждые 40k IP
-# Страховочная сверка белого списка: IP ноды по DNS-имени или IP панели
-# меняются без единой правки в панели
+# Страховочная сверка белого списка: IP ноды по DNS-имени, адреса на её
+# интерфейсах и IP панели меняются без единой правки в панели
 ALLOWLIST_CHECK_INTERVAL = 300
 ALLOWLIST_PUSH_DEBOUNCE = 3.0  # пачка правок серверов (массовое удаление, деплой) — одна рассылка
 ALLOWLIST_START_DELAY = 60  # после рестарта last_seen протухший — весь парк сочли бы офлайн
@@ -294,13 +294,14 @@ class BlocklistManager:
         return [r.ip_cidr for r in rules]
 
     async def build_allow_policy(self) -> AllowPolicy:
-        """Белый список по направлениям: ручные allow-правила + авто (IP панели и всех нод).
+        """Белый список по направлениям: ручные allow-правила + авто (IP панели и все адреса нод).
 
         IP панели и нод всегда в allowlist — ACCEPT стоит первым в цепочке,
         поэтому управляющий трафик не попадёт под DROP даже при плохом блок-листе."""
         async with async_session() as db:
             servers = (await db.execute(
-                select(Server.id, Server.url, Server.folder).where(Server.is_active == True)  # noqa: E712
+                select(Server.id, Server.url, Server.folder, Server.last_metrics)
+                .where(Server.is_active == True)  # noqa: E712
             )).all()
             manual = {
                 direction: await self.get_global_rules(db, direction, list_type="allow")
@@ -309,10 +310,7 @@ class BlocklistManager:
             ping_scope = await load_scope(db)
 
         # Резолв — после закрытия сессии: медленный DNS не держит коннект пула
-        resolved = await asyncio.gather(
-            *(host_to_ip(urlparse(url).hostname or "") for _, url, _ in servers)
-        )
-        auto = {ip for ip in resolved if ip}
+        auto = await collect_node_ips((row.url, row.last_metrics) for row in servers)
         panel_ip = await resolve_panel_ip()
         if panel_ip:
             auto.add(panel_ip)
@@ -321,9 +319,7 @@ class BlocklistManager:
             direction: self.deduplicate_ips(sorted(auto.union(manual[direction])))
             for direction in DIRECTIONS
         }
-        blocked = frozenset(
-            server_id for server_id, _, folder in servers if ping_scope.covers(server_id, folder)
-        )
+        blocked = frozenset(row.id for row in servers if ping_scope.covers(row.id, row.folder))
         return AllowPolicy(ips=ips, ping_scope=ping_scope, ping_blocked_ids=blocked)
     
     async def get_server_rules(self, server_id: int, db: AsyncSession, direction: str = "in") -> list[str]:

@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import { Checkbox } from '../ui/Checkbox'
+import { SecretInput } from '../ui/SecretInput'
 import ReloadCmdPresetChips from '../wildcard/ReloadCmdPresetChips'
 import type {
   RemnawaveCertProfile,
@@ -162,13 +163,11 @@ export default function DeployTargetFields({
           ))}
         </div>
         {deploy.sshAuth === 'password' ? (
-          <input
-            type="password"
+          <SecretInput
             value={deploy.sshPassword}
             onChange={(e) => onChange({ sshPassword: e.target.value })}
             placeholder={t('servers.deploy_ssh_password')}
             className="input"
-            autoComplete="new-password"
           />
         ) : (
           <div className="space-y-2">
@@ -178,13 +177,11 @@ export default function DeployTargetFields({
               placeholder={t('servers.deploy_ssh_key_placeholder')}
               className="input font-mono text-xs resize-none w-full min-h-[88px]"
             />
-            <input
-              type="password"
+            <SecretInput
               value={deploy.sshPassphrase}
               onChange={(e) => onChange({ sshPassphrase: e.target.value })}
               placeholder={t('servers.deploy_ssh_passphrase')}
               className="input"
-              autoComplete="new-password"
             />
           </div>
         )}
@@ -218,13 +215,11 @@ export default function DeployTargetFields({
         </label>
         {deploy.changePassword && (
           <div className="ml-6">
-            <input
-              type="password"
+            <SecretInput
               value={deploy.newPassword}
               onChange={(e) => onChange({ newPassword: e.target.value })}
               placeholder={t('servers.deploy_new_password')}
               className="input"
-              autoComplete="new-password"
             />
           </div>
         )}

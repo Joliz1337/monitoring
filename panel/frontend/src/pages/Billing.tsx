@@ -784,6 +784,7 @@ export default function Billing() {
           onCreated={srv => {
             setServers(prev => [...prev, srv].sort(sortServers))
             setModal({ kind: 'none' })
+            if (srv.billing_type === 'cloud') handleSync(srv)
           }}
         />
       )}

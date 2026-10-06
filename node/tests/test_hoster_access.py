@@ -29,6 +29,7 @@ def _b(text: str) -> str:
 def build_dump(
     *,
     vendor="cmpt\nOpenStack Compute",
+    bios="",
     packages=(),  # установленные (ii)
     removed_config_packages=(),  # rc — сняты, остались конфиги
     units=(),  # включённые юниты (name.service)
@@ -44,7 +45,7 @@ def build_dump(
     sshd=(),  # raw "key value" lines
     dropins=(),  # (file, content)
 ) -> str:
-    lines = ["@@VENDOR", vendor, "@@PKGS"]
+    lines = ["@@VENDOR", vendor, "@@BIOS", bios, "@@PKGS"]
     lines += [f"ii\t{p}" for p in packages]
     lines += [f"rc\t{p}" for p in removed_config_packages]
     lines.append("@@UNITS")
@@ -212,6 +213,31 @@ class DetectTests(unittest.TestCase):
 
     def test_cloud_init_disabled_not_flagged(self):
         facts = parse_scan_output(build_dump(packages=("cloud-init",), cloudinit_disabled=True))
+        self.assertNotIn("cloud_init", {i.category for i in detect(facts)})
+
+    def test_cloudru_profile(self):
+        # Cloud.ru Advanced (Huawei): cloud-init 19.1 в /usr/local мимо dpkg —
+        # виден только юнитами; virtio-порты qemu-ga есть, самого агента нет.
+        facts = parse_scan_output(build_dump(
+            vendor="OpenStack Foundation\nOpenStack Nova",
+            bios="rel-1.12.1-0-ga5cab58-20241201_072321-szxrtosci10000",
+            units=("cloud-init-local.service", "cloud-init.service", "cloud-config.service", "cloud-final.service"),
+            qemu_port=True,
+            users=(("root", 0, "/root", "/bin/bash"),),
+            sshd=("permitrootlogin yes", "passwordauthentication yes"),
+        ))
+        items = {i.category: i for i in detect(facts)}
+        self.assertEqual(set(items), {"cloud_init", "sshd_weakening"})
+        self.assertIn("в обход apt", items["cloud_init"].detail)
+        self.assertIn("systemctl mask cloud-init 2>/dev/null || true", items["cloud_init"].commands)
+        self.assertEqual(ha._hoster_hint(facts), "Cloud.ru Advanced (Huawei Cloud)")
+
+    def test_masked_cloud_init_outside_apt_not_flagged(self):
+        # После purge на Cloud.ru: пакета не было, юниты замаскированы, флаг стоит.
+        facts = parse_scan_output(build_dump(
+            masked_units=("cloud-init.service", "cloud-init-local.service", "cloud-config.service", "cloud-final.service"),
+            cloudinit_disabled=True,
+        ))
         self.assertNotIn("cloud_init", {i.category for i in detect(facts)})
 
     def test_hardened_sshd_not_flagged(self):

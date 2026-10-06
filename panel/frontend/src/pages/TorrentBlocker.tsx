@@ -10,6 +10,7 @@ import {
 import { useTorrentBlockerStore } from '../stores/torrentBlockerStore'
 import type { TorrentBlockerStatsRange } from '../api/client'
 import { Tooltip } from '../components/ui/Tooltip'
+import { SecretInput } from '../components/ui/SecretInput'
 import { FAQIcon } from '../components/FAQ'
 import { ServerAddDropdown } from '../components/servers/ServerAddDropdown'
 
@@ -365,8 +366,7 @@ export default function TorrentBlocker() {
 
                 <div className="space-y-1">
                   <label className="text-sm text-dark-300">{t('torrent_blocker.webhook_secret')}</label>
-                  <input
-                    type="password"
+                  <SecretInput
                     value={localSettings.webhook_secret}
                     onChange={e => setLocalSettings(prev => ({ ...prev, webhook_secret: e.target.value }))}
                     placeholder={t('torrent_blocker.webhook_secret_placeholder')}

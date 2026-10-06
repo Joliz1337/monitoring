@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from starlette.requests import Request  # noqa: E402
 
-from app.security import get_client_ip  # noqa: E402
+from app.security import get_client_ip, is_direct_local_request  # noqa: E402
 
 NGINX_PEER = "172.18.0.4"
 CLIENT = "203.0.113.7"
@@ -89,6 +89,27 @@ class ClientIpTests(unittest.TestCase):
 
     def test_missing_client(self):
         self.assertEqual(get_client_ip(make_request(None)), "unknown")
+
+
+class DirectLocalRequestTests(unittest.TestCase):
+    """Служебный вход скрипта обновления: только изнутри контейнера, мимо nginx."""
+
+    def test_loopback_without_proxy_headers(self):
+        self.assertTrue(is_direct_local_request(make_request("127.0.0.1")))
+        self.assertTrue(is_direct_local_request(make_request("::1")))
+
+    def test_proxied_request_is_not_local(self):
+        """uvicorn подставляет адрес из X-Forwarded-For — loopback в нём ничего не значит."""
+        for header in ("X-Real-IP", "X-Forwarded-For"):
+            with self.subTest(header=header):
+                request = make_request("127.0.0.1", **{header: "127.0.0.1"})
+                self.assertFalse(is_direct_local_request(request))
+
+    def test_docker_network_peer_is_not_local(self):
+        self.assertFalse(is_direct_local_request(make_request(NGINX_PEER)))
+
+    def test_missing_client(self):
+        self.assertFalse(is_direct_local_request(make_request(None)))
 
 
 if __name__ == "__main__":

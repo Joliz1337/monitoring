@@ -16,6 +16,7 @@ import { toast } from 'sonner'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useRememberedState } from '../hooks/useRememberedState'
 import { Tooltip } from '../components/ui/Tooltip'
+import { SecretInput } from '../components/ui/SecretInput'
 import { FAQIcon } from '../components/FAQ'
 import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import { nodeAllows } from '../utils/nodeCapabilities'
@@ -1596,7 +1597,7 @@ function SettingsTab() {
               <div>
                 <label className="block text-sm text-dark-300 mb-2">API Token</label>
                 <div className="relative">
-                  <input type={showToken ? 'text' : 'password'} value={form.api_token}
+                  <SecretInput revealed={showToken} value={form.api_token}
                     onChange={e => updateField('api_token', e.target.value)}
                     placeholder={settings?.api_token ? '***' : 'Enter token'}
                     className="input pr-10" />
@@ -1609,7 +1610,7 @@ function SettingsTab() {
               <div>
                 <label className="block text-sm text-dark-300 mb-2">Cookie Secret</label>
                 <div className="relative">
-                  <input type={showCookie ? 'text' : 'password'} value={form.cookie_secret}
+                  <SecretInput revealed={showCookie} value={form.cookie_secret}
                     onChange={e => updateField('cookie_secret', e.target.value)}
                     placeholder={settings?.cookie_secret ? '***' : 'name:value (optional)'}
                     className="input pr-10" />
@@ -1798,7 +1799,7 @@ function SettingsTab() {
                   <div>
                     <label className="block text-sm text-dark-400 mb-2">Telegram Bot Token</label>
                     <div className="relative">
-                      <input type={showAnomalyToken ? 'text' : 'password'} value={form.anomaly_tg_bot_token}
+                      <SecretInput revealed={showAnomalyToken} value={form.anomaly_tg_bot_token}
                         onChange={e => updateField('anomaly_tg_bot_token', e.target.value)}
                         placeholder={settings?.anomaly_tg_bot_token ? '***' : 'Bot token'}
                         className="input pr-10" />

@@ -69,6 +69,23 @@ def _unique_tmp_path(prefix: str) -> str:
     return f"/tmp/{prefix}.{uuid4().hex[:12]}"
 
 
+def socket_port_override(port: int) -> str:
+    """Drop-in ssh.socket с новым портом.
+
+    Один голый порт, как в штатном юните Ubuntu: systemd открывает один сокет
+    [::]:port на IPv4 и IPv6 (без IPv6 в ядре — 0.0.0.0:port). Пара
+    0.0.0.0:port + [::]:port не годится: сокет на [::] по умолчанию тоже берёт
+    IPv4 и упирается в первый — ssh.socket не стартует с EADDRINUSE.
+    BindIPv6Only=both держит IPv4 на сокете и при net.ipv6.bindv6only=1.
+    """
+    return (
+        "[Socket]\n"
+        "ListenStream=\n"
+        f"ListenStream={port}\n"
+        "BindIPv6Only=both\n"
+    )
+
+
 class SSHConfigManager:
 
     def __init__(self):
@@ -454,14 +471,8 @@ class SSHConfigManager:
     def _write_socket_port_override(self, socket_name: str, port: int) -> tuple[bool, str, str]:
         override_dir = f"/etc/systemd/system/{socket_name}.d"
         override_path = f"{override_dir}/listen-port.conf"
-        content = (
-            "[Socket]\n"
-            "ListenStream=\n"
-            f"ListenStream=0.0.0.0:{port}\n"
-            f"ListenStream=[::]:{port}\n"
-        )
         self._run_cmd(["mkdir", "-p", override_dir])
-        ok, _, stderr = self._run_cmd(["tee", override_path], input_data=content)
+        ok, _, stderr = self._run_cmd(["tee", override_path], input_data=socket_port_override(port))
         if not ok:
             logger.error("socket_override_write_failed", extra={"path": override_path, "error": stderr})
             return False, override_path, f"Failed to write socket override: {stderr}"

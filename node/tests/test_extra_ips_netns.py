@@ -20,6 +20,9 @@
 Второй тест гоняет живой трафик через два роутера-namespace: без своего шлюза
 клиент за шлюзом доп. адреса ответов не получает, со шлюзом — получает, основной
 адрес работает по-прежнему, после сноса маршрута самолечение возвращает ответы.
+Третий — опущенная карта: транзакция поднимает её вместе с адресом и шлюзом,
+откат опускает обратно, restore-runtime поднимает после «перезагрузки», снятие
+последнего адреса опускает карту, а откат этого снятия возвращает и линк, и адрес.
 """
 
 import shutil
@@ -219,6 +222,67 @@ echo "E2E OK"
 """
 
 
+# Карта, которую облако подключило позже: опущена, конфига у неё нет
+LINK_SCENARIO = r"""
+set -u
+SCRIPT="$1"
+export EXTRA_IPS_STATE_DIR="$(mktemp -d)"
+STATE="$EXTRA_IPS_STATE_DIR"
+fail() { echo "FAIL: $*"; exit 1; }
+
+mount -t sysfs sysfs /sys || fail "cannot mount sysfs"
+ip link add eth0 type dummy && ip link set eth0 up
+ip addr add 10.0.0.2/24 dev eth0
+ip route add default via 10.0.0.1 dev eth0
+ip link add eth1 type dummy
+
+b64() { printf '%s' "$1" | base64 -w0; }
+NL='
+'
+# plan <tx> <add> <remove> <managed> <routes> <links> <link>
+plan() {
+    printf 'TX_ID=%s\nIFACE=eth1\nBACKEND=fallback\nDETAIL=x\nTIMEOUT=30\nADD=%s\nREMOVE=%s\nPROTECTED=10.0.0.2\nMANAGED_B64=%s\nROUTES_B64=%s\nSUPPRESSED_B64=\nLINKS_B64=%s\nLINK=%s\n' \
+        "$1" "$2" "$3" "$(b64 "$4")" "$(b64 "$5")" "$(b64 "$6")" "$7"
+}
+up_plan() { plan "$1" 8.8.4.4/32 "" "eth1 8.8.4.4/32$NL" "eth1 8.8.4.4 8.8.4.1 1001$NL" "eth1$NL" up; }
+down_plan() { plan "$1" "" 8.8.4.4/32 "" "" "" down; }
+link_up() { ip -o link show dev eth1 | grep -qE '<([^>]*,)?UP(,[^>]*)?>'; }
+has_addr() { ip addr show dev eth1 | grep -q "8.8.4.4/32"; }
+routed() { ip route get 8.8.8.8 from 8.8.4.4 2>/dev/null | grep -q "via 8.8.4.1 dev eth1"; }
+
+link_up && fail "eth1 must start down"
+up_plan 20260925-140000-aaaa | bash "$SCRIPT" apply >/dev/null || fail "apply with link up"
+link_up || fail "the link was not brought up"
+has_addr || fail "address missing"
+routed || fail "gateway route missing"
+grep -qx eth1 "$STATE/links.list" || fail "links.list not written"
+bash "$SCRIPT" rollback 20260925-140000-aaaa >/dev/null || fail "rollback"
+link_up && fail "rollback left the link up"
+has_addr && fail "rollback left the address"
+[ -s "$STATE/links.list" ] && fail "rollback kept links.list"
+
+up_plan 20260925-140100-bbbb | bash "$SCRIPT" apply >/dev/null || fail "apply 2"
+bash "$SCRIPT" confirm 20260925-140100-bbbb >/dev/null || fail "confirm"
+
+ip link set eth1 down
+ip addr flush dev eth1
+bash "$SCRIPT" restore-runtime || fail "restore-runtime"
+link_up || fail "restore-runtime did not bring the link up"
+has_addr || fail "restore-runtime did not re-add the address"
+routed || fail "restore-runtime did not restore the gateway route"
+
+down_plan 20260925-140200-cccc | bash "$SCRIPT" apply >/dev/null || fail "apply with link down"
+link_up && fail "the last address is gone but the link is up"
+[ -s "$STATE/links.list" ] && fail "links.list kept the card"
+bash "$SCRIPT" rollback 20260925-140200-cccc >/dev/null || fail "rollback of link down"
+link_up || fail "rollback did not bring the link back up"
+has_addr || fail "rollback did not return the address"
+routed || fail "rollback did not return the gateway route"
+grep -qx eth1 "$STATE/links.list" || fail "rollback did not return links.list"
+echo "LINK OK"
+"""
+
+
 def netns_available() -> bool:
     if sys.platform == "win32" or not shutil.which("unshare"):
         return False
@@ -244,6 +308,12 @@ class GatewayRoutesNetnsTest(unittest.TestCase):
         code, output = run_in_netns(SCENARIO)
         self.assertEqual(code, 0, output)
         self.assertIn("ALL OK", output)
+
+    @unittest.skipUnless(netns_available(), "needs Linux with unprivileged user and network namespaces")
+    def test_down_card_follows_its_addresses(self):
+        code, output = run_in_netns(LINK_SCENARIO)
+        self.assertEqual(code, 0, output)
+        self.assertIn("LINK OK", output)
 
     @unittest.skipUnless(netns_available() and shutil.which("nsenter") and shutil.which("ping"),
                          "needs user/network namespaces, nsenter and ping")

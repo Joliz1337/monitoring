@@ -10,6 +10,7 @@ import { toast } from 'sonner'
 import { sshSecurityApi, serversApi, Server as ServerType, SSHConfig, Fail2banConfig, SSHKey, SSHStatus, Fail2banBannedIP, SSHPresets, sshBulkStreamUrls } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Tooltip } from '../components/ui/Tooltip'
+import { SecretInput } from '../components/ui/SecretInput'
 import { FAQIcon } from '../components/FAQ'
 import { ServerSelector } from '../components/ssh/ServerSelector'
 import { BulkProgressPanel } from '../components/ssh/BulkProgressPanel'
@@ -1204,8 +1205,8 @@ export default function SSHSecurity() {
                         <div className="space-y-2">
                           <div className="flex items-center gap-2">
                             <div className="relative flex-1">
-                              <input
-                                type={showPassword ? 'text' : 'password'}
+                              <SecretInput
+                                revealed={showPassword}
                                 value={passwordValue}
                                 onChange={e => setPasswordValue(e.target.value)}
                                 className="w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 pr-9 text-dark-100 text-sm font-mono

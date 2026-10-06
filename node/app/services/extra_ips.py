@@ -27,10 +27,16 @@ netplan стоит сети после ребута. Правила живут �
 поднимает `mon-extra-ips.service`, а разъезд (networkd сносит чужие маршруты при
 переконфигурации линка) чинит цикл агента.
 
+Карту, которую облако подключило к ВМ позже (порт в другой сети), никакой
+конфиг не описывает, и она опущена. Её поднимают первые же адреса панели в той
+же транзакции, после загрузки — `mon-extra-ips.service` по `links.list`, а
+транзакция, снявшая с неё последний адрес, опускает её обратно.
+
 Состояние — строчные файлы в `/opt/monitoring/network/` (каталог примонтирован
 в контейнер только на чтение, пишет их скрипт): `managed.list` (наши адреса),
 `suppressed.list` (снятые адреса хостера), `routes.list` (шлюзы наших адресов),
-`transaction.env` (текущая транзакция), `history.log`, `backups/<tx>/`.
+`links.list` (карты, поднятые панелью), `transaction.env` (текущая транзакция),
+`history.log`, `backups/<tx>/`.
 """
 
 import asyncio
@@ -95,7 +101,7 @@ WantedBy=sysinit.target
 """
 
 PERSIST_UNIT = """[Unit]
-Description=Monitoring node: re-add panel-managed extra IP addresses and their gateway routes, drop removed hoster addresses
+Description=Monitoring node: bring up panel-managed NICs, re-add extra IP addresses and their gateway routes, drop removed hoster addresses
 After=network-online.target
 Wants=network-online.target
 
@@ -111,6 +117,7 @@ STATE_DIR = Path("/opt/monitoring/network")
 MANAGED_FILE_NAME = "managed.list"
 SUPPRESSED_FILE_NAME = "suppressed.list"
 ROUTES_FILE_NAME = "routes.list"
+LINKS_FILE_NAME = "links.list"
 TRANSACTION_FILE_NAME = "transaction.env"
 HISTORY_FILE_NAME = "history.log"
 SYS_CLASS_NET = Path("/sys/class/net")
@@ -387,6 +394,20 @@ def render_routes(routes: list[GatewayRoute]) -> str:
     return "".join(f"{r.interface} {r.address} {r.gateway} {r.table}\n" for r in routes)
 
 
+def parse_link_list(text: str) -> list[str]:
+    """links.list — по имени карты в строке."""
+    links: list[str] = []
+    for line in (text or "").splitlines():
+        name = line.strip()
+        if name and name not in links:
+            links.append(name)
+    return links
+
+
+def render_link_list(links: list[str]) -> str:
+    return "".join(f"{name}\n" for name in links)
+
+
 def _split_list(value: str, separator: str = " ") -> list[str]:
     return [item for item in value.split(separator) if item and item != "-"]
 
@@ -603,8 +624,6 @@ def check_request(
         raise ExtraIpValidationError(
             f"'{iface}' cannot carry addresses on this host (needs a physical NIC that is not enslaved, a bond, a VLAN or a bridge)"
         )
-    if not physical[iface]:
-        raise ExtraIpValidationError(f"interface '{iface}' is down")
     live = interfaces.get(iface) or LiveInterface(name=iface)
     present = {addr.cidr for addr in live.addresses}
     present_ips = {addr.address for addr in live.addresses}
@@ -658,7 +677,36 @@ def check_request(
 
     if change.is_empty():
         raise ExtraIpValidationError("nothing to do: all addresses are already configured")
+    # Опущенную карту поднимают только новые адреса: снимать с неё нечего, а
+    # вернуть адрес хостера на неработающий линк бессмысленно
+    if not physical[iface] and not change.add:
+        raise ExtraIpValidationError(f"interface '{iface}' is down: it is brought up only together with new addresses")
     return change
+
+
+def plan_link(
+    iface: str,
+    is_up: bool,
+    change: AddressChange,
+    links: list[str],
+    managed_after: list[tuple[str, str]],
+    live: LiveInterface,
+) -> tuple[str, list[str]]:
+    """Что транзакция делает с самим линком (`up`, `down` или ничего) и
+    links.list после неё.
+
+    Опущенную карту поднимают её первые адреса. Карту, которую подняла панель,
+    опускает транзакция, после которой на ней не остаётся ни одного адреса;
+    если на ней остался чужой адрес (например, выданный по DHCP), линк остаётся
+    поднятым, но панель больше за него не отвечает."""
+    if not is_up:
+        return "up", links if iface in links else [*links, iface]
+    if iface not in links or any(owner == iface for owner, _ in managed_after):
+        return "", links
+    rest = [name for name in links if name != iface]
+    gone = {spec.cidr for spec in change.disappearing}
+    remaining = [addr for addr in live.addresses if addr.cidr not in gone]
+    return ("" if remaining or change.appearing else "down"), rest
 
 
 def plan_routes(
@@ -700,11 +748,14 @@ def build_plan(
     managed_text: str,
     suppressed_text: str,
     routes_text: str,
+    links_text: str,
+    link: str,
     files: list[PlanFile],
 ) -> str:
     """Текст плана для `extra-ips.sh apply` — KEY=value, файлы в base64.
     ADD/REMOVE — всё, что появляется и пропадает на интерфейсе; в конфиг
-    NetworkManager идут только свои адреса (NM_ADD/NM_REMOVE)."""
+    NetworkManager идут только свои адреса (NM_ADD/NM_REMOVE). LINKS_B64 идёт
+    всегда: скрипт пишет links.list из плана целиком."""
     lines = [
         f"TX_ID={tx_id}",
         f"IFACE={iface}",
@@ -717,6 +768,8 @@ def build_plan(
         f"MANAGED_B64={_b64(managed_text)}",
         f"SUPPRESSED_B64={_b64(suppressed_text)}",
         f"ROUTES_B64={_b64(routes_text)}",
+        f"LINKS_B64={_b64(links_text)}",
+        f"LINK={link}",
     ]
     if backend.kind == BackendKind.NETWORKMANAGER:
         lines.append(f"NM_CONNECTION={backend.nm_connection}")
@@ -795,6 +848,9 @@ class ExtraIpManager:
 
     def read_routes(self) -> list[GatewayRoute]:
         return parse_routes(self._read(ROUTES_FILE_NAME))
+
+    def read_links(self) -> list[str]:
+        return parse_link_list(self._read(LINKS_FILE_NAME))
 
     def read_transaction(self) -> Optional[Transaction]:
         return parse_transaction(self._read(TRANSACTION_FILE_NAME))
@@ -898,6 +954,7 @@ class ExtraIpManager:
                 interfaces=[], managed=[], transaction=None, history=[],
             )
         managed = self.read_managed()
+        links = set(self.read_links())
         gateway_of = {(route.interface, route.address): route.gateway for route in self.read_routes()}
         default = default_interface()
         states: list[InterfaceState] = []
@@ -911,6 +968,7 @@ class ExtraIpManager:
                 is_up=is_up,
                 is_default=name == default,
                 kind=candidate.kind,
+                brought_up=name in links,
                 addresses=[
                     LiveAddress(
                         address=addr.address, prefix=addr.prefix, family=addr.family, scope=addr.scope,
@@ -1009,11 +1067,12 @@ class ExtraIpManager:
             suppressed_after.extend((iface, spec.cidr) for spec in change.suppress
                                     if (iface, spec.cidr) not in suppressed_after)
             routes_after = plan_routes(current_routes, iface, change.add, change.remove)
+            link, links_after = plan_link(iface, physical[iface], change, self.read_links(), managed_after, live)
             files = await self._render_files(backend, iface, managed_after)
             plan = build_plan(
                 new_transaction_id(), iface, backend, change, request.protected, request.rollback_timeout_sec,
                 render_address_list(managed_after), render_address_list(suppressed_after),
-                render_routes(routes_after), files,
+                render_routes(routes_after), render_link_list(links_after), link, files,
             )
             result = await self._executor.execute(
                 f"printf '%s' '{_b64(plan)}' | base64 -d | {HOST_SCRIPT_PATH} apply",
@@ -1025,8 +1084,8 @@ class ExtraIpManager:
                 raise ExtraIpBusyError(busy.id if busy else "unknown")
             response = parse_apply_output(result, backend.kind)
             logger.info(
-                "extra ips apply: iface=%s backend=%s add=%s remove=%s suppress=%s restore=%s status=%s",
-                iface, backend.kind.value,
+                "extra ips apply: iface=%s backend=%s link=%s add=%s remove=%s suppress=%s restore=%s status=%s",
+                iface, backend.kind.value, link or "-",
                 [f"{s.cidr} via {s.gateway}" if s.gateway else s.cidr for s in change.add],
                 _cidrs(change.remove), _cidrs(change.suppress), _cidrs(change.restore), response.status,
             )

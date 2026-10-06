@@ -4,7 +4,7 @@
 
 # Monitoring
 
-**Server management panel: real-time monitoring, HAProxy, firewall, anti-DDoS, Remnawave and Telegram alerts — all in one web interface.**
+**Fleet management panel: real-time monitoring, HAProxy and DNAT, packet loss to backends, firewall, anti-DDoS, Remnawave and Telegram alerts — all in one web interface.**
 
 [![Status](https://img.shields.io/badge/status-stable-brightgreen)](#)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
@@ -23,7 +23,7 @@
 
 ## Installation
 
-One command on a clean Ubuntu 20.04+ / Debian 11+:
+One command on a clean Ubuntu 20.04+ / Debian 11+ (Ubuntu 24.04 recommended):
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh)
@@ -32,15 +32,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 After installation the `mon` command is available — an interactive manager:
 
 ```
-1) Install panel              5) Remove panel
-2) Install node               6) Remove node
-3) Update panel               7) System optimizations
-4) Update node                0) Exit
+1) Install panel              7) System optimizations
+2) Install node               8) Configure proxy
+3) Update panel               9) Install Remnawave node
+4) Update node                w) Install Cloudflare WARP
+5) Remove panel               s) Speed test
+6) Remove node                0) Exit
 ```
+
+Items 3–6 appear once the panel or node is installed on the server. Item 8 sets the HTTP proxy the installer uses to download packages, code and Docker images. Item `s` runs Ookla Speedtest or iperf3 to Russian servers. `l` switches the menu language.
 
 **Panel** — the script installs Docker, asks for a domain, obtains a Let's Encrypt SSL certificate (via HTTP — when the domain already points to the server and port 80 is open, or via the Cloudflare DNS API with a token — works behind Cloudflare proxy, no port 80 needed), generates `.env` and starts the containers. At the end it prints `https://{domain}/{uid}` and the login password.
 
-**Node** — installs Docker, HAProxy (native systemd), ipset and UFW. Asks you to paste `NODE_SECRET` — the shared install token from the **Servers** page of the panel (the same one for all nodes, copy it once). The token embeds the mTLS certificates and the panel IP — port 9100 opens for the panel only. After the install just add the server in the panel: name + IP.
+**Node** — installs Docker, HAProxy (the latest official LTS build, native systemd service), ipset and UFW. Asks you to paste `NODE_SECRET` — the shared install token from the **Servers** page of the panel (the same one for all nodes, copy it once). The token embeds the mTLS certificates and the panel IP — the node API port (9100) opens for the panel only. After the install just add the server in the panel: name + IP.
+
+You don't have to install nodes by hand: **Servers → Add Server** connects to the server over SSH and installs everything itself, several servers at once included.
 
 <details>
 <summary><b>One-command node install (unattended)</b></summary>
@@ -58,6 +64,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 # Node + optimizations with an explicit sysctl profile
 bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET> --optimize --profile=vpn
+
+# Node with a custom API port instead of 9100
+bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET> --api-port=8443
 ```
 
 If the command is run inside the Hetzner Rescue System, the installer provisions Ubuntu 24.04 on disk, reboots the server and automatically installs the node with the same parameters after first boot.
@@ -70,43 +79,62 @@ If the command is run inside the Hetzner Rescue System, the installer provisions
 
 | Module | Description |
 |--------|-------------|
-| **Dashboard** | Server cards with drag-and-drop, statuses, SSL, key metrics |
-| **Server metrics** | CPU, RAM, disks, network, TCP states, processes — in real time |
-| **Charts** | 1h / 24h / 7d / 30d / 365d with automatic aggregation |
-| **Traffic** | Per interface, port, TCP/UDP connection |
-| **Terminal** | Run commands on nodes right from the browser |
+| **Dashboard** | Servers in folders with drag-and-drop, per-core load, SSL, search and status filter; fleet-wide summary with a chart for any period |
+| **Server page** | CPU, RAM, disks, network, TCP states, processes — real values for the last second; per-core history as a heatmap, reboot and shutdown |
+| **Charts** | 1h / 24h / 7d / 30d / 365d: averages with a peak band, gaps where the server was unreachable |
+| **Traffic** | History per server, interface and port, stored in the panel; outbound port headroom per destination |
+| **Packet loss** | Relay nodes probe their HAProxy backends and DNAT targets every 2 seconds: a fleet-wide loss table, checking an address from selected nodes, an mtr trace with network owners |
+| **Terminal** | Commands and multi-line scripts on nodes right from the browser |
 
-### Management
+### Networking and proxying
 
 | Module | Description |
 |--------|-------------|
-| **HAProxy** | Rules, start/stop/reload, logs, config editor on every node |
-| **HAProxy configs** | Centralized configuration profiles with mass rollout to servers |
-| **Firewall profiles** | UFW rule templates: one click — identical firewall across a server group |
-| **DNAT routing** | Kernel-level port forwarding (iptables): TCP/UDP, port ranges, per-rule counters — transit with no CPU cost |
-| **Remnawave nginx** | Nginx config profiles for Remnawave nodes with real-IP forwarding setup |
-| **Wildcard SSL** | Wildcard certificate issuance (Cloudflare DNS), auto-renewal, deployment to nodes |
-| **Bulk actions** | One operation across multiple servers at once |
-| **Optimizations** | Kernel, network and NIC tuning on nodes — values computed for the actual hardware |
-| **Updates** | Update the panel and all nodes from the web interface |
+| **HAProxy** | Live stats, rules, certificates, logs and a config editor on every node; upgrade to the official LTS build without dropping connections |
+| **HAProxy configs** | Shared profiles rolled out to servers: load balancer, per-server ingress and egress IPs, SNI filter, a "whose address is this" label on every backend |
+| **DNAT routing** | Kernel-level port forwarding: TCP/UDP, port ranges, balancing across several IPs, per-rule counters — transit with almost no CPU cost |
+| **Server IP addresses** | Extra IPv4/IPv6 as a list, range or whole subnet, a custom gateway, removing unwanted hoster addresses; if the node connection drops, the change rolls back by itself |
+| **Outbound addresses** | A node's outbound traffic is spread across all its IPs — round-robin or manually; a ready-made Xray config snippet for Remnawave |
+| **Exit proxy** | A local SOCKS5 on the node with a pool of exits: it checks how Google sees each IP (country, captcha, Gemini) and moves traffic off a blocked one |
+| **Bandwidth limit** | A flat speed cap for the server in Mbit/s, survives reboots |
+| **Remnawave nginx** | nginx profiles in front of Remnawave nodes: gRPC and XHTTP rules, four real-IP forwarding schemes, one wildcard domain for all nodes |
+| **Wildcard SSL** | Issuance via Cloudflare DNS, auto-renewal, rollout to nodes and to the panel itself |
 
 ### Protection
 
 | Module | Description |
 |--------|-------------|
-| **Anti-DDoS** | Emergency mode (SYNPROXY, hashlimit), attack auto-detection, whitelist |
-| **IP Blocklist** | ipset in/out lists, auto-updated sources, global and per-server rules |
+| **Anti-DDoS** | Emergency mode (SYNPROXY, hashlimit), attack auto-detection, whitelist; the watchdog runs on the node even without the panel |
+| **IP Blocklist** | ipset in/out lists, auto-updated sources, global and per-server rules, "Don't answer ping" |
+| **Firewall profiles** | UFW rule templates: one click — identical firewall across a server group; the panel checks rules on the nodes and restores drifted ones |
 | **Torrent blocker** | Automatic IP blocking from Remnawave torrent detector reports |
 | **SSH security** | sshd settings, fail2ban and SSH keys with presets and bulk apply |
+| **Hoster access** | Finds and removes the hoster's access channels: hypervisor agent, cloud-init, foreign SSH keys, extra users |
+| **Node permissions** | The server owner limits what the panel may do on it with one line in the node's `.env` |
+
+### Maintenance
+
+| Module | Description |
+|--------|-------------|
+| **Auto-deploy** | Nodes are installed over SSH right from the panel, several servers at once, with profiles attached; one-time keys for third-party servers; Hetzner Rescue |
+| **Updates** | The panel and all nodes from the web interface: by folder, in the background, with the stage shown on the node card; if a node failed to update itself, the panel updates it over SSH |
+| **Servers behind DPI blocking (TSPU)** | "Download everything through the panel" for node install, Remnawave install and HAProxy upgrade; Docker image delivery to the node over SSH; SOCKS5 proxy to the node |
+| **Optimizations** | Kernel, network and NIC tuning on nodes — values computed for the actual hardware |
+| **Time sync** | Time zone and NTP on all servers and the panel itself — with chrony, systemd-timesyncd and ntp |
+| **Backups** | One-click panel database backups and auto-backups to Telegram: password encryption, volumes < 50 MB, restore right from the panel |
 
 ### Services
 
 | Module | Description |
 |--------|-------------|
-| **Remnawave** | User statistics via the Remnawave Panel API: IPs, ASN grouping, HWID devices, anomaly analyzer |
-| **Alerts** | Telegram notifications: offline, CPU, RAM, network, TCP states, conntrack — with cooldown |
-| **Billing** | Server and project payment tracking: due dates, costs, reminders |
+| **Remnawave** | User statistics via the Remnawave Panel API: IPs, ASN grouping, HWID devices, anomaly analyzer; Remnawave node install from the panel |
+| **Xray test** | Checks keys, JSON configs and subscriptions with a real Xray / sing-box core from the panel or any node; multi-SNI, export of working keys |
+| **Alerts** | Telegram: offline (with the cause when the proxy is to blame), CPU, RAM, network, TCP states, conntrack, anti-DDoS, relay packet loss, failed node update |
+| **Billing** | Server due dates and costs; Yandex Cloud, Selectel, Timeweb Cloud and VK Cloud with balance from their APIs; spending summary and an "account → project → servers" tree |
+| **Bulk actions** | HAProxy rules, traffic ports, firewall and commands across many servers at once — as a background job |
 | **Notes & tasks** | Shared notepad and task list with real-time sync |
+
+Menu sections are grouped into the "Configs", "Security" and "Maintenance" folders. Unused ones can be hidden in **Settings → Sections** — their data and background jobs keep working.
 
 ## Screenshots
 
@@ -134,14 +162,14 @@ If the command is run inside the Hetzner Rescue System, the installer provisions
 </details>
 
 <details>
-<summary><b>HAProxy</b> — live statistics, proxy rules, certificates and firewall</summary>
+<summary><b>HAProxy</b> — live stats, proxy rules, certificates and firewall</summary>
 
 ![HAProxy management](.github/screenshots/haproxy.png)
 
 </details>
 
 <details>
-<summary><b>IP Blocklist</b> — block lists with auto-updated sources</summary>
+<summary><b>IP Blocklist</b> — blocklists with auto-updated sources</summary>
 
 ![IP Blocklist](.github/screenshots/blocklist.png)
 
@@ -162,7 +190,7 @@ If the command is run inside the Hetzner Rescue System, the installer provisions
 </details>
 
 <details>
-<summary><b>Alerts</b> — fine-grained Telegram notification settings per trigger</summary>
+<summary><b>Alerts</b> — flexible Telegram notification settings per trigger</summary>
 
 ![Alert settings](.github/screenshots/alerts.png)
 
@@ -180,21 +208,22 @@ flowchart LR
         Backend --> PG[("PostgreSQL 16")]
     end
 
-    Backend -->|"HTTPS :9100"| NNginx
+    Backend -->|"mTLS :9100"| NNginx
 
     subgraph Node["Node (each server)"]
-        NNginx["Nginx (SSL)"] --> Agent["API agent<br>FastAPI + psutil"]
-        Agent --> SQLite[("SQLite")]
-        Agent --> HAProxy["HAProxy<br>systemd"]
+        NNginx["Nginx (mTLS)"] --> Agent["API agent<br>FastAPI + psutil"]
+        Agent --> Host["Host: HAProxy (systemd),<br>iptables / ipset, sysctl"]
+        Watchdog["Anti-DDoS watchdog<br>systemd"] --> Host
     end
 ```
 
-**Panel** — React + FastAPI + PostgreSQL 16, Docker images from GHCR. Collects metrics from all nodes, stores history, sends alerts.
-**Node** — a lightweight FastAPI agent on every server. Stores data locally in SQLite; HAProxy runs as a native systemd service.
+**Panel** — React + FastAPI + PostgreSQL 16, Docker images from GHCR. Polls the nodes, stores all history (metrics, traffic, downtime), sends alerts and rolls configs out to servers.
+**Node** — a lightweight FastAPI agent with no database of its own: it reports a host snapshot and counters and manages HAProxy, iptables/ipset rules and kernel settings. The anti-DDoS watchdog is a separate systemd service that protects the server even when the panel is unreachable.
+**Link** — mTLS: the panel and nodes recognize each other by certificates from `NODE_SECRET`; without a certificate the connection is dropped during the TLS handshake.
 
 ## Updating
 
-**Via the web interface** — the **Updates** section in the panel menu: updates both the panel and all nodes.
+**Via the web interface** — the **Updates** section in the panel menu: the panel and nodes, by folder or all at once. The update runs in the background, its stage is shown on the node card. If a node failed to update itself, the panel updates it over SSH, and for a node without access to the image registry it uploads the image itself. The counter next to "Updates" in the menu shows how much is waiting for an update.
 
 **Via CLI:**
 
@@ -211,14 +240,14 @@ cd /opt/monitoring-node && ./update.sh    # node
 
 The `.env` configuration is preserved on update. Images are pulled from GHCR with a fallback to local build.
 
-**Update channels** (Settings → Update channel): **Stable** (`main`) — tested releases, **Dev** (`dev`) — active development.
+**Update channels** (Settings → System → Update channel): **Stable** (`main`) — tested releases, **Dev** (`dev`) — active development.
 
 <details>
 <summary><b>System requirements</b></summary>
 
 ### OS and software
 
-- **OS**: Ubuntu 20.04+ / Debian 11+ (amd64)
+- **OS**: Ubuntu 20.04+ / Debian 11+ (amd64), Ubuntu 24.04 recommended
 - **Docker**: 20.10+ (installed automatically)
 
 ### Panel
@@ -237,12 +266,11 @@ The panel is designed with headroom for 500+ nodes: PostgreSQL connection poolin
 
 ### Node
 
-The node adds minimal overhead to an existing server.
+The node adds minimal overhead to an existing server: an agent with no database of its own, history is stored in the panel.
 
 | Scenario | RAM | CPU |
 |----------|-----|-----|
-| Basic (monitoring + HAProxy + firewall + traffic) | ~100–150 MB | < 1% |
-| + Torrent blocker | +50 MB | < 1% |
+| Monitoring + HAProxy + firewall + traffic | ~100–150 MB | < 1% |
 
 </details>
 
@@ -258,19 +286,23 @@ The node adds minimal overhead to an existing server.
 | `PANEL_PASSWORD` | Login password | auto |
 | `JWT_SECRET` | JWT secret | auto |
 | `JWT_EXPIRE_MINUTES` | Token lifetime | 1440 |
+| `PANEL_ENC_KEY` | Encryption key for secrets in the database — without it node access keys can't be decrypted | auto |
 | `MAX_FAILED_ATTEMPTS` | Attempts before ban | 5 |
 | `BAN_DURATION_SECONDS` | Ban duration (sec) | 900 |
 | `POSTGRES_USER` | PostgreSQL user | panel |
 | `POSTGRES_PASSWORD` | PostgreSQL password | auto |
 | `POSTGRES_DB` | Database name | panel |
 
+PostgreSQL memory is sized to the server's RAM automatically on install and update.
+
 ### Node
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `NODE_NAME` | Node name | server hostname |
-| `TRAFFIC_COLLECT_INTERVAL` | Traffic collection interval (sec) | 60 |
-| `TRAFFIC_RETENTION_DAYS` | Traffic data retention (days) | 90 |
+| `NODE_API_PORT` | API port the panel connects to | 9100 |
+| `NODE_CAPABILITIES` | What the panel is allowed to do on the node (see FAQ) | empty — full access |
+| `MON_IMAGE_TAG` | Agent Docker image tag | `latest` (`dev` on the dev channel) |
 
 Panel ↔ node authorization uses mTLS certificates unpacked from `NODE_SECRET` during install. There is no separate API key in `.env`.
 
@@ -284,26 +316,26 @@ Panel ↔ node authorization uses mTLS certificates unpacked from `NODE_SECRET` 
 - Secret URL: `domain.com/{PANEL_UID}` — every other path gets a connection drop (nginx 444)
 - Double UID check: nginx + API (timing-safe)
 - JWT in an httpOnly cookie (secure, samesite=strict)
-- Anti-brute force: 5 attempts → 15-minute ban
-- Rate limiting: 60 req/min for unauthorized clients
+- Anti-brute force: 5 failed attempts (password or UID) → 15-minute ban
+- Rate limiting in nginx: 30 requests per minute per IP on login, UID check and backup restore
+- Secrets in the database (node keys, SSH credentials, tokens) are encrypted with AES-256-GCM using a key from `.env` — a database dump is useless without it
 - TLS 1.2/1.3
 - Connection drop on any authorization error — no HTTP response
 
 ### Node
 
-- mTLS: the node's nginx only accepts requests with a valid panel client certificate (shared `NODE_SECRET`)
-- Port 9100 open to the panel IP only (UFW)
-- Rate limiting: 100 req/min
-- Anti-brute force: 10 attempts → 1-hour ban
-- Connection drop without an HTTP response
+- mTLS: the node's nginx only accepts requests with a valid panel client certificate (shared `NODE_SECRET`), otherwise the connection is dropped during the TLS handshake
+- The agent's internal API listens on `127.0.0.1` only — it can't be reached from outside bypassing nginx
+- The API port is open to the panel IP only (UFW)
+- `NODE_CAPABILITIES` — the node owner decides which panel sections get read or write access
 
 ### Ports
 
 | Port | Component | Access |
 |------|-----------|--------|
 | 443 | Panel | Everyone |
-| 80 | Panel / Node | Everyone (Let's Encrypt) |
-| 9100 | Node | Panel IP only |
+| 80 | Panel / Node | Everyone (Let's Encrypt over HTTP; not needed when issuing via Cloudflare DNS) |
+| 9100 | Node | Panel IP only (port changed with `--api-port`) |
 | 22 | Node | Everyone (SSH) |
 
 </details>
@@ -311,12 +343,13 @@ Panel ↔ node authorization uses mTLS certificates unpacked from `NODE_SECRET` 
 <details>
 <summary><b>System optimizations</b></summary>
 
-Applied manually: `mon` → item 7, or from the panel (**Optimizations** section). Nothing is changed automatically.
+Applied manually: `mon` → item 7, the `--optimize` flag at node install, or from the panel (**Optimizations** section). Nothing is changed automatically.
 
 - **Values are computed for the actual hardware** — the renderer reads RAM, CPU count, MTU and link speed, then recalculates conntrack, network buffers, descriptor limits and HAProxy `maxconn`. The same profile is correct on 4 GB and on 248 GB of RAM.
 - **Three NIC modes** with auto-detection: hardware multiqueue, hybrid, software RPS/RFS.
 - **Recalculated on every boot** — after a VPS resize the values pick themselves up.
-- Include BBR + fq_codel, tuned TCP/UDP buffers, anti-DDoS kernel settings (syncookies, rp_filter).
+- Include BBR + fq, tuned TCP/UDP buffers, anti-DDoS kernel settings (syncookies, rp_filter).
+- Service ports (node API, proxy checks, your own ports from the panel) are excluded from the range handed out to outbound connections — a random client can't take them.
 - Any value can be overridden in `/opt/monitoring/configs/local-overrides.conf`; `rollback` restores the previous config.
 
 </details>
@@ -354,9 +387,9 @@ monitoring/
 │   ├── backend/            # FastAPI + PostgreSQL 16
 │   ├── nginx/              # Reverse proxy + SSL
 │   └── DOCUMENTATION.md
-├── node/                   # Monitoring agent
+├── node/                   # Agent on every server
 │   ├── app/                # FastAPI + psutil
-│   ├── nginx/              # Reverse proxy + SSL
+│   ├── nginx/              # mTLS proxy in front of the agent
 │   └── DOCUMENTATION.md
 ├── configs/                # Optimizations: sysctl renderer, NIC tuning, anti-DDoS watchdog
 └── scripts/                # Helper CLI scripts
@@ -390,9 +423,22 @@ Copy the shared `NODE_SECRET` from the **Servers** page of the panel (it is the 
 
 - the one-liner with `NODE_SECRET` — see the Installation section;
 - `mon` → item 2 — the script asks you to paste the same `NODE_SECRET`;
-- SSH auto-deploy right from the **Servers → Add server** form — the panel connects to the server and installs everything itself.
+- SSH auto-deploy right from the **Servers → Add Server** form — the panel connects to the server, installs everything and attaches the selected profiles.
 
 After the install add the server in the panel (name + IP). Authorization uses the mTLS certificates from the token — no keys need to be entered manually.
+
+If the server is rented or belongs to someone else, tick **"One-time (personal) key"** in the auto-deploy wizard — the server gets its own key instead of the fleet-wide one.
+
+</details>
+
+<details>
+<summary><b>Server behind DPI blocking (TSPU): GitHub or images won't download — how do I install and update the node?</b></summary>
+
+<br>
+
+Tick **"Download everything through the panel"** in the auto-deploy form: the server gets the installer, Docker and images through the panel's SSH connection. No port is opened on the panel, and the proxy is removed after the install. The same checkbox is available for Remnawave node install and HAProxy upgrade.
+
+For updates, the **Updates** page offers image delivery over SSH: the panel downloads the fresh image itself and uploads it to the node. If the panel can't reach the node directly, set a SOCKS5 proxy in the server settings — all requests to that node will go through it.
 
 </details>
 
@@ -402,8 +448,10 @@ After the install add the server in the panel (name + IP). Authorization uses th
 <br>
 
 1. The node container is alive: `cd /opt/monitoring-node && docker compose ps` and `docker compose logs -f`.
-2. Port 9100 is open for the panel IP: `ufw status | grep 9100`. If the panel IP changed — see the next question.
+2. The API port (9100 or your own) is open for the panel IP: `ufw status | grep 9100`. If the panel IP changed — see the next question.
 3. The port is reachable from the panel server: `curl -vk https://NODE_IP:9100` — the connection should be established; a client-certificate error in the response is normal (mTLS) and confirms the node's nginx is alive.
+
+If the panel reaches the node through a SOCKS5 proxy, the alert itself tells you when the proxy is to blame.
 
 </details>
 
@@ -412,7 +460,7 @@ After the install add the server in the panel (name + IP). Authorization uses th
 
 <br>
 
-On every node port 9100 is open only for the old panel IP. Update the UFW rule:
+On every node the API port is open only for the old panel IP. Update the UFW rule:
 
 ```bash
 ufw delete allow from OLD_IP to any port 9100 proto tcp
@@ -426,7 +474,22 @@ ufw allow from NEW_IP to any port 9100 proto tcp
 
 <br>
 
-Panel: **443** (web interface) and **80** (Let's Encrypt renewal). Node: **9100** — for the panel IP only (UFW is configured by the installer automatically), **80** — for SSL issuance. Nothing else is exposed.
+Panel: **443** (web interface) and **80** (Let's Encrypt over HTTP; not needed with a Cloudflare DNS certificate). Node: **9100** — for the panel IP only (UFW is configured by the installer automatically, the port is changed with `--api-port`), **80** — for SSL issuance. Nothing else is exposed.
+
+</details>
+
+<details>
+<summary><b>How do I limit what the panel can do on my server?</b></summary>
+
+<br>
+
+With the `NODE_CAPABILITIES` line in `/opt/monitoring-node/.env`, then `docker compose restart api`. Presets: `full` (full access, same as no line), `readonly` (read-only), `monitoring` (the dashboard minimum: metrics and traffic). Individual sections are `traffic haproxy firewall ipset ssh ssl antiddos remnawave system exec dnat`; the `:ro` suffix grants read-only access:
+
+```bash
+NODE_CAPABILITIES=readonly,haproxy    # everything read-only, HAProxy — full access
+```
+
+The panel sees these permissions and doesn't offer actions the node would reject anyway.
 
 </details>
 
@@ -435,7 +498,7 @@ Panel: **443** (web interface) and **80** (Let's Encrypt renewal). Node: **9100*
 
 <br>
 
-**Stable** (`main`) — tested releases, recommended for everyone. **Dev** (`dev`) — active development: new features arrive earlier, but rough edges are possible. The channel is switched in the panel: Settings → Update channel; it affects updates of the panel, nodes and configs.
+**Stable** (`main`) — tested releases, recommended for everyone. **Dev** (`dev`) — active development: new features arrive earlier, but rough edges are possible. The channel is switched in the panel: Settings → System → Update channel; it affects updates of the panel, nodes and configs.
 
 </details>
 
@@ -444,7 +507,7 @@ Panel: **443** (web interface) and **80** (Let's Encrypt renewal). Node: **9100*
 
 <br>
 
-No, it's an optional step — the panel and node work fine without them. Optimizations make sense on loaded nodes (VPN, proxies, lots of connections): they tune conntrack, network buffers and limits for the actual hardware. Applied via `mon` → item 7 or from the panel; any value can be overridden or rolled back.
+No, it's an optional step — the panel and node work fine without them. Optimizations make sense on loaded nodes (VPN, proxies, lots of connections): they tune conntrack, network buffers and limits for the actual hardware. Applied via `mon` → item 7, the `--optimize` flag at install or from the panel; any value can be overridden or rolled back.
 
 </details>
 
@@ -455,6 +518,8 @@ No, it's an optional step — the panel and node work fine without them. Optimiz
 
 The panel connects to your Remnawave panel's API and shows, per user, connection IP addresses grouped by ASN and HWID devices. The anomaly analyzer highlights suspicious behavior: device limit exceeded by IP/ASN, unknown clients by User-Agent, traffic spikes. Check thresholds and the known-client registry are configurable in the panel.
 
+On top of that, the panel installs a Remnawave node on an already added server, rolls nginx profiles out in front of it, blocks torrents via the Remnawave webhook and checks keys in "Xray test".
+
 </details>
 
 <details>
@@ -463,6 +528,19 @@ The panel connects to your Remnawave panel's API and shows, per user, connection
 <br>
 
 No. `.env` is preserved and the database lives in a Docker volume untouched by updates. Only the code and container images are updated.
+
+</details>
+
+<details>
+<summary><b>How do I restore the panel from a backup? I have .001 and .002 files</b></summary>
+
+<br>
+
+Everything is done in the panel: **Settings → Backups → Upload backup**. A regular `.dump` (made with the "Create Backup" button) — just select it and confirm.
+
+Files `.001`, `.002`, … are a single encrypted Telegram backup split into volumes. Download all volumes of one set from the channel, select **all of them at once** in the upload dialog and enter the archive password (the one set in "Auto-backups to Telegram") — the panel joins the volumes, decrypts and restores them; if a volume is missing, it tells you which one. The backup is self-contained: it restores the whole panel, node access included, even on a fresh install. After the restore — `docker compose restart`.
+
+The backup contains every node access key — keep it as carefully as the panel password.
 
 </details>
 
@@ -477,15 +555,19 @@ No. `.env` is preserved and the database lives in a Docker volume untouched by u
 
 ## What's new
 
-A plain-language change history is in [CHANGES.md](CHANGES.md): what changed, what it gives you and whether you need to do anything after updating.
+A plain-language change history is in [CHANGES.md](CHANGES.md) (in Russian): what changed, what it gives you and whether you need to do anything after updating.
 
 Ask questions, chat and follow update announcements in the [Telegram community](https://t.me/+IClul20AJ7Y5MTFi). Ideas and bug reports are also welcome in [Issues](https://github.com/Joliz1337/monitoring/issues).
 
 ## Documentation
 
-- [Panel](panel/DOCUMENTATION.md) — API, DB, Remnawave, Blocklist, alerts
-- [Node](node/DOCUMENTATION.md) — API, metrics, HAProxy, traffic, ipset, optimizations, anti-DDoS
+- [General](DOCUMENTATION.md) — installer, system optimizations, anti-DDoS, architecture
+- [Panel](panel/DOCUMENTATION.md) — API, DB, every panel section, alerts, updates
+- [Node](node/DOCUMENTATION.md) — agent API, metrics, HAProxy and packet loss, DNAT, IP addresses, outbound addresses, traffic, anti-DDoS, optimizations
+
+The detailed documentation is in Russian.
 
 ## License
 
 [MIT](https://opensource.org/licenses/MIT)
+

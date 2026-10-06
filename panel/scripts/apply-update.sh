@@ -158,6 +158,10 @@ DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-240}"
 DOCKER_PULL_RETRIES=5
 DOCKER_PULL_RETRY_DELAY=10
 
+# Сколько ждать, пока панель доделает фоновые задачи перед остановкой. Должно быть
+# больше, чем модули панели сами ждут свои задачи, иначе ответ не дождёмся.
+PREPARE_SHUTDOWN_TIMEOUT=200
+
 # Arguments
 TMP_DIR="$1"
 PANEL_DIR="$2"
@@ -202,6 +206,18 @@ ensure_rsync() {
 set +e
 ensure_rsync || exit 1
 set -e
+
+# Начатое в фоне панель доделывает, пока ещё целиком работает: при остановке
+# контейнера её подпроцессы умирают по SIGKILL посреди шага. Код 404 — у старой
+# версии панели такого входа нет, тогда просто останавливаем.
+log_info "Finishing panel background tasks..."
+prepare_status=$(docker exec panel-backend curl -s -o /dev/null -w '%{http_code}' \
+    -m "$PREPARE_SHUTDOWN_TIMEOUT" -X POST http://127.0.0.1:8000/system/prepare-shutdown 2>/dev/null) || true
+case "$prepare_status" in
+    200) log_success "Background tasks finished" ;;
+    404) ;;
+    *)   log_warn "Panel did not confirm background tasks finished (${prepare_status:-no answer}), stopping anyway" ;;
+esac
 
 # Stop containers
 log_info "Stopping containers..."

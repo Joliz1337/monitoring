@@ -4,11 +4,11 @@
  * Карточка, формы и калькулятор читают провайдера отсюда — новый провайдер
  * добавляется записью в PROVIDERS, а не ветками по всему разделу.
  */
-export type CloudProviderId = 'yandex_cloud' | 'selectel' | 'timeweb'
+export type CloudProviderId = 'yandex_cloud' | 'selectel' | 'timeweb' | 'vk_cloud'
 
 export interface CloudCredentialField {
   /** Поле модели, куда уходит значение */
-  key: 'cloud_account_id' | 'cloud_credential'
+  key: 'cloud_account_id' | 'cloud_credential' | 'cloud_login'
   labelKey: string
   hintKey: string
   placeholder: string
@@ -72,6 +72,19 @@ const TIMEWEB_ACCENT = {
   hintBox: 'text-indigo-400/80 bg-indigo-500/10',
 }
 
+const VK_CLOUD_ACCENT = {
+  iconBg: 'bg-blue-500/20',
+  icon: 'text-blue-400',
+  badge: 'bg-blue-500/15 text-blue-400',
+  primaryButton:
+    'bg-gradient-to-r from-blue-500/20 to-sky-500/20 text-blue-400 ' +
+    'hover:from-blue-500/30 hover:to-sky-500/30 border border-blue-500/20 ' +
+    'hover:border-blue-500/40 shadow-sm shadow-blue-500/5',
+  ghostButton: 'hover:text-blue-400 hover:border-blue-500/40',
+  quickActive: 'bg-blue-500/20 text-blue-400 border border-blue-500/30',
+  hintBox: 'text-blue-400/80 bg-blue-500/10',
+}
+
 export const PROVIDERS: Record<CloudProviderId, CloudProviderMeta> = {
   yandex_cloud: {
     id: 'yandex_cloud',
@@ -88,13 +101,13 @@ export const PROVIDERS: Record<CloudProviderId, CloudProviderMeta> = {
       },
       {
         key: 'cloud_credential',
-        labelKey: 'billing.yc_token',
-        hintKey: 'billing.yc_token_hint',
-        placeholder: 'y0__xCr5em...',
+        labelKey: 'billing.yc_key',
+        hintKey: 'billing.yc_key_hint',
+        placeholder: '{"id": "aje...", "service_account_id": "aje...", "private_key": "..."}',
         secret: true,
         link: {
-          url: 'https://oauth.yandex.ru/authorize?response_type=token&client_id=1a6990aa636648e9b2ef855fa7bec2fb',
-          labelKey: 'billing.yc_get_token_link',
+          url: 'https://yandex.cloud/docs/iam/operations/authentication/manage-authorized-keys',
+          labelKey: 'billing.yc_key_link',
         },
       },
     ],
@@ -134,6 +147,34 @@ export const PROVIDERS: Record<CloudProviderId, CloudProviderMeta> = {
           url: 'https://timeweb.cloud/my/api-keys',
           labelKey: 'billing.timeweb_get_token_link',
         },
+      },
+    ],
+  },
+  vk_cloud: {
+    id: 'vk_cloud',
+    nameKey: 'billing.provider_vk_cloud',
+    defaultCurrency: 'RUB',
+    accent: VK_CLOUD_ACCENT,
+    fields: [
+      {
+        key: 'cloud_login',
+        labelKey: 'billing.vk_login',
+        hintKey: 'billing.vk_login_hint',
+        placeholder: 'user@example.com',
+      },
+      {
+        key: 'cloud_credential',
+        labelKey: 'billing.vk_password',
+        hintKey: 'billing.vk_password_hint',
+        placeholder: '••••••••',
+        secret: true,
+      },
+      {
+        key: 'cloud_account_id',
+        labelKey: 'billing.vk_project_id',
+        hintKey: 'billing.vk_project_id_hint',
+        placeholder: 'b5b7ffd4ef0547e5b222f445...',
+        link: { url: 'https://msk.cloud.vk.ru/app/', label: 'msk.cloud.vk.ru' },
       },
     ],
   },

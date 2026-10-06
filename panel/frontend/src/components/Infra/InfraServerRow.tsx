@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { X } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -14,6 +15,7 @@ interface InfraServerRowProps {
     status: 'online' | 'offline' | 'loading' | 'error'
     metrics?: ServerMetrics | null
   }
+  highlighted?: boolean
   onRemove?: () => void
 }
 
@@ -29,10 +31,31 @@ function parseHost(url: string): string {
   return match?.[1] ?? url
 }
 
-export default function InfraServerRow({ server, onRemove }: InfraServerRowProps) {
+// Узлы дерева раскрываются анимацией высоты (~0.3 с). Пока высота растёт, scroll anchoring
+// браузера удерживает видимые карточки на месте и сбивает плавную прокрутку — ждём, пока раскладка устоится
+const SCROLL_AFTER_EXPAND_MS = 350
+
+function isFullyInViewport(element: HTMLElement): boolean {
+  const { top, bottom } = element.getBoundingClientRect()
+  return top >= 0 && bottom <= window.innerHeight
+}
+
+export default function InfraServerRow({ server, highlighted = false, onRemove }: InfraServerRowProps) {
   const navigate = useNavigate()
   const { uid } = useParams()
   const { t } = useTranslation()
+  const rowRef = useRef<HTMLDivElement>(null)
+
+  // Срабатывает и при монтировании: строка появляется, когда дерево раскрыло путь к серверу
+  useEffect(() => {
+    if (!highlighted) return
+    const timer = setTimeout(() => {
+      const row = rowRef.current
+      if (!row || isFullyInViewport(row)) return
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, SCROLL_AFTER_EXPAND_MS)
+    return () => clearTimeout(timer)
+  }, [highlighted])
 
   const cpu = server.metrics?.cpu?.usage_percent
   const ram = server.metrics?.memory?.ram?.percent
@@ -43,10 +66,15 @@ export default function InfraServerRow({ server, onRemove }: InfraServerRowProps
 
   return (
     <motion.div
+      ref={rowRef}
       initial={{ opacity: 0, y: -4 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -4 }}
-      className="group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-dark-700/50 cursor-pointer transition-colors"
+      className={`group flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-colors ${
+        highlighted
+          ? 'bg-accent-500/10 ring-1 ring-inset ring-accent-500/40 hover:bg-accent-500/15'
+          : 'hover:bg-dark-700/50'
+      }`}
       onClick={() => navigate(`/${uid}/server/${server.id}`)}
     >
       {/* Status dot */}

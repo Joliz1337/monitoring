@@ -97,7 +97,7 @@ Here is what it looks like in the panel: the server card gets a **Restricted** b
 - The **Old key** badge means the node still uses a per-server certificate: migrate it with the button. Very old nodes on `X-API-Key` need a reinstall.
 - The **Restricted** badge means the node did not hand the panel everything. The badge tooltip lists what is still allowed. It is changed on the node itself; there is no such setting in the panel.
 - The list is grouped by the **dashboard folders**, servers without a folder come last. Folders work the same as on the dashboard: drag a new server by its handle straight into the right folder, reorder folders, and create a new one with the button next to "Add server". The order is shared by both pages. The folder header shows how many of its servers are online, offline and disabled. Dragging is off while searching.
-- The **"Account → Project → Servers" tree** is a second, independent way to organise nodes by cloud account and cluster. Deleting an account or project never deletes servers.
+- The **"Account → Project → Servers" tree** is a second, independent way to organise nodes by cloud account and cluster. Deleting an account or project never deletes servers. Clicking an empty spot on a server card selects it and expands the tree down to it, so you can see which account and project it belongs to; click again to clear the selection.
 - Disabling monitoring keeps the server in the list but stops polling and alerts for it.
 - Deleting a server erases its history and rules in the panel but doesn't touch the node itself — its containers keep running.
 

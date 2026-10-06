@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback, FormEvent, type ReactNode } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback, FormEvent, type MouseEvent, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, DragOverlay } from '@dnd-kit/core'
 import { SortableContext, rectSortingStrategy, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
@@ -71,6 +71,7 @@ import { useFolderBoard, FOLDER_SORTABLE_PREFIX } from '../hooks/useFolderBoard'
 import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import { writeStorage } from '../utils/storage'
 import { collectFolders, groupByFolder } from '../utils/folders'
+import { matchesServerSearch } from '../utils/serverSearch'
 import { cleanInstallLogLine } from '../utils/installLog'
 import { isValidProxyInput } from '../utils/proxy'
 
@@ -165,6 +166,9 @@ const COLLAPSED_FOLDERS_KEY = 'servers_collapsed_folders'
 const SERVER_GRID_CLASS = 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
 const NO_SERVERS: ServerWithMetrics[] = []
 
+// Кнопки, ссылки и копируемый IP внутри карточки делают своё — выделение только от клика по свободному месту
+const CARD_CONTROLS_SELECTOR = 'button, a, input, [role="button"]'
+
 interface ServerDragHandle {
   attributes: ReturnType<typeof useSortable>['attributes']
   listeners: ReturnType<typeof useSortable>['listeners']
@@ -213,6 +217,7 @@ export default function Servers() {
   const [installerToken, setInstallerToken] = useState<string | null>(null)
   const [tokenCopied, setTokenCopied] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const [selectedServerId, setSelectedServerId] = useState<number | null>(null)
 
   const [deploy, setDeploy] = useState<DeployFormData>(DEPLOY_DEFAULTS)
   const [remnaCertProfiles, setRemnaCertProfiles] = useState<RemnawaveCertProfile[]>([])
@@ -277,9 +282,7 @@ export default function Servers() {
 
   const filteredServers = useMemo(() => {
     if (!normalizedQuery) return displayedServers
-    return displayedServers.filter(s =>
-      s.name.toLowerCase().includes(normalizedQuery) || s.url.toLowerCase().includes(normalizedQuery)
-    )
+    return displayedServers.filter(s => matchesServerSearch(s, normalizedQuery))
   }, [normalizedQuery, displayedServers])
 
   // Папки как на дашборде: общий порядок папок, внутри — порядок карточек.
@@ -863,18 +866,29 @@ export default function Servers() {
     }
   }
   
+  const handleCardClick = (event: MouseEvent, serverId: number) => {
+    if ((event.target as HTMLElement).closest(CARD_CONTROLS_SELECTOR)) return
+    setSelectedServerId(prev => (prev === serverId ? null : serverId))
+  }
+
+  const cardBorderClass = (server: ServerWithMetrics, isEditing: boolean, isSelected: boolean) => {
+    if (isEditing) return 'rounded-b-none border-b-0 border-accent-500/30'
+    if (isSelected) return 'border-accent-500/60 ring-1 ring-accent-500/30'
+    return server.is_active ? 'hover:border-dark-700' : 'border-dark-700/50'
+  }
+
   const renderServerCard = (server: ServerWithMetrics, dragHandle?: ServerDragHandle) => {
     const isEditing = editingId === server.id
+    const isSelected = selectedServerId === server.id
     const isTesting = testingId === server.id
     const testResult = testResults[server.id]
 
     return (
       <div
-        className={`card group transition-all overflow-visible flex flex-col ${
-          server.is_active
-            ? 'hover:border-dark-700'
-            : 'opacity-60 border-dark-700/50'
-        } ${isEditing ? 'rounded-b-none border-b-0 border-accent-500/30' : ''}`}
+        onClick={(e) => handleCardClick(e, server.id)}
+        className={`card group transition-all overflow-visible flex flex-col cursor-pointer ${
+          server.is_active ? '' : 'opacity-60'
+        } ${cardBorderClass(server, isEditing, isSelected)}`}
       >
         {/* Шапка: иконка + имя + URL */}
         <div className="flex items-center gap-3">
@@ -1340,7 +1354,7 @@ export default function Servers() {
       </motion.div>
       
       {/* Infrastructure Tree */}
-      <InfraTree />
+      <InfraTree highlightedServerId={selectedServerId} />
 
       <MigrationBanner onMigrated={fetchServersWithMetrics} />
 

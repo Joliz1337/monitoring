@@ -22,6 +22,12 @@
 # it off the interface instead: it is dropped after boot and whenever the
 # network stack brings it back (apply verification, agent self-heal).
 #
+# A NIC the cloud attached later (a port in another network) is down and no
+# config describes it. The plan brings it up together with its first addresses
+# (LINK=up) and links.list keeps it up after boot; the transaction that takes
+# its last address away brings it down again (LINK=down). Rollback returns the
+# link to the state it had before the transaction.
+#
 # Verbs:
 #   detect <iface>             backend facts (netplan/networkd/NetworkManager/ifupdown)
 #   apply                      plan on stdin (KEY=value lines)
@@ -29,8 +35,8 @@
 #   rollback <tx>              manual rollback of a pending transaction
 #   rollback-unconfirmed <tx>  timer target: roll back if still unconfirmed
 #   boot-guard                 systemd unit: roll back a transaction left over from the previous boot
-#   restore-runtime            systemd unit after boot: re-add managed addresses and gateway routes,
-#                              drop suppressed addresses
+#   restore-runtime            systemd unit after boot: bring up links from links.list, re-add managed
+#                              addresses and gateway routes, drop suppressed addresses
 #   sync-runtime               agent self-heal: restore gateway rules/routes, drop suppressed addresses;
 #                              prints ROUTES_CHANGED=n and ADDRS_DROPPED=n
 #   self-test                  check tooling, print SELFTEST=ok
@@ -47,8 +53,9 @@ MANAGED_FILE="$STATE_DIR/managed.list"
 ROUTES_FILE="$STATE_DIR/routes.list"
 ROUTES_NEXT="$STATE_DIR/routes.list.next"
 SUPPRESSED_FILE="$STATE_DIR/suppressed.list"
+LINKS_FILE="$STATE_DIR/links.list"
 # Saved in every transaction backup and restored together with the config files
-STATE_LISTS="managed.list routes.list suppressed.list"
+STATE_LISTS="managed.list routes.list suppressed.list links.list"
 TX_FILE="$STATE_DIR/transaction.env"
 HISTORY_FILE="$STATE_DIR/history.log"
 BACKUP_ROOT="$STATE_DIR/backups"
@@ -228,6 +235,17 @@ ip_del() {
 
 has_default_route() {
     ip "-$1" route show default 2>/dev/null | grep -q .
+}
+
+# Administrative state, not operstate: a dummy NIC or a link without carrier
+# stays "unknown"/"down" even after `ip link set up`
+link_is_up() { ip -o link show dev "$1" 2>/dev/null | grep -qE '<([^>]*,)?UP(,[^>]*)?>'; }
+
+set_link() {
+    local iface="$1" state="$2" out
+    out=$(ip link set dev "$iface" "$state" 2>&1) && return 0
+    log "ip link set $iface $state: $out"
+    return 1
 }
 
 # ------------------------------------------------- gateway routes (policy routing)
@@ -455,7 +473,7 @@ backend_restore() {
 # set are skipped), so the unit is simply enabled while there is anything to do.
 sync_persist_unit() {
     command -v systemctl >/dev/null 2>&1 || return 0
-    if [ -s "$MANAGED_FILE" ] || [ -s "$ROUTES_FILE" ] || [ -s "$SUPPRESSED_FILE" ]; then
+    if [ -s "$MANAGED_FILE" ] || [ -s "$ROUTES_FILE" ] || [ -s "$SUPPRESSED_FILE" ] || [ -s "$LINKS_FILE" ]; then
         systemctl enable "$PERSIST_UNIT" >/dev/null 2>&1
     else
         systemctl disable "$PERSIST_UNIT" >/dev/null 2>&1
@@ -469,8 +487,11 @@ PLAN_ABSENT=()
 PLAN_MANAGED_B64=""
 PLAN_ROUTES_B64=""
 PLAN_SUPPRESSED_B64=""
+PLAN_LINKS_B64=""
+# up | down | empty — what the transaction does with the link itself
+TX_LINK=""
 NM_CONNECTION=""; NM_KEYFILE=""; NM_IPV4_ADDRESSES=""; NM_IPV6_ADDRESSES=""; NM_ADD=""; NM_REMOVE=""
-BEFORE_ALL=""; BEFORE_STATIC=""; DEFAULT4=no; DEFAULT6=no
+BEFORE_ALL=""; BEFORE_STATIC=""; DEFAULT4=no; DEFAULT6=no; LINK_WAS_UP=yes
 
 read_plan() {
     local line
@@ -486,6 +507,8 @@ read_plan() {
             MANAGED_B64=*) PLAN_MANAGED_B64="${line#*=}" ;;
             ROUTES_B64=*) PLAN_ROUTES_B64="${line#*=}" ;;
             SUPPRESSED_B64=*) PLAN_SUPPRESSED_B64="${line#*=}" ;;
+            LINKS_B64=*) PLAN_LINKS_B64="${line#*=}" ;;
+            LINK=*) TX_LINK="${line#*=}" ;;
             NM_CONNECTION=*) NM_CONNECTION="${line#*=}" ;;
             NM_KEYFILE=*) NM_KEYFILE="${line#*=}" ;;
             NM_ADD=*) NM_ADD="${line#*=}" ;;
@@ -510,6 +533,7 @@ validate_plan() {
     [ -d "/sys/class/net/$TX_IFACE" ] || die 2 "interface $TX_IFACE not found"
     [[ "$TX_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$TX_TIMEOUT" -ge 30 ] && [ "$TX_TIMEOUT" -le 600 ] || die 2 "bad timeout"
     case "$TX_BACKEND" in netplan|networkd|networkmanager|ifupdown|fallback) ;; *) die 2 "bad backend" ;; esac
+    case "$TX_LINK" in ''|up|down) ;; *) die 2 "bad link action" ;; esac
     [ -n "$TX_ADD$TX_REMOVE" ] || die 2 "nothing to apply"
     for addr in $TX_ADD $TX_REMOVE $NM_ADD $NM_REMOVE; do valid_cidr "$addr" || die 2 "bad address $addr"; done
     for entry in "${PLAN_FILES[@]}"; do
@@ -527,6 +551,7 @@ snapshot_before() {
     BEFORE_STATIC=$(static_addr_list "$TX_IFACE" | tr '\n' ' ')
     has_default_route 4 && DEFAULT4=yes
     has_default_route 6 && DEFAULT6=yes
+    link_is_up "$TX_IFACE" || LINK_WAS_UP=no
     if [ "$TX_BACKEND" = networkmanager ]; then
         NM_IPV4_ADDRESSES=$(nmcli -g ipv4.addresses connection show "$NM_CONNECTION" 2>/dev/null)
         NM_IPV6_ADDRESSES=$(nmcli -g ipv6.addresses connection show "$NM_CONNECTION" 2>/dev/null)
@@ -563,6 +588,7 @@ backup_transaction() {
     {
         printf 'BACKEND=%s\nIFACE=%s\nADD=%s\nREMOVE=%s\n' "$TX_BACKEND" "$TX_IFACE" "$TX_ADD" "$TX_REMOVE"
         printf 'BEFORE_ALL=%s\nBEFORE_STATIC=%s\nDEFAULT4=%s\nDEFAULT6=%s\n' "$BEFORE_ALL" "$BEFORE_STATIC" "$DEFAULT4" "$DEFAULT6"
+        printf 'LINK=%s\nLINK_WAS_UP=%s\n' "$TX_LINK" "$LINK_WAS_UP"
         printf 'NM_CONNECTION=%s\nNM_KEYFILE=%s\nNM_IPV4_ADDRESSES=%s\nNM_IPV6_ADDRESSES=%s\n' \
             "$NM_CONNECTION" "$NM_KEYFILE" "$NM_IPV4_ADDRESSES" "$NM_IPV6_ADDRESSES"
     } > "$dir/meta.env"
@@ -577,7 +603,8 @@ load_backup_meta() {
             IFACE) TX_IFACE="$value" ;;
             ADD) TX_ADD="$value" ;;
             REMOVE) TX_REMOVE="$value" ;;
-            BEFORE_ALL|BEFORE_STATIC|DEFAULT4|DEFAULT6|NM_CONNECTION|NM_KEYFILE|NM_IPV4_ADDRESSES|NM_IPV6_ADDRESSES)
+            LINK) TX_LINK="$value" ;;
+            BEFORE_ALL|BEFORE_STATIC|DEFAULT4|DEFAULT6|LINK_WAS_UP|NM_CONNECTION|NM_KEYFILE|NM_IPV4_ADDRESSES|NM_IPV6_ADDRESSES)
                 printf -v "$key" '%s' "$value" ;;
         esac
     done < "$dir/meta.env"
@@ -634,7 +661,7 @@ readd_lost_static() {
 
 # Every added address is up (IPv6 past DAD), nothing that was there before is
 # gone, removed ones are gone, default routes that existed still exist, every
-# gateway rule and route is in place.
+# gateway rule and route is in place, the link is in the state the plan asked for.
 verify_apply() {
     local attempt=1 addr missing routes_gap
     while :; do
@@ -656,6 +683,8 @@ verify_apply() {
         done
         [ "$DEFAULT4" = yes ] && ! has_default_route 4 && missing="$missing default-route-v4"
         [ "$DEFAULT6" = yes ] && ! has_default_route 6 && missing="$missing default-route-v6"
+        [ "$TX_LINK" = up ] && ! link_is_up "$TX_IFACE" && missing="$missing link-up"
+        [ "$TX_LINK" = down ] && link_is_up "$TX_IFACE" && missing="$missing link-still-up"
         [ -z "$missing" ] && return 0
         if [ "$attempt" -ge "$VERIFY_ATTEMPTS" ]; then
             VERIFY_ERROR="not settled after verification:$missing"
@@ -699,11 +728,15 @@ restore_transaction() {
     load_backup_meta "$tx" || { log "no backup for $tx"; return 1; }
     restore_files "$tx" || failed=1
     if [ "$mode" = live ]; then
+        # The link goes back to its old state: up before the removed addresses
+        # return to it, down only after the added ones are gone
+        if [ -n "$TX_LINK" ] && [ "$LINK_WAS_UP" = yes ]; then set_link "$TX_IFACE" up || failed=1; fi
         for addr in $TX_ADD; do ip_del "$addr" "$TX_IFACE" || failed=1; done
         for addr in $TX_REMOVE; do ip_add "$addr" "$TX_IFACE" || failed=1; done
         backend_restore
         readd_lost_static
         routes_sync "$ROUTES_FILE" || failed=1
+        if [ -n "$TX_LINK" ] && [ "$LINK_WAS_UP" = no ]; then set_link "$TX_IFACE" down || failed=1; fi
     elif [ "$TX_BACKEND" = netplan ]; then
         # The generator already ran before the guard: regenerate from the restored files
         netplan generate >/dev/null 2>&1 || log "netplan generate during boot rollback failed"
@@ -751,6 +784,9 @@ cmd_apply() {
     if ! write_plan_files; then
         fail_apply "cannot write configuration files"
     fi
+    if [ "$TX_LINK" = up ] && ! set_link "$TX_IFACE" up; then
+        fail_apply "cannot bring $TX_IFACE up"
+    fi
     if ! backend_apply; then
         fail_apply "backend apply failed ($TX_BACKEND)"
     fi
@@ -762,12 +798,15 @@ cmd_apply() {
     # A failed `ip` here is logged; verification decides — a rule networkd removed
     # a moment ago makes `ip rule del` fail harmlessly
     routes_sync "$ROUTES_NEXT"
+    if [ "$TX_LINK" = down ] && ! set_link "$TX_IFACE" down; then
+        fail_apply "cannot bring $TX_IFACE down"
+    fi
     if ! verify_apply; then
         fail_apply "$VERIFY_ERROR"
     fi
 
     if ! { write_b64 "$PLAN_MANAGED_B64" "$MANAGED_FILE" && write_b64 "$PLAN_SUPPRESSED_B64" "$SUPPRESSED_FILE" \
-            && mv -f "$ROUTES_NEXT" "$ROUTES_FILE"; }; then
+            && write_b64 "$PLAN_LINKS_B64" "$LINKS_FILE" && mv -f "$ROUTES_NEXT" "$ROUTES_FILE"; }; then
         fail_apply "cannot write address lists"
     fi
     # The backend re-applied the hoster config, and with it the addresses suppressed earlier
@@ -829,6 +868,14 @@ cmd_boot_guard() {
 cmd_restore_runtime() {
     local iface addr
     take_lock
+    # No config describes these NICs, so nothing else brings them up after boot
+    if [ -f "$LINKS_FILE" ]; then
+        while read -r iface; do
+            [ -n "$iface" ] || continue
+            [ -d "/sys/class/net/$iface" ] || { log "restore-runtime: $iface is missing"; continue; }
+            link_is_up "$iface" || set_link "$iface" up
+        done < "$LINKS_FILE"
+    fi
     if [ -f "$MANAGED_FILE" ]; then
         while read -r iface addr; do
             [ -n "$iface" ] && [ -n "$addr" ] || continue

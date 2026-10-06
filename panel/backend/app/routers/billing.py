@@ -41,6 +41,7 @@ class BillingServerCreate(BaseModel):
     cloud_provider: Optional[str] = None
     cloud_credential: Optional[str] = None
     cloud_account_id: Optional[str] = None
+    cloud_login: Optional[str] = None
     cloud_proxy: Optional[str] = None
     cloud_balance_threshold: Optional[float] = 0
 
@@ -62,6 +63,7 @@ class BillingServerUpdate(BaseModel):
     cloud_provider: Optional[str] = None
     cloud_credential: Optional[str] = None
     cloud_account_id: Optional[str] = None
+    cloud_login: Optional[str] = None
     cloud_proxy: Optional[str] = None
     cloud_balance_threshold: Optional[float] = None
 
@@ -175,6 +177,7 @@ def _server_to_dict(s: BillingServer) -> dict:
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
         "cloud_provider": s.cloud_provider,
         "cloud_account_id": s.cloud_account_id,
+        "cloud_login": s.cloud_login,
         "cloud_proxy": s.cloud_proxy,
         "cloud_balance_threshold": s.cloud_balance_threshold,
         "cloud_daily_cost": s.cloud_daily_cost,
@@ -212,6 +215,7 @@ async def list_cloud_providers():
             {
                 "id": p.id,
                 "requires_account_id": p.requires_account_id,
+                "requires_login": p.requires_login,
                 "default_currency": p.default_currency,
             }
             for p in PROVIDERS.values()
@@ -264,6 +268,7 @@ async def create_billing_server(data: BillingServerCreate, db: AsyncSession = De
         server.cloud_provider = provider
         server.cloud_credential = data.cloud_credential
         server.cloud_account_id = data.cloud_account_id
+        server.cloud_login = data.cloud_login
         server.cloud_proxy = data.cloud_proxy
         server.cloud_balance_threshold = data.cloud_balance_threshold or 0
         server.currency = data.currency or PROVIDERS[provider].default_currency

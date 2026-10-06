@@ -22,6 +22,7 @@ interface ProjectNodeProps {
   servers: Map<number, ServerData>
   allServers: ServerData[]
   allAssignedIds: Set<number>
+  highlightedServerId: number | null
   collapsed: boolean
   onToggle: () => void
   onRename: (name: string) => Promise<void>
@@ -31,7 +32,7 @@ interface ProjectNodeProps {
 }
 
 export default function ProjectNode({
-  project, servers, allServers, allAssignedIds,
+  project, servers, allServers, allAssignedIds, highlightedServerId,
   collapsed, onToggle, onRename, onDelete, onAddServer, onRemoveServer,
 }: ProjectNodeProps) {
   const { t } = useTranslation()
@@ -165,6 +166,7 @@ export default function ProjectNode({
                 <InfraServerRow
                   key={sid}
                   server={srv}
+                  highlighted={sid === highlightedServerId}
                   onRemove={() => onRemoveServer(sid)}
                 />
               )

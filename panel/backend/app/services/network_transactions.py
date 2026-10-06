@@ -44,12 +44,19 @@ MIN_NODE_VERSION_NETWORK = "10.29.0"
 MIN_NODE_VERSION_NETWORK_GATEWAY = "10.31.0"
 # Старая нода отказывает в удалении адреса, который добавила не панель
 MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL = "10.31.0"
+# Старая нода отказывает в адресах на опущенной карте («interface is down»)
+MIN_NODE_VERSION_NETWORK_LINK_UP = "10.32.0"
 ROLLBACK_TIMEOUT_SEC = 120
 STATE_TIMEOUT_SECONDS = 10.0
 # Не больше proxy_read_timeout у location /api/system/network/ на ноде (тест-инвариант)
 APPLY_TIMEOUT_SECONDS = 180.0
 CONTROL_TIMEOUT_SECONDS = 20.0
 CONFIRM_POLL_INTERVAL_SEC = 3.0
+# apply повторяется, пока соединение с нодой не открывается: запрос не ушёл, повтор
+# безопасен. На пути до ноды бывают окна потерь по 10–20 с (VK Cloud: до 40% новых
+# соединений с панели не открывались), а установленные соединения при этом живут
+APPLY_CONNECT_ATTEMPTS = 6
+APPLY_CONNECT_RETRY_DELAY_SEC = 3.0
 INLINE_WAIT_SECONDS = 20.0
 # Часы ноды и панели расходятся; после дедлайна нода откатывает сама
 DEADLINE_GRACE_SECONDS = 15.0
@@ -93,6 +100,10 @@ class NodeUnreachableError(Exception):
         self.timeout = timeout
 
 
+class NodeConnectError(NodeUnreachableError):
+    """Соединение с нодой не открылось — запрос до неё точно не ушёл."""
+
+
 class PendingTransactionError(Exception):
     def __init__(self, transaction: Optional[dict]):
         super().__init__("a transaction is already in progress")
@@ -122,6 +133,12 @@ class GatewayConflictError(Exception):
 class HosterRemovalUnsupportedError(Exception):
     def __init__(self, node_version: Optional[str]):
         super().__init__(f"node {node_version or 'unknown'} cannot remove hoster addresses")
+        self.node_version = node_version
+
+
+class LinkUpUnsupportedError(Exception):
+    def __init__(self, node_version: Optional[str]):
+        super().__init__(f"node {node_version or 'unknown'} cannot bring a down interface up")
         self.node_version = node_version
 
 
@@ -199,6 +216,12 @@ def node_supports_hoster_removal(node_version: Optional[str]) -> bool:
     if not node_version:
         return False
     return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL)
+
+
+def node_supports_link_up(node_version: Optional[str]) -> bool:
+    if not node_version:
+        return False
+    return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_NETWORK_LINK_UP)
 
 
 def node_host(server_url: str) -> Optional[str]:
@@ -297,6 +320,8 @@ async def _request(client: httpx.AsyncClient, method: str, url: str, *, headers:
                    json_data: Optional[dict] = None) -> dict:
     try:
         response = await client.request(method, url, headers=headers, json=json_data, timeout=timeout)
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+        raise NodeConnectError(str(exc) or exc.__class__.__name__, timeout=isinstance(exc, httpx.TimeoutException))
     except httpx.TimeoutException as exc:
         raise NodeUnreachableError(f"таймаут: {exc.__class__.__name__}", timeout=True)
     except httpx.RequestError as exc:
@@ -400,6 +425,8 @@ async def start_apply(server: Server, *, interface: str, add: list[AddressSpec],
         iface_state = next((i for i in state.get("interfaces") or [] if i.get("name") == interface), None)
         if iface_state is None:
             raise InterfaceNotFoundError(interface)
+        if add and not iface_state.get("is_up", True) and not node_supports_link_up(server.node_version):
+            raise LinkUpUnsupportedError(server.node_version)
         conflicts = gateway_conflicts(add, iface_state, state.get("default_gateway") or {})
         if conflicts:
             raise GatewayConflictError(conflicts)
@@ -438,10 +465,32 @@ async def wait_for_job(job: NetworkJob, timeout: float) -> None:
         pass
 
 
+async def _send_apply_retrying(server: Server, job: NetworkJob, payload: dict) -> dict:
+    """apply с повтором, пока соединение не открывается. Попытки и причина видны
+    в карточке; после отправки счётчик сбрасывается — дальше он считает пробы связи."""
+    for attempt in range(1, APPLY_CONNECT_ATTEMPTS + 1):
+        try:
+            result = await send_apply(server, payload)
+        except NodeConnectError as exc:
+            if attempt == APPLY_CONNECT_ATTEMPTS:
+                raise
+            job.attempts, job.last_error = attempt, exc.reason
+            logger.warning("network_apply_connect_retry server_id=%s attempt=%d reason=%s", server.id, attempt, exc.reason)
+            await asyncio.sleep(APPLY_CONNECT_RETRY_DELAY_SEC)
+            continue
+        job.attempts, job.last_error = 0, None
+        return result
+
+
 async def _run_job(server: Server, job: NetworkJob, payload: dict) -> None:
     try:
         try:
-            result = await send_apply(server, payload)
+            result = await _send_apply_retrying(server, job, payload)
+        except NodeConnectError as exc:
+            _finish(job, TransactionStatus.FAILED,
+                    message=f"не удалось подключиться к ноде за {APPLY_CONNECT_ATTEMPTS} попыток ({exc.reason}) — "
+                            "изменения не применялись")
+            return
         except NodeUnreachableError as exc:
             # Ответ потерян: apply мог пройти, а связь — оборваться именно из-за
             # смены адресов. Цикл подтверждения найдёт pending-транзакцию сам.

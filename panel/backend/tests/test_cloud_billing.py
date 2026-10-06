@@ -8,6 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
+import jwt
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -30,16 +33,25 @@ from app.services.cloud_billing.selectel import (  # noqa: E402
     _pick_prediction_days,
 )
 from app.services.cloud_billing.timeweb import TimewebProvider, _tariff_daily_cost  # noqa: E402
+from app.services.cloud_billing.vk_cloud import VkCloudProvider, _average_daily_spend  # noqa: E402
 from app.services.cloud_billing.yandex import (  # noqa: E402
     YC_USAGE_URL,
+    UsageReportScheduler,
     YandexCloudProvider,
     _grpc_frame,
     _grpc_unframe,
     _pb_string,
     _pb_submessage,
+    _pb_timestamp,
+    _report_window,
 )
 from app.services.http_client import close_http_clients, get_external_client  # noqa: E402
-from app.services.yc_token_manager import YC_IAM_ENDPOINT, get_yc_token_manager  # noqa: E402
+from app.services.yc_token_manager import (  # noqa: E402
+    YC_IAM_ENDPOINT,
+    YCTokenError,
+    get_yc_token_manager,
+    parse_authorized_key,
+)
 
 
 class FakeResponse:
@@ -92,6 +104,7 @@ def billing_server(**overrides):
         cloud_provider="selectel",
         cloud_credential="token",
         cloud_account_id=None,
+        cloud_login=None,
         cloud_proxy=None,
         cloud_balance_threshold=0,
         cloud_daily_cost=None,
@@ -290,8 +303,147 @@ class TimewebProviderTests(unittest.TestCase):
             self._fetch(client)
 
 
+class FakeVkResponse(FakeResponse):
+    def __init__(self, status_code: int, payload=None, text: str = "", headers: dict | None = None):
+        super().__init__(status_code, payload, text)
+        self.headers = headers or {}
+
+
+def keystone_token_response(pid: str = "mcs0123456789", token: str = "gAAAA-token"):
+    return FakeVkResponse(
+        201,
+        {"token": {"project": {"id": "b5b7ffd4ef05", "name": pid}}},
+        headers={"X-Subject-Token": token},
+    )
+
+
+def report_item(day: str, money: str, bonus: str = "0"):
+    return {"pid": "mcs0123456789", "usage_day": day, "resource_price": "1", "money": money,
+            "bonus": bonus, "labels": {}}
+
+
+class FakeVkClient:
+    """Ответы по (метод, путь); каждый запрос записывается с телом и параметрами."""
+
+    def __init__(self, by_route: dict):
+        self.by_route = by_route
+        self.calls: list[dict] = []
+
+    async def request(self, method, url, headers=None, timeout=None, **kwargs):
+        path = url.split("://", 1)[1].split("/", 1)[1]
+        self.calls.append({"method": method, "path": path, "headers": headers or {}, **kwargs})
+        response = self.by_route[(method, "/" + path)]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+VK_BALANCE = ("GET", "/billing/public/v1/projects/mcs0123456789/balances/amount")
+VK_REPORT = ("GET", "/billing/public/v1/projects/mcs0123456789/reports/lite-granular")
+VK_TOKEN = ("POST", "/v3/auth/tokens")
+
+
+class VkCloudProviderTests(unittest.TestCase):
+    def _fetch(self, client, login="user@example.com", account_id="b5b7ffd4ef05"):
+        return asyncio.run(VkCloudProvider().fetch(client, "secret", account_id, login))
+
+    def test_balance_sums_personal_and_bonus_accounts(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(),
+            VK_BALANCE: FakeVkResponse(200, {"base": 1200.5, "bonus": 300}),
+            VK_REPORT: FakeVkResponse(200, {"items": []}),
+        })
+
+        snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.balance, 1500.5)
+        self.assertEqual(snapshot.currency, "RUB")
+        self.assertIsNone(snapshot.daily_cost)
+
+    def test_token_is_scoped_to_the_project_and_reused_for_billing(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(token="tok-1"),
+            VK_BALANCE: FakeVkResponse(200, {"base": 10, "bonus": 0}),
+            VK_REPORT: FakeVkResponse(200, {"items": []}),
+        })
+
+        self._fetch(client)
+
+        auth = client.calls[0]["json"]["auth"]
+        self.assertEqual(auth["identity"]["password"]["user"]["name"], "user@example.com")
+        self.assertEqual(auth["identity"]["password"]["user"]["domain"]["name"], "users")
+        self.assertEqual(auth["scope"]["project"]["id"], "b5b7ffd4ef05")
+        self.assertEqual(client.calls[1]["headers"]["X-Auth-Token"], "tok-1")
+
+    def test_pid_for_billing_comes_from_keystone_project_name(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(pid="mcs9999999999"),
+            ("GET", "/billing/public/v1/projects/mcs9999999999/balances/amount"):
+                FakeVkResponse(200, {"base": 1, "bonus": 0}),
+            ("GET", "/billing/public/v1/projects/mcs9999999999/reports/lite-granular"):
+                FakeVkResponse(200, {"items": []}),
+        })
+
+        self.assertEqual(self._fetch(client).balance, 1)
+
+    def test_daily_cost_averages_money_and_bonus_over_reported_days(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(),
+            VK_BALANCE: FakeVkResponse(200, {"base": 900, "bonus": 0}),
+            VK_REPORT: FakeVkResponse(200, {"items": [
+                report_item("2026-10-01", "40.5", "9.5"),
+                report_item("2026-10-01", "10"),
+                report_item("2026-10-02", "50"),
+            ]}),
+        })
+
+        snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.daily_cost, 55.0)
+        params = client.calls[2]["params"]
+        self.assertEqual(params["timezone"], "Europe/Moscow")
+        self.assertLess(params["date_from"], params["date_to"])
+
+    def test_report_failure_keeps_the_balance(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(),
+            VK_BALANCE: FakeVkResponse(200, {"base": 100, "bonus": 0}),
+            VK_REPORT: FakeVkResponse(422, None, "bad range"),
+        })
+
+        snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.balance, 100)
+        self.assertIsNone(snapshot.daily_cost)
+        self.assertIn("Consumption report unavailable", snapshot.warning)
+
+    def test_wrong_password_raises_auth_error(self):
+        client = FakeVkClient({VK_TOKEN: FakeVkResponse(401, None, "unauthorized")})
+        with self.assertRaises(CloudAuthError):
+            self._fetch(client)
+
+    def test_billing_forbidden_raises_auth_error(self):
+        client = FakeVkClient({
+            VK_TOKEN: keystone_token_response(),
+            VK_BALANCE: FakeVkResponse(403, None, "forbidden"),
+        })
+        with self.assertRaises(CloudAuthError):
+            self._fetch(client)
+
+    def test_login_and_project_are_required(self):
+        with self.assertRaises(CloudBillingError):
+            self._fetch(FakeVkClient({}), login=None)
+        with self.assertRaises(CloudBillingError):
+            self._fetch(FakeVkClient({}), account_id=None)
+
+    def test_average_ignores_malformed_rows(self):
+        self.assertIsNone(_average_daily_spend(None))
+        self.assertIsNone(_average_daily_spend([{"money": "5"}]))
+        self.assertEqual(_average_daily_spend([report_item("2026-10-01", "7", "bad")]), 7.0)
+
+
 class BalanceHistoryTests(unittest.TestCase):
-    """Расход по снимкам баланса — для провайдеров без API истории списаний."""
+    """Расход по снимкам баланса — для провайдеров без текущего расхода в API."""
 
     def setUp(self):
         self.now = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
@@ -355,6 +507,20 @@ class BalanceHistoryTests(unittest.TestCase):
             CloudSnapshot(balance=1000.0, currency="RUB", daily_cost=9.84),
             self.now,
             provider=get_provider("timeweb"),
+        )
+        self.assertEqual(server.cloud_daily_cost, 240.0)
+
+    def test_vk_cloud_history_wins_over_report_average(self):
+        # Отчёт VK видит только закрытые сутки, а первые из них у проекта неполные
+        server = billing_server(
+            cloud_provider="vk_cloud",
+            cloud_balance_history=self._history([(24, 1240), (12, 1120)]),
+        )
+        _apply_snapshot(
+            server,
+            CloudSnapshot(balance=1000.0, currency="RUB", daily_cost=158.06),
+            self.now,
+            provider=get_provider("vk_cloud"),
         )
         self.assertEqual(server.cloud_daily_cost, 240.0)
 
@@ -475,6 +641,14 @@ class SyncCloudBalanceTests(unittest.TestCase):
         self.assertFalse(get_provider("selectel").requires_account_id)
         self.assertFalse(get_provider("timeweb").requires_account_id)
         self.assertTrue(get_provider("timeweb").uses_balance_history)
+        self.assertTrue(get_provider("vk_cloud").requires_login)
+        self.assertTrue(get_provider("vk_cloud").requires_account_id)
+        self.assertFalse(get_provider("selectel").requires_login)
+
+    def test_vk_cloud_requires_login(self):
+        server = billing_server(cloud_provider="vk_cloud", cloud_account_id="b5b7ffd4ef05")
+        with self.assertRaises(CloudBillingError):
+            asyncio.run(sync_cloud_balance(server, datetime.now(timezone.utc)))
 
 
 def grpc_response(content: bytes = b"", headers: dict | None = None, http_version: str = "HTTP/2"):
@@ -487,9 +661,22 @@ def grpc_response(content: bytes = b"", headers: dict | None = None, http_versio
     )
 
 
-def usage_report(expense: str) -> bytes:
-    """BillingAccountUsageReportResponse с одним полем expense (StringDecimal)."""
-    return _grpc_frame(_pb_submessage(4, _pb_string(1, expense)))
+def closed_day(days_ago: int) -> datetime:
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    return today - timedelta(days=days_ago)
+
+
+def usage_report(*daily: tuple[datetime, str], total: str | None = None) -> bytes:
+    """BillingAccountUsageReportResponse: итог expense и разбивка по суткам
+    в entities_data[0].periodic[] (expense — StringDecimal, timestamp — начало суток)."""
+    entity = b"".join(
+        _pb_submessage(5, _pb_submessage(3, _pb_string(1, expense)) + _pb_timestamp(4, day))
+        for day, expense in daily
+    )
+    message = _pb_submessage(4, _pb_string(1, total)) if total is not None else b""
+    if entity:
+        message += _pb_submessage(5, entity)
+    return _grpc_frame(message)
 
 
 class FakeYandexClient:
@@ -499,9 +686,16 @@ class FakeYandexClient:
         self.consumption = consumption
         self.iam = iam or FakeResponse(200, {"iamToken": "iam-token"})
         self.posts: list[tuple[str, dict]] = []
+        self.iam_bodies: list[dict] = []
+
+    @property
+    def report_calls(self) -> int:
+        return sum(1 for url, _ in self.posts if url == YC_USAGE_URL)
 
     async def post(self, url, json=None, content=None, headers=None, timeout=None):
         self.posts.append((url, headers or {}))
+        if url == YC_IAM_ENDPOINT:
+            self.iam_bodies.append(json)
         response = self.iam if url == YC_IAM_ENDPOINT else self.consumption
         if isinstance(response, Exception):
             raise response
@@ -519,17 +713,94 @@ class YandexProviderTests(unittest.TestCase):
         return asyncio.run(YandexCloudProvider().fetch(client, "oauth-token", "account-1"))
 
     def test_daily_cost_from_grpc_usage_report(self):
-        client = FakeYandexClient(consumption=grpc_response(usage_report("-90.00")))
+        client = FakeYandexClient(consumption=grpc_response(usage_report(
+            (closed_day(3), "-30.00"), (closed_day(2), "-30.00"), (closed_day(1), "-60.00"),
+            total="-120.00",
+        )))
 
         snapshot = self._fetch(client)
 
         self.assertEqual(snapshot.balance, 900.0)
-        self.assertEqual(snapshot.daily_cost, 30.0)
+        self.assertEqual(snapshot.daily_cost, 40.0)
         self.assertIsNone(snapshot.warning)
         url, headers = client.posts[-1]
         self.assertEqual(url, YC_USAGE_URL)
         self.assertEqual(headers["content-type"], "application/grpc")
         self.assertEqual(headers["authorization"], "Bearer iam-token")
+
+    def test_new_account_is_averaged_over_days_with_spend(self):
+        # Аккаунт создан вчера: деление на всё окно занизило бы расход втрое
+        client = FakeYandexClient(consumption=grpc_response(usage_report(
+            (closed_day(2), "0"), (closed_day(1), "-45.00"), total="-45.00",
+        )))
+
+        self.assertEqual(self._fetch(client).daily_cost, 45.0)
+
+    def test_report_without_daily_breakdown_falls_back_to_period_total(self):
+        client = FakeYandexClient(consumption=grpc_response(usage_report(total="-90.00")))
+
+        self.assertEqual(self._fetch(client).daily_cost, 30.0)
+
+    def test_report_window_is_closed_utc_days(self):
+        start, end = _report_window(datetime(2026, 10, 5, 14, 30, tzinfo=timezone.utc))
+
+        self.assertEqual(start, datetime(2026, 10, 2, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 10, 4, tzinfo=timezone.utc))
+
+    def test_report_window_uses_utc_date(self):
+        # 01:00 по Москве 5-го — в UTC ещё 4-е, закрыты сутки по 3-е включительно
+        moscow = timezone(timedelta(hours=3))
+        _, end = _report_window(datetime(2026, 10, 5, 1, 0, tzinfo=moscow))
+
+        self.assertEqual(end, datetime(2026, 10, 3, tzinfo=timezone.utc))
+
+    def test_report_is_cached_per_account(self):
+        client = FakeYandexClient(consumption=grpc_response(usage_report(
+            (closed_day(1), "-30.00"), total="-30.00",
+        )))
+        provider = YandexCloudProvider()
+
+        async def scenario():
+            first = await provider.fetch(client, "oauth-token", "account-1")
+            second = await provider.fetch(client, "oauth-token", "account-1")
+            return first, second
+
+        first, second = asyncio.run(scenario())
+
+        self.assertEqual(first.daily_cost, 30.0)
+        self.assertEqual(second.daily_cost, 30.0)
+        self.assertEqual(client.report_calls, 1)
+
+    def test_rate_limit_defers_second_account_on_the_same_ip(self):
+        # Yandex отдаёт отчёт раз в минуту с IP: второй аккаунт через тот же выход
+        # не ждёт очереди в синхронизации, расход у него пока остаётся прежним
+        client = FakeYandexClient(consumption=grpc_response(usage_report(
+            (closed_day(1), "-30.00"), total="-30.00",
+        )))
+        provider = YandexCloudProvider(UsageReportScheduler(interval=60, wait_limit=0.05))
+
+        async def scenario():
+            first = await provider.fetch(client, "oauth-token", "account-1")
+            second = await provider.fetch(client, "oauth-token", "account-2")
+            return first, second
+
+        first, second = asyncio.run(scenario())
+
+        self.assertEqual(first.daily_cost, 30.0)
+        self.assertIsNone(second.daily_cost)
+        self.assertIsNone(second.warning)
+        self.assertEqual(client.report_calls, 1)
+
+    def test_accounts_behind_different_proxies_do_not_share_the_limit(self):
+        report = grpc_response(usage_report((closed_day(1), "-30.00"), total="-30.00"))
+        direct, proxied = FakeYandexClient(consumption=report), FakeYandexClient(consumption=report)
+        provider = YandexCloudProvider(UsageReportScheduler(interval=60, wait_limit=0.05))
+
+        async def scenario():
+            await provider.fetch(direct, "oauth-token", "account-1")
+            return await provider.fetch(proxied, "oauth-token", "account-2")
+
+        self.assertEqual(asyncio.run(scenario()).daily_cost, 30.0)
 
     def test_grpc_error_keeps_balance_and_becomes_warning(self):
         # Trailers-Only: статус и percent-encoded сообщение приходят заголовками, тела нет
@@ -545,7 +816,7 @@ class YandexProviderTests(unittest.TestCase):
 
     def test_http1_answer_is_not_taken_for_grpc(self):
         client = FakeYandexClient(consumption=grpc_response(
-            usage_report("90"), http_version="HTTP/1.1",
+            usage_report(total="90"), http_version="HTTP/1.1",
         ))
 
         self.assertIn("HTTP/2", self._fetch(client).warning)
@@ -564,6 +835,109 @@ class YandexProviderTests(unittest.TestCase):
         client = FakeYandexClient(iam=FakeResponse(401, None, "unauthorized"))
         with self.assertRaises(CloudAuthError):
             self._fetch(client)
+
+
+def authorized_key(key_id: str = "ajekey1", pem_prefix: str = "") -> tuple[str, object]:
+    """JSON авторизованного ключа сервисного аккаунта и открытый ключ для проверки подписи."""
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    payload = {
+        "id": key_id,
+        "service_account_id": "ajesa1",
+        "created_at": "2026-10-05T10:00:00Z",
+        "key_algorithm": "RSA_2048",
+        "private_key": pem_prefix + pem,
+    }
+    return json.dumps(payload, indent=2), private.public_key()
+
+
+class YCTokenManagerTests(unittest.TestCase):
+    def setUp(self):
+        get_yc_token_manager()._cache.clear()
+
+    def _exchange(self, client, credential):
+        return asyncio.run(get_yc_token_manager().get_iam_token(client, credential))
+
+    def test_authorized_key_is_exchanged_by_signed_jwt(self):
+        key_json, public_key = authorized_key()
+        client = FakeYandexClient()
+
+        self.assertEqual(self._exchange(client, key_json), "iam-token")
+
+        token = client.iam_bodies[0]["jwt"]
+        header = jwt.get_unverified_header(token)
+        claims = jwt.decode(token, public_key, algorithms=["PS256"], audience=YC_IAM_ENDPOINT)
+        self.assertEqual((header["alg"], header["kid"]), ("PS256", "ajekey1"))
+        self.assertEqual(claims["iss"], "ajesa1")
+        self.assertEqual(claims["exp"] - claims["iat"], 3600)
+
+    def test_service_line_before_pem_is_accepted(self):
+        # Так выглядят ключи из консоли: служебная строка, затем PEM
+        key_json, public_key = authorized_key(
+            pem_prefix="PLEASE DO NOT REMOVE THIS LINE! Yandex.Cloud SA Key ID <ajekey1>\n",
+        )
+        client = FakeYandexClient()
+
+        self._exchange(client, key_json)
+
+        jwt.decode(client.iam_bodies[0]["jwt"], public_key, algorithms=["PS256"], audience=YC_IAM_ENDPOINT)
+
+    def test_key_pasted_into_single_line_field_still_parses(self):
+        # Однострочное поле формы съедает переносы строк, а в private_key они экранированы
+        key_json, _ = authorized_key()
+        client = FakeYandexClient()
+
+        self._exchange(client, key_json.replace("\n", ""))
+
+        self.assertIn("jwt", client.iam_bodies[0])
+
+    def test_oauth_token_is_still_exchanged_directly(self):
+        client = FakeYandexClient()
+
+        self._exchange(client, " y0_AgAAAAB-token ")
+
+        self.assertEqual(client.iam_bodies[0], {"yandexPassportOauthToken": "y0_AgAAAAB-token"})
+
+    def test_broken_key_json_is_an_error(self):
+        with self.assertRaises(YCTokenError):
+            parse_authorized_key('{"id": "ajekey1",')
+        with self.assertRaises(YCTokenError):
+            parse_authorized_key('{"id": "ajekey1", "service_account_id": "ajesa1"}')
+        with self.assertRaises(YCTokenError):
+            parse_authorized_key('{"id": "k", "service_account_id": "s", "private_key": "not a pem"}')
+
+    def test_rejected_oauth_token_points_to_service_account_key(self):
+        client = FakeYandexClient(iam=FakeResponse(401, {"message": "The token is invalid"}))
+
+        with self.assertRaises(YCTokenError) as ctx:
+            self._exchange(client, "y0_AgAAAAB-token")
+
+        self.assertIn("The token is invalid", str(ctx.exception))
+        self.assertIn("authorized key", str(ctx.exception))
+
+    def test_rejected_key_reports_yandex_reason_only(self):
+        key_json, _ = authorized_key()
+        client = FakeYandexClient(iam=FakeResponse(400, {"message": "Service account not found"}))
+
+        with self.assertRaises(YCTokenError) as ctx:
+            self._exchange(client, key_json)
+
+        self.assertEqual(str(ctx.exception), "IAM token exchange failed: HTTP 400: Service account not found")
+
+    def test_keys_with_the_same_beginning_do_not_share_the_cache(self):
+        first, _ = authorized_key(key_id="ajekey1")
+        second, _ = authorized_key(key_id="ajekey2")
+        client = FakeYandexClient()
+
+        self._exchange(client, first)
+        self._exchange(client, second)
+        self._exchange(client, first)
+
+        self.assertEqual(len(client.iam_bodies), 2)
 
 
 class GrpcFramingTests(unittest.TestCase):

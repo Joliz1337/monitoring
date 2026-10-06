@@ -18,6 +18,7 @@ import {
 } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
 import { Checkbox } from '../components/ui/Checkbox'
+import { SecretInput } from '../components/ui/SecretInput'
 import CertificateMaterials from '../components/wildcard/CertificateMaterials'
 import ReloadCmdPresetChips from '../components/wildcard/ReloadCmdPresetChips'
 import { WildcardDeployProgress } from '../components/wildcard/WildcardDeployProgress'
@@ -1153,18 +1154,12 @@ export default function WildcardSSL() {
               <label className="block text-sm text-dark-300 mb-1">{t('wildcard_ssl.cf_token')}</label>
               <div className="flex items-center gap-2">
                 <div className="relative flex-1 sm:max-w-md">
-                  <input
-                    type="text"
+                  <SecretInput
+                    revealed={showToken}
                     value={cfToken || (showToken && cfTokenRevealed ? cfTokenRevealed : (settings?.cloudflare_api_token_set ? settings.cloudflare_api_token : ''))}
                     onChange={e => { setCfToken(e.target.value); setCfTokenRevealed('') }}
                     onFocus={() => { if (!cfToken && settings?.cloudflare_api_token_set && !showToken) setCfToken('') }}
                     placeholder={settings?.cloudflare_api_token_set ? '' : 'API Token'}
-                    name="cf_api_token_field"
-                    autoComplete="new-password"
-                    data-1p-ignore
-                    data-lpignore="true"
-                    data-form-type="other"
-                    style={showToken ? undefined : { WebkitTextSecurity: 'disc', textSecurity: 'disc' } as any}
                     className="w-full px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500 pr-10"
                   />
                   <button type="button" onClick={async () => {

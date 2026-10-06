@@ -140,6 +140,9 @@ class InterfaceState(BaseModel):
     is_default: bool
     kind: str  # physical | bond | vlan | bridge
     addresses: list[LiveAddress]
+    # Опущенную карту подняла панель вместе с адресами (links.list): после
+    # загрузки её поднимает нода, с последним адресом панель её опускает
+    brought_up: bool = False
 
 
 class ManagedAddress(BaseModel):

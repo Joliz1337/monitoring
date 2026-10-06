@@ -1,27 +1,38 @@
 """Транзакции доп. IP: гейт версии ноды, адрес и порт ноды из URL, дедлайн с
 запасом на расхождение часов, вычитание уже стоящих адресов, отбор адресов
-хостера для удаления и снятых — для возврата, снимок задачи.
+хостера для удаления и снятых — для возврата, снимок задачи, отказ старой ноде
+в адресах на опущенной карте, повтор apply, пока соединение с нодой не открывается.
 
 Запуск из panel/backend:  python -m unittest discover -s tests -p "test_*.py"
 """
 
+import asyncio
 import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import httpx
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 try:
     from app.services.network_addresses import AddressSpec
     from app.services.network_transactions import (
+        APPLY_CONNECT_ATTEMPTS,
         DEADLINE_GRACE_SECONDS,
         MIN_NODE_VERSION_NETWORK,
         MIN_NODE_VERSION_NETWORK_GATEWAY,
         MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL,
+        MIN_NODE_VERSION_NETWORK_LINK_UP,
         ROLLBACK_TIMEOUT_SEC,
         JobPhase,
+        LinkUpUnsupportedError,
         NetworkJob,
+        NodeConnectError,
+        NodeUnreachableError,
         TransactionStatus,
         deadline_passed,
         gateway_conflicts,
@@ -30,11 +41,15 @@ try:
         node_api_port,
         node_host,
         node_supports_hoster_removal,
+        node_supports_link_up,
         node_supports_network,
         node_supports_network_gateway,
         parse_deadline,
         present_on_interface,
+        start_apply,
         suppressed_on_interface,
+        _request,
+        _run_job,
     )
 except ImportError as e:  # pragma: no cover
     raise unittest.SkipTest(f"network_transactions requires the panel runtime: {e}")
@@ -101,6 +116,91 @@ class InterfaceFilterTests(unittest.TestCase):
         self.assertTrue(node_supports_hoster_removal(MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL))
         self.assertFalse(node_supports_hoster_removal("10.30.9"))
         self.assertFalse(node_supports_hoster_removal(None))
+
+
+class LinkUpGateTests(unittest.TestCase):
+    STATE = {"interfaces": [{"name": "eth0", "is_up": True, "addresses": []},
+                            {"name": "ens4", "is_up": False, "addresses": []}]}
+
+    def test_gate(self):
+        self.assertTrue(node_supports_link_up(MIN_NODE_VERSION_NETWORK_LINK_UP))
+        self.assertFalse(node_supports_link_up("10.31.9"))
+        self.assertFalse(node_supports_link_up(None))
+
+    def test_old_node_gets_no_addresses_on_a_down_card(self):
+        server = SimpleNamespace(id=9001, node_version="10.31.0", url="https://1.2.3.4:9100")
+        with patch("app.services.network_transactions.fetch_state", AsyncMock(return_value=self.STATE)):
+            with self.assertRaises(LinkUpUnsupportedError):
+                asyncio.run(start_apply(server, interface="ens4", add=[AddressSpec("5.6.7.8", 32)],
+                                        remove=[], restore=[]))
+
+
+def failing_client(error: Exception) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise error
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+class ConnectRetryTests(unittest.TestCase):
+    SERVER = SimpleNamespace(id=9002, node_version="10.32.0", url="https://1.2.3.4:9100")
+    MODULE = "app.services.network_transactions"
+
+    def job(self) -> NetworkJob:
+        return NetworkJob(id="9002-1", server_id=9002, interface="ens4",
+                          add=[AddressSpec("5.6.7.8", 32)], remove=[], started_at=0.0)
+
+    def request_error(self, error: Exception) -> Exception:
+        async def call():
+            async with failing_client(error) as client:
+                await _request(client, "POST", "https://1.2.3.4:9100/x", headers={}, timeout=1.0)
+        with self.assertRaises(NodeUnreachableError) as ctx:
+            asyncio.run(call())
+        return ctx.exception
+
+    def test_only_unopened_connections_count_as_not_sent(self):
+        for error in (httpx.ConnectError("refused"), httpx.ConnectTimeout("syn lost"), httpx.PoolTimeout("busy")):
+            self.assertIsInstance(self.request_error(error), NodeConnectError, type(error).__name__)
+        # Запрос мог дойти: повторять нельзя, решает цикл подтверждения
+        for error in (httpx.ReadTimeout("slow"), httpx.RemoteProtocolError("dropped")):
+            self.assertNotIsInstance(self.request_error(error), NodeConnectError, type(error).__name__)
+
+    def run_job(self, send_apply: AsyncMock, fetch_state: AsyncMock) -> NetworkJob:
+        job = self.job()
+        with (
+            patch(f"{self.MODULE}.send_apply", send_apply),
+            patch(f"{self.MODULE}.fetch_state", fetch_state),
+            patch(f"{self.MODULE}.send_confirm", AsyncMock(return_value={"status": "confirmed"})),
+            patch(f"{self.MODULE}.APPLY_CONNECT_RETRY_DELAY_SEC", 0),
+            patch(f"{self.MODULE}._reachability", AsyncMock(return_value=None)),
+        ):
+            asyncio.run(_run_job(self.SERVER, job, {}))
+        return job
+
+    def test_apply_is_retried_until_the_connection_opens(self):
+        send_apply = AsyncMock(side_effect=[NodeConnectError("syn lost"), NodeConnectError("syn lost"),
+                                            {"success": True, "transaction_id": "tx1", "deadline_at": None}])
+        state = {"transaction": {"id": "tx1", "status": "pending"}}
+        job = self.run_job(send_apply, AsyncMock(return_value=state))
+        self.assertEqual(send_apply.await_count, 3)
+        self.assertEqual(job.status.value, "confirmed")
+        # Счётчик попыток после отправки считает уже пробы связи
+        self.assertEqual((job.attempts, job.last_error), (0, None))
+
+    def test_gives_up_without_waiting_for_a_transaction_that_was_never_sent(self):
+        send_apply = AsyncMock(side_effect=NodeConnectError("syn lost"))
+        fetch_state = AsyncMock()
+        job = self.run_job(send_apply, fetch_state)
+        self.assertEqual(send_apply.await_count, APPLY_CONNECT_ATTEMPTS)
+        self.assertEqual(job.status.value, "failed")
+        self.assertIn("не удалось подключиться к ноде", job.message)
+        fetch_state.assert_not_awaited()
+
+    def test_lost_response_is_not_resent(self):
+        send_apply = AsyncMock(side_effect=NodeUnreachableError("read timeout", timeout=True))
+        state = {"transaction": {"id": "tx1", "status": "pending"}}
+        job = self.run_job(send_apply, AsyncMock(return_value=state))
+        self.assertEqual(send_apply.await_count, 1)
+        self.assertEqual(job.status.value, "confirmed")
 
 
 class GatewayTests(unittest.TestCase):

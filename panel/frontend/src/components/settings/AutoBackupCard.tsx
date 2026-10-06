@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { backupApi, BackupAutoSettings, BackupAutoSettingsIn } from '../../api/client'
 import { getBrowserUtcOffset } from '../../stores/settingsStore'
+import { SecretInput } from '../ui/SecretInput'
 import { SettingsSection } from './SettingsSection'
 import { SettingRow } from './SettingRow'
 import { Switch } from './Switch'
@@ -176,7 +177,7 @@ export default function AutoBackupCard() {
         </div>
         <div>
           <label className="block text-xs text-dark-400 mb-1">{t('backup.auto.password')}</label>
-          <input className="input py-2 text-sm" type="password" placeholder={hasPassword ? t('backup.auto.password_set') : ''} value={password} onChange={e => setPassword(e.target.value)} />
+          <SecretInput className="input py-2 text-sm" placeholder={hasPassword ? t('backup.auto.password_set') : ''} value={password} onChange={e => setPassword(e.target.value)} />
         </div>
         <div>
           <label className="block text-xs text-dark-400 mb-1">{t('backup.auto.volume_mb')}</label>

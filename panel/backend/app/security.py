@@ -78,6 +78,19 @@ def get_client_ip(request: Request) -> str:
     return direct
 
 
+def is_direct_local_request(request: Request) -> bool:
+    """Запрос изнутри контейнера бэкенда в обход nginx панели.
+
+    Признак — loopback-пир без заголовков прокси: nginx ставит их всегда, а по
+    X-Forwarded-For uvicorn подменяет адрес клиента, так что loopback-адрес сам
+    по себе ничего не доказывает.
+    """
+    if request.headers.get("X-Real-IP") or request.headers.get("X-Forwarded-For"):
+        return False
+    addr = _parse_ip(request.client.host if request.client else "")
+    return addr is not None and addr.is_loopback
+
+
 class ConnectionDrop(Exception):
     """Raise to immediately drop connection without response"""
     pass

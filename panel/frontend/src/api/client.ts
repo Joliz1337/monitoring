@@ -269,6 +269,7 @@ export interface ServerMetrics {
       tx_peak_per_sec?: number
       is_up: boolean
       is_virtual?: boolean
+      addresses?: Array<{ type: 'ipv4' | 'ipv6'; address: string; netmask?: string }>
     }>
     total: {
       rx_bytes: number
@@ -2186,6 +2187,7 @@ export interface BillingServerData {
   updated_at: string | null
   cloud_provider: string | null
   cloud_account_id: string | null
+  cloud_login: string | null
   cloud_proxy: string | null
   cloud_balance_threshold: number | null
   cloud_daily_cost: number | null
@@ -2216,6 +2218,7 @@ export const billingApi = {
     cloud_provider?: string
     cloud_credential?: string
     cloud_account_id?: string
+    cloud_login?: string
     cloud_proxy?: string
     cloud_balance_threshold?: number
   }) => api.post<{ success: boolean; server: BillingServerData }>('/billing/servers', data),
@@ -2231,6 +2234,7 @@ export const billingApi = {
     cloud_provider?: string
     cloud_credential?: string
     cloud_account_id?: string | null
+    cloud_login?: string | null
     cloud_proxy?: string | null
     cloud_balance_threshold?: number
   }) => api.put<BillingServerData>(`/billing/servers/${id}`, data),
@@ -3306,6 +3310,8 @@ export interface NetworkInterface {
   is_default: boolean
   kind: 'physical' | 'bond' | 'vlan' | 'bridge'
   addresses: NetworkAddress[]
+  /** Опущенную карту подняла панель вместе с адресами; с последним адресом опустит */
+  brought_up?: boolean
 }
 
 export interface NetworkAddressRef {
@@ -3356,6 +3362,7 @@ export interface NetworkState {
   min_node_version: string
   min_node_version_gateway?: string
   min_node_version_hoster_removal?: string
+  min_node_version_link_up?: string
   // Адрес, по которому панель ходит на ноду: его удалить нельзя
   access_address?: string | null
   node_version?: string | null

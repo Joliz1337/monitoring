@@ -38,7 +38,11 @@ class SelectelProvider(CloudProvider):
     requires_account_id = False
 
     async def fetch(
-        self, client: httpx.AsyncClient, credential: str, account_id: Optional[str]
+        self,
+        client: httpx.AsyncClient,
+        credential: str,
+        account_id: Optional[str],
+        login: Optional[str] = None,
     ) -> CloudSnapshot:
         balance, currency, warning = await self._fetch_balance(client, credential)
         days_left, prediction_warning = await self._fetch_prediction_days(client, credential)
