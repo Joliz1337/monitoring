@@ -472,6 +472,14 @@ class BalanceHistoryTests(unittest.TestCase):
         ]))
         self.assertEqual(_balance_history_daily_cost(server, 4900.0, self.now), 400.0)
 
+    def test_temporary_dip_is_not_spending(self):
+        # VK Cloud на час убрал с баланса 4800 и вернул: тратой остаются только
+        # 20 за эти два часа, всего 240 за сутки, а не 4800 сверху
+        server = billing_server(cloud_balance_history=self._history([
+            (24, 6240), (2, 6020), (1, 1220),
+        ]))
+        self.assertEqual(_balance_history_daily_cost(server, 6000.0, self.now), 240.0)
+
     def test_short_history_is_not_trusted(self):
         server = billing_server(cloud_balance_history=self._history([(2, 1020)]))
         self.assertIsNone(_balance_history_daily_cost(server, 1000.0, self.now))
