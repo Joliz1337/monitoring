@@ -16,19 +16,19 @@ Keystone по логину и паролю (почта аккаунта или �
 (`uses_balance_history`, см. __init__.py), а отчёт — стартовая оценка,
 пока истории мало.
 """
-import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional
 
 import httpx
 
 from app.services.cloud_billing.base import (
+    MOSCOW_TZ,
     CloudAuthError,
     CloudBillingError,
     CloudProvider,
     CloudSnapshot,
-    describe_request_error,
+    send_with_retry,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,15 +38,9 @@ BILLING_PROJECTS_URL = "https://msk.cloud.vk.ru/billing/public/v1/projects"
 # Пользователи VK Cloud и сервисные учётные записи живут в домене Keystone «users»
 USER_DOMAIN = "users"
 
-# Москва без перехода на летнее время с 2014 года; zoneinfo в образе может не быть
-MOSCOW_TZ = timezone(timedelta(hours=3))
 REPORT_TIMEZONE = "Europe/Moscow"
 # Расход — среднее за последние закрытые сутки: текущие ещё не досчитаны
 CONSUMPTION_WINDOW_DAYS = 3
-
-REQUEST_TIMEOUT = 20.0
-RETRY_ATTEMPTS = 3
-RETRY_BASE_DELAY = 1.0
 
 
 class VkCloudProvider(CloudProvider):
@@ -147,27 +141,7 @@ class VkCloudProvider(CloudProvider):
         return _average_daily_spend(data.get("items")), None
 
     async def _send(self, client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
-        """Запрос с повтором при сетевой ошибке и 5xx; остальные коды разбирает вызывающий."""
-        headers = {"Accept": "application/json", **kwargs.pop("headers", {})}
-        last_error = "no attempts"
-
-        for attempt in range(RETRY_ATTEMPTS):
-            try:
-                resp = await client.request(
-                    method, url, headers=headers, timeout=REQUEST_TIMEOUT, **kwargs
-                )
-            except Exception as e:
-                last_error = describe_request_error(e)
-                logger.warning("VK Cloud %s %s failed: %s", method, url, e)
-            else:
-                if resp.status_code < 500:
-                    return resp
-                last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
-
-            if attempt < RETRY_ATTEMPTS - 1:
-                await asyncio.sleep(RETRY_BASE_DELAY * (2 ** attempt))
-
-        raise CloudBillingError(last_error)
+        return await send_with_retry(client, method, url, "VK Cloud", **kwargs)
 
 
 def _project_pid(body) -> str:

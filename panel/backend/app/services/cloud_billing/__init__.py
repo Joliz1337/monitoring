@@ -14,6 +14,7 @@ from app.services.cloud_billing.base import (
     CloudSnapshot,
     compute_days_left,
 )
+from app.services.cloud_billing.cloud_ru import CloudRuProvider
 from app.services.cloud_billing.selectel import SelectelProvider
 from app.services.cloud_billing.timeweb import TimewebProvider
 from app.services.cloud_billing.vk_cloud import VkCloudProvider
@@ -24,7 +25,13 @@ logger = logging.getLogger(__name__)
 
 PROVIDERS: dict[str, CloudProvider] = {
     p.id: p
-    for p in (YandexCloudProvider(), SelectelProvider(), TimewebProvider(), VkCloudProvider())
+    for p in (
+        YandexCloudProvider(),
+        SelectelProvider(),
+        TimewebProvider(),
+        VkCloudProvider(),
+        CloudRuProvider(),
+    )
 }
 
 # История баланса для провайдеров без текущего расхода в API: окно то же, что у окна

@@ -8,7 +8,7 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 |---|---|
 | Monthly | You set the paid-until date or the number of paid days. Optionally add the monthly price, and the server counts toward monthly spend |
 | Resource | There's a balance and a daily cost — the panel works out how long it lasts |
-| Cloud | Balance and remaining time come from the provider's API: Yandex Cloud, Selectel, Timeweb Cloud or VK Cloud |
+| Cloud | Balance and remaining time come from the provider's API: Yandex Cloud, Selectel, Timeweb Cloud, VK Cloud or Cloud.ru |
 
 ## What you can do
 
@@ -25,6 +25,7 @@ Tracking when each server needs paying so nothing shuts down unexpectedly.
 - **Selectel** — a single static API key: in the Selectel panel go to “Profile → Access → API keys”. The key is shown once, so copy it right away. The user owning the key must have access to the Billing section.
 - **Timeweb Cloud** — an API token from the “API & Terraform” section of the Timeweb Cloud panel.
 - **VK Cloud** — login, password and Project ID (console → “Project settings” → “API access”). VK Cloud has no API keys, so the panel gets a short-lived token on every check. Use the account email or a service account created just for the panel. Two-factor authentication and API access must be enabled in the account.
+- **Cloud.ru** — the Key ID and Key Secret of a service account access key, and the agreement ID. Create an organization-level service account with the Cost administrator role in “Users → Service accounts”, then “Access keys” → “Create key” on its page. The Key Secret is shown once. The agreement ID is in “Cost control” → “Agreement”, the copy icon under the agreement number.
 
 How to connect Yandex Cloud:
 
@@ -45,6 +46,7 @@ If the provider API is unreachable from the panel's address, or accounts shouldn
 - For Selectel the term comes from Selectel itself: its own “balance lasts for N days” forecast is shown as is, and the daily cost is the balance divided by those days.
 - Timeweb Cloud has no charge history in its API, so the panel remembers the balance on every check and derives spending from its decline; top-ups don't affect the math. For the first hours after adding, while there's little history, the current plan price is shown instead.
 - VK Cloud balance includes bonuses, because bonuses are spent first. Spending is the average of the last three full days from the usage report.
+- Cloud.ru spending is also derived from the balance decline between checks. For the first hours after adding, yesterday's spending from the usage report is shown. Bonus grants are not included in the balance.
 - The summary on top shows monthly spend, total balance and how many projects expire within a week. Different currencies are listed separately instead of being added up.
 - Overdue and expiring servers are highlighted — you see them the moment you open the page.
 - This is a ledger: it never pays or renews anything on its own.

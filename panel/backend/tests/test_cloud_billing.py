@@ -21,7 +21,8 @@ from app.services.cloud_billing import (  # noqa: E402
     get_provider,
     sync_cloud_balance,
 )
-from app.services.cloud_billing.base import CloudSnapshot, compute_days_left  # noqa: E402
+from app.services.cloud_billing.base import MOSCOW_TZ, CloudSnapshot, compute_days_left  # noqa: E402
+from app.services.cloud_billing.cloud_ru import CloudRuProvider  # noqa: E402
 from app.services.cloud_billing import (  # noqa: E402
     HISTORY_WINDOW_DAYS,
     _balance_history_daily_cost,
@@ -323,7 +324,8 @@ def report_item(day: str, money: str, bonus: str = "0"):
 
 
 class FakeVkClient:
-    """Ответы по (метод, путь); каждый запрос записывается с телом и параметрами."""
+    """Ответы по (метод, путь); каждый запрос записывается с телом и параметрами.
+    Список ответов на маршрут отдаётся по одному — для постраничных выборок."""
 
     def __init__(self, by_route: dict):
         self.by_route = by_route
@@ -331,8 +333,13 @@ class FakeVkClient:
 
     async def request(self, method, url, headers=None, timeout=None, **kwargs):
         path = url.split("://", 1)[1].split("/", 1)[1]
+        # Параметры копируются: вызывающий может дописывать их между страницами
+        if "params" in kwargs:
+            kwargs["params"] = dict(kwargs["params"])
         self.calls.append({"method": method, "path": path, "headers": headers or {}, **kwargs})
         response = self.by_route[(method, "/" + path)]
+        if isinstance(response, list):
+            response = response.pop(0)
         if isinstance(response, Exception):
             raise response
         return response
@@ -440,6 +447,146 @@ class VkCloudProviderTests(unittest.TestCase):
         self.assertIsNone(_average_daily_spend(None))
         self.assertIsNone(_average_daily_spend([{"money": "5"}]))
         self.assertEqual(_average_daily_spend([report_item("2026-10-01", "7", "bad")]), 7.0)
+
+
+def consumption_row(amount_nds: float, is_delete: bool = False):
+    return {"sku": "PS-GTW0IP00NRRENTN-HD1MS0", "servname": "Аренда публичного IP адреса",
+            "usedate": "2026-10-07T00:00:00Z", "amount": round(amount_nds / 1.22, 6),
+            "amount_nds": amount_nds, "is_delete": is_delete}
+
+
+def consumption_page(*rows, next_page: str = ""):
+    return FakeResponse(200, {"consumptions": list(rows), "next_page_token": next_page})
+
+
+CLOUD_RU_TOKEN = ("POST", "/api/v1/auth/token")
+CLOUD_RU_BALANCE = ("GET", "/u-api/bff-console/v2/agreements/agr-1/balance")
+CLOUD_RU_CONSUMPTION = ("GET", "/v2/consumption")
+
+
+class CloudRuProviderTests(unittest.TestCase):
+    def _client(self, consumption=None, balance=None, token=None):
+        return FakeVkClient({
+            CLOUD_RU_TOKEN: token or FakeResponse(200, {"access_token": "tok-1", "expires_in": 3600}),
+            CLOUD_RU_BALANCE: balance or FakeResponse(200, {"balance": 5261.2, "is_trial": False}),
+            CLOUD_RU_CONSUMPTION: consumption if consumption is not None else consumption_page(),
+        })
+
+    def _fetch(self, client, provider=None, login="key-id", account_id="agr-1"):
+        provider = provider or CloudRuProvider()
+        return asyncio.run(provider.fetch(client, "key-secret", account_id, login))
+
+    def _consumption_calls(self, client):
+        return [c for c in client.calls if c["path"] == "v2/consumption"]
+
+    def test_balance_and_yesterday_consumption_with_vat(self):
+        client = self._client(consumption_page(
+            consumption_row(1.5), consumption_row(2.25), consumption_row(10, is_delete=True),
+        ))
+
+        snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.balance, 5261.2)
+        self.assertEqual(snapshot.currency, "RUB")
+        self.assertEqual(snapshot.daily_cost, 3.75)
+        self.assertIsNone(snapshot.warning)
+
+    def test_key_is_exchanged_for_a_bearer_token(self):
+        client = self._client()
+
+        self._fetch(client)
+
+        self.assertEqual(client.calls[0]["json"], {"keyId": "key-id", "secret": "key-secret"})
+        self.assertEqual(client.calls[1]["headers"]["Authorization"], "Bearer tok-1")
+        self.assertEqual(client.calls[2]["headers"]["Authorization"], "Bearer tok-1")
+
+    def test_consumption_covers_yesterday_by_moscow_time(self):
+        client = self._client()
+
+        self._fetch(client)
+
+        yesterday = (datetime.now(MOSCOW_TZ).date() - timedelta(days=1)).isoformat()
+        params = self._consumption_calls(client)[0]["params"]
+        self.assertEqual(params["agreement_id"], "agr-1")
+        self.assertEqual(params["start_date"], f"{yesterday}T00:00:00Z")
+        self.assertEqual(params["end_date"], f"{yesterday}T23:59:59Z")
+
+    def test_consumption_pages_are_followed(self):
+        client = self._client([
+            consumption_page(consumption_row(1.0), next_page="page-2"),
+            consumption_page(consumption_row(2.5)),
+        ])
+
+        snapshot = self._fetch(client)
+
+        calls = self._consumption_calls(client)
+        self.assertEqual(snapshot.daily_cost, 3.5)
+        self.assertNotIn("page_filter.page_token", calls[0]["params"])
+        self.assertEqual(calls[1]["params"]["page_filter.page_token"], "page-2")
+
+    def test_endless_consumption_gives_no_estimate(self):
+        pages = [consumption_page(consumption_row(1.0), next_page=f"p{i}") for i in range(3)]
+        client = self._client(pages)
+
+        with patch("app.services.cloud_billing.cloud_ru.CONSUMPTION_MAX_PAGES", 2):
+            snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.balance, 5261.2)
+        self.assertIsNone(snapshot.daily_cost)
+        self.assertIsNone(snapshot.warning)
+        self.assertEqual(len(self._consumption_calls(client)), 2)
+
+    def test_consumption_is_fetched_once_per_day(self):
+        provider = CloudRuProvider()
+        first = self._client(consumption_page(consumption_row(4.0)))
+        second = self._client(consumption_page(consumption_row(99.0)))
+
+        self._fetch(first, provider)
+        snapshot = self._fetch(second, provider)
+
+        self.assertEqual(snapshot.daily_cost, 4.0)
+        self.assertEqual(self._consumption_calls(second), [])
+
+    def test_consumption_failure_keeps_the_balance(self):
+        client = self._client(FakeResponse(403, None, "RBAC: access denied"))
+
+        snapshot = self._fetch(client)
+
+        self.assertEqual(snapshot.balance, 5261.2)
+        self.assertIsNone(snapshot.daily_cost)
+        self.assertIn("Consumption unavailable", snapshot.warning)
+
+    def test_wrong_key_raises_auth_error(self):
+        client = self._client(token=FakeResponse(401, None, "unauthorized"))
+        with self.assertRaises(CloudAuthError):
+            self._fetch(client)
+
+    def test_balance_forbidden_raises_auth_error(self):
+        client = self._client(balance=FakeResponse(403, None, "RBAC: access denied"))
+        with self.assertRaises(CloudAuthError) as ctx:
+            self._fetch(client)
+        self.assertIn("Cost administrator", str(ctx.exception))
+
+    def test_answer_without_balance_is_an_error(self):
+        client = self._client(balance=FakeResponse(200, {"is_trial": False}))
+        with self.assertRaises(CloudBillingError):
+            self._fetch(client)
+
+    def test_agreement_id_cannot_leave_the_balance_path(self):
+        client = FakeVkClient({
+            CLOUD_RU_TOKEN: FakeResponse(200, {"access_token": "tok-1"}),
+            ("GET", "/u-api/bff-console/v2/agreements/..%2Fcustomers/balance"):
+                FakeResponse(200, {"balance": 1}),
+            CLOUD_RU_CONSUMPTION: consumption_page(),
+        })
+
+        self.assertEqual(self._fetch(client, account_id="../customers").balance, 1)
+
+    def test_key_id_and_agreement_are_required(self):
+        with self.assertRaises(CloudBillingError):
+            self._fetch(FakeVkClient({}), login=None)
+        with self.assertRaises(CloudBillingError):
+            self._fetch(FakeVkClient({}), account_id=None)
 
 
 class BalanceHistoryTests(unittest.TestCase):
@@ -652,6 +799,9 @@ class SyncCloudBalanceTests(unittest.TestCase):
         self.assertTrue(get_provider("vk_cloud").requires_login)
         self.assertTrue(get_provider("vk_cloud").requires_account_id)
         self.assertFalse(get_provider("selectel").requires_login)
+        cloud_ru = get_provider("cloud_ru")
+        self.assertTrue(cloud_ru.requires_login and cloud_ru.requires_account_id)
+        self.assertTrue(cloud_ru.uses_balance_history)
 
     def test_vk_cloud_requires_login(self):
         server = billing_server(cloud_provider="vk_cloud", cloud_account_id="b5b7ffd4ef05")
