@@ -227,16 +227,17 @@ export default function App() {
           <Route path="xray-test" element={<ModuleGuard id="xray-test"><SuspenseWithBoundary><XrayTest /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="remnawave-nginx" element={<ModuleGuard id="remnawave-nginx"><SuspenseWithBoundary><RemnawaveNginx /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="exit-proxy" element={<ModuleGuard id="exit-proxy"><SuspenseWithBoundary><ExitProxy /></SuspenseWithBoundary></ModuleGuard>} />
-          {ExtPageLazy && (
-            <Route 
-              path="ip-search"
+          {ExtPageLazy && ['ip-search', 'ext/*'].map(path => (
+            <Route
+              key={path}
+              path={path}
               element={
                 <SuspenseWithBoundary>
                   <ExtPageLazy />
                 </SuspenseWithBoundary>
-              } 
+              }
             />
-          )}
+          ))}
         </Route>
       </Routes>
     </ErrorBoundary>

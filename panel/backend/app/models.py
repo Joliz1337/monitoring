@@ -836,11 +836,12 @@ class BillingServer(Base):
     
     last_notified_days = Column(Text, nullable=True)  # JSON: which day-thresholds already sent
 
-    # Облачный провайдер (billing_type='cloud'): Yandex Cloud, Selectel, Timeweb, VK Cloud
+    # Облачный провайдер (billing_type='cloud'): Yandex Cloud, Selectel, Timeweb, VK Cloud, Cloud.ru
     cloud_provider = Column(String(30), nullable=True)
     cloud_credential = Column(EncryptedString, nullable=True)
     cloud_account_id = Column(String(100), nullable=True)
-    # Логин для провайдеров без ключа API (VK Cloud); пароль — в cloud_credential
+    # Логин учётки из двух частей: логин VK Cloud или Key ID Cloud.ru; пароль
+    # или Key Secret — в cloud_credential
     cloud_login = Column(String(255), nullable=True)
     # SOCKS5 для запросов к API провайдера: "ip:port" или "ip:port@login:pass"
     cloud_proxy = Column(EncryptedString, nullable=True)
@@ -848,8 +849,8 @@ class BillingServer(Base):
     cloud_daily_cost = Column(Float, nullable=True)
     cloud_last_sync_at = Column(DateTime(timezone=True), nullable=True)
     cloud_last_error = Column(String(500), nullable=True)
-    # Снимки баланса [[iso_ts, balance], ...] для провайдеров без API истории
-    # списаний (Timeweb): расход считается по снижению баланса между синками
+    # Снимки баланса [[iso_ts, balance], ...] для провайдеров без текущего расхода
+    # в API (Timeweb, VK Cloud, Cloud.ru): расход считается по снижению баланса между синками
     cloud_balance_history = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

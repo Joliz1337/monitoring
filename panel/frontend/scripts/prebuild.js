@@ -79,12 +79,12 @@ interface NavItem {
 
 interface ExtState {
     enabled: boolean
-    navItem: NavItem | null
+    navItems: NavItem[]
 }
 
 export const useExtStore = create<ExtState>(() => ({
     enabled: false,
-    navItem: null,
+    navItems: [],
 }))
 `);
     

@@ -14,6 +14,7 @@ from app.services.cloud_billing.base import (
     CloudSnapshot,
     compute_days_left,
 )
+from app.services.cloud_billing.cloud_ru import CloudRuProvider
 from app.services.cloud_billing.selectel import SelectelProvider
 from app.services.cloud_billing.timeweb import TimewebProvider
 from app.services.cloud_billing.vk_cloud import VkCloudProvider
@@ -24,7 +25,13 @@ logger = logging.getLogger(__name__)
 
 PROVIDERS: dict[str, CloudProvider] = {
     p.id: p
-    for p in (YandexCloudProvider(), SelectelProvider(), TimewebProvider(), VkCloudProvider())
+    for p in (
+        YandexCloudProvider(),
+        SelectelProvider(),
+        TimewebProvider(),
+        VkCloudProvider(),
+        CloudRuProvider(),
+    )
 }
 
 # История баланса для провайдеров без текущего расхода в API: окно то же, что у окна
@@ -121,7 +128,11 @@ def _balance_history_daily_cost(server, balance: float, now: datetime) -> float 
 
     Точка на каждую синхронизацию, окно HISTORY_WINDOW_DAYS. Интервалы, где
     баланс вырос (пополнение), выбрасываются целиком — сумма пополнения из API
-    не видна, и расход внутри такого интервала восстановить нельзя."""
+    не видна, и расход внутри такого интервала восстановить нельзя.
+
+    Рост не больше падения прямо перед ним — не пополнение, а возврат: VK Cloud
+    может на час убрать с баланса тысячи и вернуть их. Такой интервал гасит
+    это падение, иначе оно целиком осталось бы в расходе."""
     cutoff = now - timedelta(days=HISTORY_WINDOW_DAYS)
     points = [p for p in _load_history(server.cloud_balance_history) if p[0] >= cutoff]
 
@@ -135,12 +146,15 @@ def _balance_history_daily_cost(server, balance: float, now: datetime) -> float 
 
     spent = 0.0
     spent_seconds = 0.0
+    returnable = 0.0
     for (prev_ts, prev_balance), (ts, cur_balance) in zip(points, points[1:]):
         delta = prev_balance - cur_balance
-        if delta < 0:
+        if delta < 0 and -delta > returnable:
+            returnable = 0.0
             continue
         spent += delta
         spent_seconds += (ts - prev_ts).total_seconds()
+        returnable = delta if delta >= 0 else returnable + delta
 
     if spent <= 0 or spent_seconds < HISTORY_MIN_SPAN.total_seconds():
         return None

@@ -4,7 +4,7 @@
  * Карточка, формы и калькулятор читают провайдера отсюда — новый провайдер
  * добавляется записью в PROVIDERS, а не ветками по всему разделу.
  */
-export type CloudProviderId = 'yandex_cloud' | 'selectel' | 'timeweb' | 'vk_cloud'
+export type CloudProviderId = 'yandex_cloud' | 'selectel' | 'timeweb' | 'vk_cloud' | 'cloud_ru'
 
 export interface CloudCredentialField {
   /** Поле модели, куда уходит значение */
@@ -83,6 +83,19 @@ const VK_CLOUD_ACCENT = {
   ghostButton: 'hover:text-blue-400 hover:border-blue-500/40',
   quickActive: 'bg-blue-500/20 text-blue-400 border border-blue-500/30',
   hintBox: 'text-blue-400/80 bg-blue-500/10',
+}
+
+const CLOUD_RU_ACCENT = {
+  iconBg: 'bg-emerald-500/20',
+  icon: 'text-emerald-400',
+  badge: 'bg-emerald-500/15 text-emerald-400',
+  primaryButton:
+    'bg-gradient-to-r from-emerald-500/20 to-teal-500/20 text-emerald-400 ' +
+    'hover:from-emerald-500/30 hover:to-teal-500/30 border border-emerald-500/20 ' +
+    'hover:border-emerald-500/40 shadow-sm shadow-emerald-500/5',
+  ghostButton: 'hover:text-emerald-400 hover:border-emerald-500/40',
+  quickActive: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30',
+  hintBox: 'text-emerald-400/80 bg-emerald-500/10',
 }
 
 export const PROVIDERS: Record<CloudProviderId, CloudProviderMeta> = {
@@ -175,6 +188,38 @@ export const PROVIDERS: Record<CloudProviderId, CloudProviderMeta> = {
         hintKey: 'billing.vk_project_id_hint',
         placeholder: 'b5b7ffd4ef0547e5b222f445...',
         link: { url: 'https://msk.cloud.vk.ru/app/', label: 'msk.cloud.vk.ru' },
+      },
+    ],
+  },
+  cloud_ru: {
+    id: 'cloud_ru',
+    nameKey: 'billing.provider_cloud_ru',
+    defaultCurrency: 'RUB',
+    accent: CLOUD_RU_ACCENT,
+    fields: [
+      {
+        key: 'cloud_login',
+        labelKey: 'billing.cloudru_key_id',
+        hintKey: 'billing.cloudru_key_id_hint',
+        placeholder: '1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d',
+        link: {
+          url: 'https://cloud.ru/docs/console_api/ug/topics/guides__service_accounts_key-create',
+          labelKey: 'billing.cloudru_key_link',
+        },
+      },
+      {
+        key: 'cloud_credential',
+        labelKey: 'billing.cloudru_key_secret',
+        hintKey: 'billing.cloudru_key_secret_hint',
+        placeholder: '••••••••',
+        secret: true,
+      },
+      {
+        key: 'cloud_account_id',
+        labelKey: 'billing.cloudru_agreement_id',
+        hintKey: 'billing.cloudru_agreement_id_hint',
+        placeholder: '3f2b8c1e-5a7d-4e9f-8b6a-1c2d3e4f5a6b',
+        link: { url: 'https://console.cloud.ru/', label: 'console.cloud.ru' },
       },
     ],
   },

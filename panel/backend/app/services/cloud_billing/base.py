@@ -3,11 +3,23 @@
 Провайдер отдаёт только сырой снимок своего аккаунта; пересчёт в срок оплаты,
 запись в модель и обработка порога — в sync.py, одинаково для всех провайдеров.
 """
+import asyncio
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import timedelta, timezone
 from typing import Optional
 
 import httpx
+
+logger = logging.getLogger(__name__)
+
+# Москва без перехода на летнее время с 2014 года; zoneinfo в образе может не быть
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
+REQUEST_TIMEOUT = 20.0
+RETRY_ATTEMPTS = 3
+RETRY_BASE_DELAY = 1.0
 
 
 class CloudBillingError(Exception):
@@ -57,6 +69,32 @@ def describe_request_error(error: Exception) -> str:
     # Оборванный SOCKS-туннель даёт ConnectError('') — без имени типа
     # в cloud_last_error осталась бы пустая строка
     return str(error) or type(error).__name__
+
+
+async def send_with_retry(
+    client: httpx.AsyncClient, method: str, url: str, provider_name: str, **kwargs
+) -> httpx.Response:
+    """Запрос с повтором при сетевой ошибке и 5xx; остальные коды разбирает вызывающий."""
+    headers = {"Accept": "application/json", **kwargs.pop("headers", {})}
+    last_error = "no attempts"
+
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            resp = await client.request(
+                method, url, headers=headers, timeout=REQUEST_TIMEOUT, **kwargs
+            )
+        except Exception as e:
+            last_error = describe_request_error(e)
+            logger.warning("%s %s %s failed: %s", provider_name, method, url, e)
+        else:
+            if resp.status_code < 500:
+                return resp
+            last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+
+        if attempt < RETRY_ATTEMPTS - 1:
+            await asyncio.sleep(RETRY_BASE_DELAY * (2 ** attempt))
+
+    raise CloudBillingError(last_error)
 
 
 def compute_days_left(

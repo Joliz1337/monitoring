@@ -221,7 +221,7 @@ function ServerForm({ values, setValues, t, folders, mode, server }: {
       {values.billingType === 'cloud' && mode === 'add' && (
         <Field label={t('billing.provider')}>
           <div className="grid grid-cols-2 gap-2">
-            {PROVIDER_IDS.map(id => (
+            {PROVIDER_IDS.map((id, index) => (
               <button
                 key={id}
                 onClick={() => setValues({
@@ -230,6 +230,8 @@ function ServerForm({ values, setValues, t, folders, mode, server }: {
                   credentials: {},
                 })}
                 className={`py-2 rounded-lg text-sm font-medium transition ${
+                  index === PROVIDER_IDS.length - 1 && PROVIDER_IDS.length % 2 === 1 ? 'col-span-2 ' : ''
+                }${
                   values.provider === id
                     ? PROVIDERS[id].accent.quickActive
                     : 'bg-dark-800 text-dark-400 border border-dark-700/50'
