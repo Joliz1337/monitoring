@@ -27,15 +27,49 @@ TRACE_URLS = (
     "https://cloudflare.com/cdn-cgi/trace",
     "https://ipinfo.io/json",
 )
-SPEED_URL = "https://speed.cloudflare.com/__down?bytes={size}"
 
 TCP_ATTEMPTS = 3
 TCP_TIMEOUT = 3.0
 TLS_TIMEOUT = 5.0
 HTTP_TIMEOUT = 10.0
-SPEED_TIMEOUT = 20.0
-SPEED_BYTES = 10_000_000
 DEGRADED_RTT_MS = 1500.0
+
+# Замер скорости: до 25 МБ, но не дольше окна. На медленном канале упор в окно,
+# на быстром — в размер; десяти мегабайт гигабитному каналу не хватало даже
+# на разгон TCP.
+SPEED_BYTES = 25_000_000
+SPEED_MAX_TIME = 10.0
+SPEED_CONNECT_TIMEOUT = 5.0
+# Столько секунд без единого байта — сервер для замера не годится. Так выглядит
+# Cloudflare под ТСПУ: первые 16 КБ приходят, потом соединение замирает.
+SPEED_STALL_SECONDS = 4.0
+SPEED_MIN_BYTES = 256 * 1024
+# Закачки через один канал делят его между собой, и каждая мерила бы свою долю
+SPEED_CONCURRENCY = 2
+SPEED_ATTEMPTS = 3
+# Худший случай замера: каждый сервер дотянул до жёсткого потолка попытки
+SPEED_BUDGET = SPEED_ATTEMPTS * (SPEED_MAX_TIME + SPEED_STALL_SECONDS)
+RU_EXIT_COUNTRIES = frozenset({"RU"})
+
+
+@dataclass(frozen=True)
+class SpeedServer:
+    name: str
+    url: str
+
+
+# Файлы отдаются частями (Range), поэтому подходит любой большой файл. Сервер
+# нужен рядом с выходом ключа: замер до другого конца света упирается в задержку
+# пути, а не в канал прокси.
+SPEED_SERVERS_RU = (
+    SpeedServer("Selectel", "https://speedtest.selectel.ru/100MB"),
+    SpeedServer("Yandex", "https://mirror.yandex.ru/ubuntu/ls-lR.gz"),
+)
+SPEED_SERVERS_WORLD = (
+    # Anycast: файл отдаёт ближайшая к выходу точка присутствия
+    SpeedServer("Cloudflare", f"https://speed.cloudflare.com/__down?bytes={SPEED_BYTES}"),
+    SpeedServer("Hetzner", "https://fsn1-speed.hetzner.com/100MB.bin"),
+)
 
 
 @dataclass
@@ -75,6 +109,12 @@ class ExitIdentity:
     ip: Optional[str] = None
     country: Optional[str] = None
     asn: Optional[str] = None
+
+
+@dataclass
+class SpeedResult:
+    mbps: Optional[float] = None
+    server: Optional[str] = None
 
 
 @dataclass
@@ -288,22 +328,64 @@ async def exit_identity(socks_port: int) -> ExitIdentity:
     return ExitIdentity()
 
 
-async def download_speed(socks_port: int, size: int = SPEED_BYTES) -> Optional[float]:
-    """Мбит/с на скачивании тестового файла через прокси."""
-    proxy = f"socks5://127.0.0.1:{socks_port}"
-    received = 0
-    started = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(proxy=proxy, timeout=SPEED_TIMEOUT, trust_env=False) as client:
-            async with client.stream("GET", SPEED_URL.format(size=size)) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    received += len(chunk)
-    except httpx.HTTPError:
-        return None
+def speed_servers_for(exit_country: Optional[str]) -> tuple[SpeedServer, ...]:
+    """Порядок попыток замера: серверы своей группы, затем другой.
 
-    elapsed = time.perf_counter() - started
-    if elapsed <= 0 or received == 0:
+    Другая группа — на случай, когда страна выхода не определилась: ключу с
+    выходом в РФ и неизвестной страной иначе достались бы одни зависания.
+    Исполнитель на ноде получает уже готовые списки и сам их не составляет.
+    """
+    if (exit_country or "").upper() in RU_EXIT_COUNTRIES:
+        ordered = SPEED_SERVERS_RU + SPEED_SERVERS_WORLD
+    else:
+        ordered = SPEED_SERVERS_WORLD + SPEED_SERVERS_RU
+    return ordered[:SPEED_ATTEMPTS]
+
+
+async def download_speed(socks_port: int, exit_country: Optional[str]) -> SpeedResult:
+    """Скорость через прокси до первого сервера, отдавшего данные."""
+    proxy = f"socks5://127.0.0.1:{socks_port}"
+    for server in speed_servers_for(exit_country):
+        mbps = await _download_mbps(proxy, server.url)
+        if mbps is not None:
+            return SpeedResult(mbps=mbps, server=server.name)
+    return SpeedResult()
+
+
+async def _download_mbps(proxy: str, url: str) -> Optional[float]:
+    """Мбит/с одной закачки; None — сервер не отдал данных.
+
+    Время идёт от первого байта: установка соединения через прокси на быстром
+    канале занимала бы большую часть замера и занижала цифру вдвое и больше.
+    """
+    timeout = httpx.Timeout(SPEED_STALL_SECONDS, connect=SPEED_CONNECT_TIMEOUT)
+    headers = {"Range": f"bytes=0-{SPEED_BYTES - 1}"}
+    deadline = time.perf_counter() + SPEED_MAX_TIME
+    received = 0
+    first_byte_at = last_byte_at = 0.0
+    try:
+        # Потолок поверх таймаутов httpx: SOCKS-рукопожатие ими не покрыто, и
+        # повисший туннель держал бы замер, а с ним и прогон, бесконечно
+        async with asyncio.timeout(SPEED_MAX_TIME + SPEED_STALL_SECONDS):
+            async with httpx.AsyncClient(proxy=proxy, timeout=timeout, trust_env=False) as client:
+                async with client.stream("GET", url, headers=headers) as response:
+                    response.raise_for_status()
+                    async for chunk in response.aiter_bytes():
+                        last_byte_at = time.perf_counter()
+                        if not received:
+                            first_byte_at = last_byte_at
+                        received += len(chunk)
+                        if received >= SPEED_BYTES or last_byte_at >= deadline:
+                            break
+    except (TimeoutError, httpx.HTTPError):
+        # Канал встал посреди закачки: годится то, что успело прийти, а почти
+        # пустой ответ `_mbps` отбракует
+        pass
+    return _mbps(received, last_byte_at - first_byte_at)
+
+
+def _mbps(received: int, elapsed: float) -> Optional[float]:
+    if received < SPEED_MIN_BYTES or elapsed <= 0:
         return None
     return round(received * 8 / elapsed / 1_000_000, 2)
 

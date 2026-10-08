@@ -20,7 +20,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.models import Server  # noqa: E402
-from app.services.xray_test import node_runner  # noqa: E402
+from app.services.xray_test import node_runner, probes  # noqa: E402
 from app.services.xray_test.bundle import BundleTicket  # noqa: E402
 from app.services.xray_test.matrix import build_matrix  # noqa: E402
 from app.services.xray_test.models import Core, FailReason, Verdict  # noqa: E402
@@ -141,6 +141,19 @@ class PayloadTest(unittest.TestCase):
         rows = self._rows()
         self.assertEqual([row[0] for row in rows], ["CORE", "OPTS", "CONF", "CELL"])
 
+    def test_speed_servers_sent_in_attempt_order(self):
+        """Порядок попыток считает панель: исполнитель лишь выбирает список по стране."""
+        rows = [row for row in self._rows(speed=True) if row[0] == "SPEED"]
+
+        for group, country in (("ru", "RU"), ("world", None)):
+            sent = [(row[2], row[3]) for row in rows if row[1] == group]
+            expected = [(s.name, s.url) for s in probes.speed_servers_for(country)]
+            self.assertEqual(sent, expected)
+        self.assertTrue(all(len(row) == 4 for row in rows))
+
+    def test_no_speed_servers_without_measurement(self):
+        self.assertFalse([row for row in self._rows() if row[0] == "SPEED"])
+
 
 class ParseResultTest(unittest.TestCase):
     def test_successful_cell(self):
@@ -156,6 +169,13 @@ class ParseResultTest(unittest.TestCase):
         self.assertEqual(result.exit_country, "NL")
         self.assertEqual(result.timings.rtt_ms, 95)
         self.assertEqual(result.timings.speed_mbps, 85.5)
+
+    def test_speed_server_reported(self):
+        result = _parse_result(_cell(), {
+            "type": "cell", "index": 0, "verdict": "ok", "reason": None,
+            "speed_mbps": 40.2, "speed_server": "Selectel",
+        })
+        self.assertEqual(result.speed_server, "Selectel")
 
     def test_failed_cell_keeps_reason(self):
         result = _parse_result(_cell(), {
@@ -601,6 +621,15 @@ class BatchAccountingTest(unittest.TestCase):
         r = self._runner(1)
         self.assertLessEqual(r.batch_size, r.capacity)
         self.assertGreaterEqual(r.workers, 1)
+
+    def test_speed_measurement_limits_parallel_checks(self):
+        """Закачки делят канал ноды: при десятках сразу каждая мерила бы свою долю."""
+        server = Server(id=1, name="n", url="https://n.example",
+                        last_metrics=json.dumps({"cpu": {"cores_logical": 16}}))
+        r = NodeCoreRunner(server, measure_speed=True)
+
+        self.assertEqual(r.capacity, probes.SPEED_CONCURRENCY)
+        self.assertLessEqual(r.workers * r.batch_size, r.capacity)
 
 
 class ExecTimeoutTest(unittest.TestCase):

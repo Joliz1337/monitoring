@@ -646,6 +646,7 @@ export interface XrayTestCell {
   handshake_ms: number | null
   rtt_ms: number | null
   speed_mbps: number | null
+  speed_server: string | null
   tls: {
     reachable: boolean
     issuer: string | null

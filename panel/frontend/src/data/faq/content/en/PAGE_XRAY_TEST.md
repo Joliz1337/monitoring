@@ -36,13 +36,13 @@ Why it matters:
 
 The probe sends nothing through the proxy and costs almost no time, so it can stay on permanently.
 
-**Measure link speed.** Downloads a ~10 MB test file through the proxy and computes megabits per second. Off by default: it takes noticeably longer and spends traffic on every check. Turn it on when suitability of the channel matters, not just liveness.
+**Measure link speed.** Downloads up to 25 MB through the proxy, for no longer than 10 seconds, and computes megabits per second. The test server is picked by the key's exit country. For an exit in Russia the file comes from Selectel or the Yandex mirror: Cloudflare is throttled there, and the result would be zero. For other countries it comes from Cloudflare or Hetzner. If a server sends no data, the next one is used. Hover the speed or open the check details to see which server measured it. With speed tests on, checks run two at a time so downloads don't share the link, so the run takes noticeably longer and spends traffic. Off by default: turn it on when suitability of the channel matters, not just liveness.
 
 ## How results are laid out
 
 Results are stacked in three levels:
 
-1. **Configuration** — the key's name and address, best ping, best latency and a counter like "2/6": how many checks passed out of how many. The verdict is the best of what it contains: if at least one SNI works, the configuration is usable. The same address coming from different subscription profiles stays as separate rows, because those are different keys.
+1. **Configuration** — the key's name and address, best ping, best latency, best speed (if measured) and a counter like "2/6": how many checks passed out of how many. The verdict is the best of what it contains: if at least one SNI works, the configuration is usable. The same address coming from different subscription profiles stays as separate rows, because those are different keys.
 2. **Where it ran** — the panel or a specific node. Always shown; a single location is expanded right away.
 3. **SNI** — the check itself with its metrics. Expand it for the failure reason, the hint and the core's verbatim answer.
 

@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.9.0"
+RUNNER_VERSION="2.10.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -28,8 +28,19 @@ PROBE_TIMEOUT=10
 # занятых портов простаивает, а пропускная способность ноды падает вдвое.
 # Нагрузка при этом небольшая: процесс ядра один, остальное — ожидание сети.
 PARALLEL_CELLS=8
-SPEED_TIMEOUT=20
-SPEED_BYTES=10000000
+# Замер скорости: до 25 МБ, но не дольше окна. Сервер, отдающий медленнее
+# порога четыре секунды подряд, не годится — так выглядит Cloudflare под ТСПУ:
+# первые 16 КБ приходят, потом соединение замирает. Порог не ниже 16 КБ/с,
+# потому что curl усредняет скорость за последние секунды: при пороге в
+# килобайт всплеск первых 16 КБ держал бы среднее выше него, и зависший
+# сервер съедал бы всё окно. Засчитать меньше SPEED_MIN_BYTES за окно замер
+# всё равно не может, так что живой канал этот порог не отсекает.
+SPEED_BYTES=25000000
+SPEED_MAX_TIME=10
+SPEED_CONNECT_TIMEOUT=5
+SPEED_STALL_RATE=16384
+SPEED_STALL_SECONDS=4
+SPEED_MIN_BYTES=262144
 DEGRADED_RTT_MS=1500
 # Больше самого длинного задания: пачки идут параллельно, и уборщик не должен
 # добивать живое ядро соседнего прогона
@@ -43,7 +54,10 @@ GENERATE_204_URL="https://cp.cloudflare.com/generate_204"
 # должен выглядеть сбоем всех конфигураций разом
 FALLBACK_204_URL="https://www.gstatic.com/generate_204"
 TRACE_URL="https://cloudflare.com/cdn-cgi/trace"
-SPEED_URL="https://speed.cloudflare.com/__down?bytes=${SPEED_BYTES}"
+# Серверы замера скорости, «имя<TAB>адрес» в порядке попыток. Списки присылает
+# панель — отдельно для выхода в РФ и для остальных, — здесь их только выбирают
+SPEED_RU=()
+SPEED_WORLD=()
 
 WORKDIR=""
 CORE_PGID=""
@@ -330,6 +344,38 @@ core_failure_line() {
     printf '%s' "$line" | cut -c1-700
 }
 
+# Скорость через прокси до первого сервера, отдавшего данные: SPEED_MBPS и
+# SPEED_SERVER. Время идёт от первого байта — установка соединения через прокси
+# на быстром канале занимала бы большую часть замера и занижала цифру.
+SPEED_MBPS=""; SPEED_SERVER=""
+measure_speed() {
+    local socks="$1" country="$2" entry out code bytes first total
+    local -a servers
+    if [ "$country" = "RU" ]; then
+        servers=("${SPEED_RU[@]}")
+    else
+        servers=("${SPEED_WORLD[@]}")
+    fi
+    for entry in "${servers[@]}"; do
+        out=$(curl_socks "$socks" -o /dev/null -r "0-$((SPEED_BYTES - 1))" \
+            --connect-timeout "$SPEED_CONNECT_TIMEOUT" --max-time "$SPEED_MAX_TIME" \
+            --speed-limit "$SPEED_STALL_RATE" --speed-time "$SPEED_STALL_SECONDS" \
+            -w '%{http_code} %{size_download} %{time_starttransfer} %{time_total}' \
+            "${entry#*$'\t'}" 2>/dev/null)
+        read -r code bytes first total <<< "$out"
+        case "$code" in 200|206) ;; *) continue ;; esac
+        # Почти пустой ответ — не скорость канала, а зависание после первых
+        # килобайт: пробуем следующий сервер
+        SPEED_MBPS=$(LC_ALL=C awk -v b="${bytes:-0}" -v s="${first:-0}" -v t="${total:-0}" \
+            -v min="$SPEED_MIN_BYTES" \
+            'BEGIN { d = t - s; if (b < min || d <= 0) exit 1; printf "%.2f", b * 8 / d / 1000000 }') \
+            || continue
+        SPEED_SERVER=${entry%%$'\t'*}
+        return 0
+    done
+    return 1
+}
+
 # ── основной цикл ───────────────────────────────────────────────────────────
 
 # Строка результата собирается одной печатью и без единой подстановки:
@@ -338,11 +384,11 @@ core_failure_line() {
 # налезают друг на друга в общем выводе.
 emit_cell() {
     escape_var "$4"
-    printf '{"type":"cell","index":%s,"verdict":"%s","reason":%s,"detail":"%s","tcp_min_ms":%s,"handshake_ms":%s,"rtt_ms":%s,"http_status":%s,"exit_ip":%s,"exit_country":%s,"speed_mbps":%s,"resolved_ip":%s,"dns_ms":%s,"tcp_avg_ms":%s,"tcp_jitter_ms":%s}\n' \
+    printf '{"type":"cell","index":%s,"verdict":"%s","reason":%s,"detail":"%s","tcp_min_ms":%s,"handshake_ms":%s,"rtt_ms":%s,"http_status":%s,"exit_ip":%s,"exit_country":%s,"speed_mbps":%s,"resolved_ip":%s,"dns_ms":%s,"tcp_avg_ms":%s,"tcp_jitter_ms":%s,"speed_server":%s}\n' \
         "$1" "$2" "$3" "$ESC" \
         "${5:-null}" "${6:-null}" "${7:-null}" "${8:-null}" \
         "${9:-null}" "${10:-null}" "${11:-null}" \
-        "${12:-null}" "${13:-null}" "${14:-null}" "${15:-null}"
+        "${12:-null}" "${13:-null}" "${14:-null}" "${15:-null}" "${16:-null}"
 }
 
 
@@ -351,7 +397,7 @@ run_cell() {
     local tcp_ms="" tcp_avg="" tcp_jitter="" handshake="" rtt="" status=""
     local exit_ip="" exit_country="" speed="" resolved_ip="" dns_ms=""
 
-    local resolved J_RESOLVED=null J_EXIT_IP=null J_EXIT_CC=null
+    local resolved J_RESOLVED=null J_EXIT_IP=null J_EXIT_CC=null J_SPEED_SERVER=null
     resolved=$(resolve_host "$address")
     if [ -n "$resolved" ]; then
         resolved_ip=${resolved%% *}
@@ -440,11 +486,9 @@ run_cell() {
             done <<< "$trace"
         fi
 
-        if [ "$OPT_SPEED" = "1" ]; then
-            local bps
-            bps=$(curl_socks "$socks" -o /dev/null --max-time "$SPEED_TIMEOUT" \
-                -w '%{speed_download}' "$SPEED_URL" 2>/dev/null)
-            speed=$(printf '%s' "$bps" | awk '{printf "%.2f", $1*8/1000000}')
+        if [ "$OPT_SPEED" = "1" ] && measure_speed "$socks" "$exit_country"; then
+            speed=$SPEED_MBPS
+            json_str_to J_SPEED_SERVER "$SPEED_SERVER"
         fi
     fi
 
@@ -464,7 +508,8 @@ run_cell() {
     emit_cell "$index" "$verdict" "$reason" "" "${tcp_ms:-null}" "${handshake:-null}" \
         "${rtt:-null}" "${status:-null}" "$J_EXIT_IP" \
         "$J_EXIT_CC" "${speed:-null}" \
-        "$J_RESOLVED" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
+        "$J_RESOLVED" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}" \
+        "$J_SPEED_SERVER"
 }
 
 main() {
@@ -496,6 +541,13 @@ main() {
                 ;;
             CONF)
                 batch_core="$a"; batch_conf="$b"
+                ;;
+            SPEED)
+                if [ "$a" = "ru" ]; then
+                    SPEED_RU+=("$b"$'\t'"$c")
+                else
+                    SPEED_WORLD+=("$b"$'\t'"$c")
+                fi
                 ;;
             CELL)
                 cells+=("$a"$'	'"$b"$'	'"$c"$'	'"$d"$'	'"$e"$'	'"$f"$'	'"$g")

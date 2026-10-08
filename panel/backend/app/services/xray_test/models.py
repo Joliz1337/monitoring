@@ -186,6 +186,9 @@ class CellResult:
     exit_asn: Optional[str] = None
     http_status: Optional[int] = None
     timings: ProbeTimings = field(default_factory=ProbeTimings)
+    # С какого сервера мерили скорость: он выбирается по стране выхода, и
+    # без подписи цифры разных ключей нельзя было бы сравнивать
+    speed_server: Optional[str] = None
     tls_info: Optional[TlsInfo] = None
     link: Optional[str] = None
     location: str = "panel"
@@ -225,6 +228,7 @@ class CellResult:
             "handshake_ms": self.timings.handshake_ms,
             "rtt_ms": self.timings.rtt_ms,
             "speed_mbps": self.timings.speed_mbps,
+            "speed_server": self.speed_server,
             "tls": self.tls_info.__dict__ if self.tls_info else None,
         }
 

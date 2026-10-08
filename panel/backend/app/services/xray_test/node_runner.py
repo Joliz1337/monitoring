@@ -23,7 +23,7 @@ from app.models import Server
 from app.services.http_client import get_external_client, get_node_client, node_auth_headers
 from app.services.node_capabilities import learn_from_denial
 from app.services.update_channel import current_branch, github_configs_base
-from app.services.xray_test import bundle, core_manager, core_output
+from app.services.xray_test import bundle, core_manager, core_output, probes
 from app.services.xray_test.config_builder import BatchEntry, build_batch
 from app.services.xray_test.errors import XrayTestError
 from app.services.xray_test.models import CellResult, Core, FailReason, TestCell, Verdict
@@ -72,9 +72,9 @@ MIN_NODE_CONCURRENCY = 8
 # Исполнитель гонит проверки внутри задания по числу портов пачки
 NODE_PARALLEL_CELLS = NODE_BATCH_SIZE
 # Худший случай на проверку: TCP-пинги, запрос с повтором по таймауту и выходной
-# IP. Замер скорости качает десять мегабайт и добавляется отдельно.
+# IP. Замер скорости добавляется отдельно — до трёх серверов по очереди.
 CELL_BUDGET = 60
-SPEED_BUDGET = 25
+SPEED_BUDGET = int(probes.SPEED_BUDGET)
 EXEC_OVERHEAD = 30
 EXEC_TIMEOUT_CAP = 600
 # Запас поверх задания: нода должна успеть дослать последние строки
@@ -102,7 +102,7 @@ class NodeCoreRunner:
     и тот же локальный порт ноды.
     """
 
-    def __init__(self, server: Server) -> None:
+    def __init__(self, server: Server, measure_speed: bool = False) -> None:
         self.server = server
         self._ports: asyncio.Queue[int] = asyncio.Queue()
         for port in PORT_POOL:
@@ -114,8 +114,14 @@ class NodeCoreRunner:
         # `capacity` — сколько проверок идёт одновременно. Заданий при этом
         # меньше во столько раз, сколько проверок в каждом, и каждое держит свои
         # порты: иначе пул кончился бы раньше, чем набралась параллельность.
-        self.capacity = _node_capacity(server)
-        self.batch_size = min(NODE_BATCH_SIZE, self.capacity)
+        if measure_speed:
+            # Закачки делят канал ноды: при десятках одновременных каждая мерила
+            # бы свою долю. По проверке на задание — иначе сосед, застрявший на
+            # таймауте, держал бы пустым второй слот замера.
+            self.capacity, self.batch_size = probes.SPEED_CONCURRENCY, 1
+        else:
+            self.capacity = _node_capacity(server)
+            self.batch_size = min(NODE_BATCH_SIZE, self.capacity)
         self.workers = max(1, self.capacity // self.batch_size)
         self._batch_slots = asyncio.Semaphore(self.workers)
         self._prepared = False
@@ -307,6 +313,14 @@ def _build_payload(
         ]),
         SEP.join(["CONF", core.value, config_b64]),
     ]
+    if options.speed:
+        # Порядок попыток считается здесь, исполнитель лишь выбирает список по
+        # стране выхода: адреса и правило выбора живут в одном месте
+        rows.extend(
+            SEP.join(["SPEED", group, server.name, server.url])
+            for group, country in (("ru", "RU"), ("world", None))
+            for server in probes.speed_servers_for(country)
+        )
     rows.extend(
         SEP.join([
             "CELL",
@@ -606,6 +620,7 @@ def _parse_result(cell: TestCell, payload: dict) -> CellResult:
     result.timings.handshake_ms = payload.get("handshake_ms")
     result.timings.rtt_ms = payload.get("rtt_ms")
     result.timings.speed_mbps = payload.get("speed_mbps")
+    result.speed_server = payload.get("speed_server")
     return result
 
 

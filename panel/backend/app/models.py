@@ -1257,6 +1257,7 @@ class XrayTestResult(Base):
     handshake_ms = Column(Float, nullable=True)
     tcp_min_ms = Column(Float, nullable=True)
     speed_mbps = Column(Float, nullable=True)
+    speed_server = Column(String(40), nullable=True)
     exit_ip = Column(String(64), nullable=True)
     exit_country = Column(String(8), nullable=True)
     sni_from_config = Column(Boolean, default=False)

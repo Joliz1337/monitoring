@@ -237,6 +237,7 @@ async def run_migrations(conn):
             ("location", "VARCHAR(40)"),
             ("location_name", "VARCHAR(200)"),
             ("sni_from_config", "BOOLEAN DEFAULT FALSE"),
+            ("speed_server", "VARCHAR(40)"),
         ):
             if col_name in xray_test_columns:
                 continue

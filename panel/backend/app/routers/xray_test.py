@@ -181,6 +181,14 @@ async def parse_input(
 
 @router.post("/run")
 async def start_run(req: RunRequest, _: dict = Depends(verify_auth)):
+    options = ProbeOptions(
+        tcp=True,
+        tls_inspect=req.tls_inspect,
+        http=req.full,
+        exit_identity=req.full,
+        speed=req.measure_speed and req.full,
+    )
+
     try:
         endpoints, links, _errors, _dropped, _detected = await _load_endpoints(
             req.source, req.payload, req.client
@@ -193,7 +201,7 @@ async def start_run(req: RunRequest, _: dict = Depends(verify_auth)):
             endpoints = [item[0] for item in filtered]
             links = [item[1] for item in filtered]
 
-        places = await _resolve_locations(req.locations)
+        places = await _resolve_locations(req.locations, measure_speed=options.speed)
         cells = build_matrix(
             endpoints, req.sni_list,
             sync_transport_host=req.sync_transport_host,
@@ -209,14 +217,6 @@ async def start_run(req: RunRequest, _: dict = Depends(verify_auth)):
         raise _domain_error(exc) from exc
 
     location_label = ", ".join(title or code for code, title, _ in places)
-
-    options = ProbeOptions(
-        tcp=True,
-        tls_inspect=req.tls_inspect,
-        http=req.full,
-        exit_identity=req.full,
-        speed=req.measure_speed and req.full,
-    )
 
     started_at = datetime.now(timezone.utc)
 
@@ -249,7 +249,9 @@ async def start_run(req: RunRequest, _: dict = Depends(verify_auth)):
     return {"job_id": job_id, "total": len(cells)}
 
 
-async def _resolve_locations(locations: list[str]) -> list[tuple[str, str, CoreRunner]]:
+async def _resolve_locations(
+    locations: list[str], measure_speed: bool = False,
+) -> list[tuple[str, str, CoreRunner]]:
     """Коды мест запуска → (код, имя, исполнитель). `panel` — прогон у себя."""
     wanted = list(dict.fromkeys(locations or ["panel"]))
     if not wanted:
@@ -258,7 +260,7 @@ async def _resolve_locations(locations: list[str]) -> list[tuple[str, str, CoreR
     resolved: list[tuple[str, str, CoreRunner]] = []
     for location in wanted:
         if location == "panel":
-            resolved.append(("panel", "", LocalCoreRunner()))
+            resolved.append(("panel", "", LocalCoreRunner(measure_speed)))
             continue
 
         prefix, _, raw_id = location.partition(":")
@@ -268,7 +270,7 @@ async def _resolve_locations(locations: list[str]) -> list[tuple[str, str, CoreR
         async with async_session_maker() as db:
             server = await get_server_by_id(int(raw_id), db)
         require_capability(server, Capability.EXEC, write=True)
-        resolved.append((location, server.name, NodeCoreRunner(server)))
+        resolved.append((location, server.name, NodeCoreRunner(server, measure_speed)))
     return resolved
 
 

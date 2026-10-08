@@ -49,12 +49,10 @@ MAX_CONCURRENT_CORES = 32
 # поэтому процесс на ячейку — чистые накладные расходы: запуск, память, CPU.
 # Шестнадцать выбрано под пул портов ноды (7501-7532) с запасом.
 BATCH_SIZE = 16
-# Замер скорости качает десять мегабайт: через общий процесс такие закачки
-# толкаются локтями и портят замер друг другу
-MAX_CONCURRENT_SPEED = 2
+PANEL_WORKERS = 8
 CORE_START_TIMEOUT = 5.0
 CELL_TIMEOUT = 40.0
-CORE_MAX_LIFETIME = 90.0
+CORE_MAX_LIFETIME = CELL_TIMEOUT + probes.SPEED_BUDGET + 10.0
 SWEEP_INTERVAL = 30.0
 TERM_GRACE = 3.0
 READY_POLL_INTERVAL = 0.05
@@ -62,7 +60,6 @@ CORE_LOG_TAIL = 400
 CORE_LOG_LINES = 40
 
 _core_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CORES)
-_speed_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SPEED)
 _live_processes: dict[asyncio.subprocess.Process, float] = {}
 _sweeper_task: Optional[asyncio.Task] = None
 
@@ -115,8 +112,15 @@ class LocalCoreRunner:
     медленной ячейки внутри пачки здесь незаметен.
     """
 
-    batch_size = BATCH_SIZE
-    workers = 8
+    def __init__(self, measure_speed: bool = False) -> None:
+        # Закачки через общий канал панели делят его между собой, поэтому с
+        # замером проверок в полёте ровно столько, сколько слотов скорости.
+        # Очередь к слоту внутри проверки съедала бы её таймаут: из 128
+        # одновременных почти все падали, так и не начав качать.
+        if measure_speed:
+            self.batch_size, self.workers = 1, probes.SPEED_CONCURRENCY
+        else:
+            self.batch_size, self.workers = BATCH_SIZE, PANEL_WORKERS
 
     async def probe(self, cell: TestCell, options: probes.ProbeOptions) -> CellResult:
         results = await self.probe_batch([cell], options)
@@ -269,7 +273,7 @@ class LocalCoreRunner:
         # приходит с ноды, и по нему из общего лога отбираются свои строки
         slot = str(item.cell.index)
         try:
-            async with asyncio.timeout(CELL_TIMEOUT):
+            async with asyncio.timeout(_cell_timeout(options)):
                 return _report(await self._explain(
                     item.cell,
                     await self._run_probes(launched, options, item.result, port, slot),
@@ -296,7 +300,7 @@ class LocalCoreRunner:
             return await self._explain(cell, _fail(result, exc.reason, exc.detail, exc.hint))
 
         try:
-            async with asyncio.timeout(CELL_TIMEOUT):
+            async with asyncio.timeout(_cell_timeout(options)):
                 return await self._explain(
                     cell, await self._run_probes(launched, options, result, launched.port)
                 )
@@ -369,8 +373,9 @@ class LocalCoreRunner:
             result.exit_asn = identity.asn
 
         if options.speed:
-            async with _speed_semaphore:
-                result.timings.speed_mbps = await probes.download_speed(port)
+            speed = await probes.download_speed(port, result.exit_country)
+            result.timings.speed_mbps = speed.mbps
+            result.speed_server = speed.server
 
         return _apply_verdict(result, options)
 
@@ -581,8 +586,8 @@ def _kill_group(process: asyncio.subprocess.Process, sig: int) -> None:
 async def _sweep_loop() -> None:
     """Страховка от процесса, пережившего свой finally.
 
-    Ячейка ограничена CELL_TIMEOUT, поэтому ядро старше CORE_MAX_LIFETIME — это
-    уже не работающая проверка, а утечка.
+    Ячейка ограничена `_cell_timeout`, поэтому ядро старше CORE_MAX_LIFETIME —
+    это уже не работающая проверка, а утечка.
     """
     while True:
         await asyncio.sleep(SWEEP_INTERVAL)
@@ -646,6 +651,11 @@ def _fail(
     result.detail = sanitize_output(detail)[:CORE_LOG_TAIL]
     result.hint = hint or core_output.detect_hint(detail)
     return result
+
+
+def _cell_timeout(options: probes.ProbeOptions) -> float:
+    """Замер скорости идёт внутри проверки и получает поверх неё своё время."""
+    return CELL_TIMEOUT + (probes.SPEED_BUDGET if options.speed else 0.0)
 
 
 def _apply_verdict(result: CellResult, options: probes.ProbeOptions) -> CellResult:
