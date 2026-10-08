@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.10.0"
+RUNNER_VERSION="2.11.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -28,15 +28,18 @@ PROBE_TIMEOUT=10
 # занятых портов простаивает, а пропускная способность ноды падает вдвое.
 # Нагрузка при этом небольшая: процесс ядра один, остальное — ожидание сети.
 PARALLEL_CELLS=8
-# Замер скорости: до 25 МБ, но не дольше окна. Сервер, отдающий медленнее
-# порога четыре секунды подряд, не годится — так выглядит Cloudflare под ТСПУ:
-# первые 16 КБ приходят, потом соединение замирает. Порог не ниже 16 КБ/с,
-# потому что curl усредняет скорость за последние секунды: при пороге в
-# килобайт всплеск первых 16 КБ держал бы среднее выше него, и зависший
-# сервер съедал бы всё окно. Засчитать меньше SPEED_MIN_BYTES за окно замер
-# всё равно не может, так что живой канал этот порог не отсекает.
-SPEED_BYTES=25000000
-SPEED_MAX_TIME=10
+# Замер скорости — как у спидтестов и как в probes.py панели: SPEED_STREAMS
+# потоков разом, до SPEED_STREAM_BYTES на поток, но не дольше окна. Один поток
+# через VPN упирается в окно TCP, а короткая закачка кончалась раньше, чем
+# соединение успевало разогнаться.
+# Поток, качающий медленнее порога четыре секунды подряд, встал — так выглядит
+# Cloudflare под ТСПУ: первые 16 КБ приходят, потом соединение замирает. Порог
+# не ниже 16 КБ/с, потому что curl усредняет скорость за последние секунды: при
+# пороге в килобайт всплеск первых 16 КБ держал бы среднее выше него, и
+# зависший сервер съедал бы всё окно.
+SPEED_STREAMS=4
+SPEED_STREAM_BYTES=99000000
+SPEED_MAX_TIME=8
 SPEED_CONNECT_TIMEOUT=5
 SPEED_STALL_RATE=16384
 SPEED_STALL_SECONDS=4
@@ -345,11 +348,14 @@ core_failure_line() {
 }
 
 # Скорость через прокси до первого сервера, отдавшего данные: SPEED_MBPS и
-# SPEED_SERVER. Время идёт от первого байта — установка соединения через прокси
-# на быстром канале занимала бы большую часть замера и занижала цифру.
+# SPEED_SERVER. Потоки стартуют разом и печатают по строке итога, а скорость
+# считается общая — по окну от самого раннего первого байта до самого позднего
+# последнего. От первого байта, потому что установка соединения через прокси на
+# быстром канале занимала бы большую часть замера; общая, потому что сумма
+# скоростей потоков завышала бы цифру — кончившие в разное время вместе не шли.
 SPEED_MBPS=""; SPEED_SERVER=""
 measure_speed() {
-    local socks="$1" country="$2" entry out code bytes first total
+    local socks="$1" country="$2" entry i
     local -a servers
     if [ "$country" = "RU" ]; then
         servers=("${SPEED_RU[@]}")
@@ -357,19 +363,30 @@ measure_speed() {
         servers=("${SPEED_WORLD[@]}")
     fi
     for entry in "${servers[@]}"; do
-        out=$(curl_socks "$socks" -o /dev/null -r "0-$((SPEED_BYTES - 1))" \
-            --connect-timeout "$SPEED_CONNECT_TIMEOUT" --max-time "$SPEED_MAX_TIME" \
-            --speed-limit "$SPEED_STALL_RATE" --speed-time "$SPEED_STALL_SECONDS" \
-            -w '%{http_code} %{size_download} %{time_starttransfer} %{time_total}' \
-            "${entry#*$'\t'}" 2>/dev/null)
-        read -r code bytes first total <<< "$out"
-        case "$code" in 200|206) ;; *) continue ;; esac
-        # Почти пустой ответ — не скорость канала, а зависание после первых
+        # Почти пустой итог — не скорость канала, а зависание после первых
         # килобайт: пробуем следующий сервер
-        SPEED_MBPS=$(LC_ALL=C awk -v b="${bytes:-0}" -v s="${first:-0}" -v t="${total:-0}" \
-            -v min="$SPEED_MIN_BYTES" \
-            'BEGIN { d = t - s; if (b < min || d <= 0) exit 1; printf "%.2f", b * 8 / d / 1000000 }') \
-            || continue
+        SPEED_MBPS=$(
+            {
+                for (( i = 0; i < SPEED_STREAMS; i++ )); do
+                    curl_socks "$socks" -o /dev/null -r "0-$((SPEED_STREAM_BYTES - 1))" \
+                        --connect-timeout "$SPEED_CONNECT_TIMEOUT" --max-time "$SPEED_MAX_TIME" \
+                        --speed-limit "$SPEED_STALL_RATE" --speed-time "$SPEED_STALL_SECONDS" \
+                        -w '%{http_code} %{size_download} %{time_starttransfer} %{time_total}\n' \
+                        "${entry#*$'\t'}" 2>/dev/null &
+                done
+                wait
+            } | LC_ALL=C awk -v min="$SPEED_MIN_BYTES" '
+                ($1 == 200 || $1 == 206) && $2 > 0 {
+                    bytes += $2
+                    if (!seen++ || $3 < first) first = $3
+                    if ($4 > last) last = $4
+                }
+                END {
+                    elapsed = last - first
+                    if (bytes < min || elapsed <= 0) exit 1
+                    printf "%.2f", bytes * 8 / elapsed / 1000000
+                }'
+        ) || continue
         SPEED_SERVER=${entry%%$'\t'*}
         return 0
     done

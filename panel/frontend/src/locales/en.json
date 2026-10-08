@@ -1346,7 +1346,7 @@
     "full_mode": "Full check (start the core and pass real traffic)",
     "tls_inspect": "Inspect the SNI domain certificate",
     "measure_speed": "Measure link speed",
-    "measure_speed_hint": "The test server is picked by the key's exit country. With speed tests checks run two at a time, so the run takes noticeably longer",
+    "measure_speed_hint": "Downloads in 4 streams like a speed test, up to 400 MB per key. The server is picked by the exit country. Keys are speed-tested one at a time, so the run takes noticeably longer",
     "core_will_download": "Core {{core}} {{version}} will be downloaded on first run",
     "start": "Start",
     "stop": "Stop",

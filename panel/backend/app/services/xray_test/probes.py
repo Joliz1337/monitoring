@@ -34,18 +34,23 @@ TLS_TIMEOUT = 5.0
 HTTP_TIMEOUT = 10.0
 DEGRADED_RTT_MS = 1500.0
 
-# Замер скорости: до 25 МБ, но не дольше окна. На медленном канале упор в окно,
-# на быстром — в размер; десяти мегабайт гигабитному каналу не хватало даже
-# на разгон TCP.
-SPEED_BYTES = 25_000_000
-SPEED_MAX_TIME = 10.0
+# Замер скорости — как у спидтестов: несколько потоков разом, до 99 МБ на поток,
+# но не дольше окна. Один поток через VPN упирается в окно TCP при задержке
+# пути (замер через ключ: один поток ~400 Мбит/с, четыре ~700), а закачка
+# в 25 МБ кончалась раньше, чем соединение успевало разогнаться, — ключи
+# показывали ~150 Мбит/с при канале в разы шире.
+SPEED_STREAMS = 4
+# Cloudflare за запрос отдаёт меньше 100 000 000 байт: на ровно 100 млн — 403
+SPEED_STREAM_BYTES = 99_000_000
+SPEED_MAX_TIME = 8.0
 SPEED_CONNECT_TIMEOUT = 5.0
-# Столько секунд без единого байта — сервер для замера не годится. Так выглядит
-# Cloudflare под ТСПУ: первые 16 КБ приходят, потом соединение замирает.
+# Столько секунд без единого байта — поток встал. Так выглядит Cloudflare под
+# ТСПУ: первые 16 КБ приходят, потом соединение замирает.
 SPEED_STALL_SECONDS = 4.0
 SPEED_MIN_BYTES = 256 * 1024
-# Закачки через один канал делят его между собой, и каждая мерила бы свою долю
-SPEED_CONCURRENCY = 2
+# Замер идёт по одной проверке на точку: две многопоточные закачки разом
+# делили бы канал точки, и каждая мерила бы свою долю
+SPEED_CONCURRENCY = 1
 SPEED_ATTEMPTS = 3
 # Худший случай замера: каждый сервер дотянул до жёсткого потолка попытки
 SPEED_BUDGET = SPEED_ATTEMPTS * (SPEED_MAX_TIME + SPEED_STALL_SECONDS)
@@ -58,17 +63,20 @@ class SpeedServer:
     url: str
 
 
-# Файлы отдаются частями (Range), поэтому подходит любой большой файл. Сервер
-# нужен рядом с выходом ключа: замер до другого конца света упирается в задержку
-# пути, а не в канал прокси.
+# Файлы отдаются частями (Range), поэтому подходит любой файл не меньше потока
+# с постоянным именем. Сервер нужен рядом с выходом ключа: замер до другого
+# конца света упирается в задержку пути, а не в канал прокси. И он обязан
+# отдавать несколько потоков одному IP: Hetzner на второй-третий отвечает 429,
+# Vultr — 503.
 SPEED_SERVERS_RU = (
     SpeedServer("Selectel", "https://speedtest.selectel.ru/100MB"),
-    SpeedServer("Yandex", "https://mirror.yandex.ru/ubuntu/ls-lR.gz"),
+    # Образ Arch в latest/ меняется раз в месяц, имя у него постоянное
+    SpeedServer("Yandex", "https://mirror.yandex.ru/archlinux/iso/latest/archlinux-x86_64.iso"),
 )
 SPEED_SERVERS_WORLD = (
     # Anycast: файл отдаёт ближайшая к выходу точка присутствия
-    SpeedServer("Cloudflare", f"https://speed.cloudflare.com/__down?bytes={SPEED_BYTES}"),
-    SpeedServer("Hetzner", "https://fsn1-speed.hetzner.com/100MB.bin"),
+    SpeedServer("Cloudflare", f"https://speed.cloudflare.com/__down?bytes={SPEED_STREAM_BYTES}"),
+    SpeedServer("OVH", "https://proof.ovh.net/files/100Mb.dat"),
 )
 
 
@@ -115,6 +123,13 @@ class ExitIdentity:
 class SpeedResult:
     mbps: Optional[float] = None
     server: Optional[str] = None
+
+
+@dataclass
+class _StreamProgress:
+    received: int = 0
+    first_byte_at: float = 0.0
+    last_byte_at: float = 0.0
 
 
 @dataclass
@@ -352,36 +367,57 @@ async def download_speed(socks_port: int, exit_country: Optional[str]) -> SpeedR
     return SpeedResult()
 
 
-async def _download_mbps(proxy: str, url: str) -> Optional[float]:
-    """Мбит/с одной закачки; None — сервер не отдал данных.
-
-    Время идёт от первого байта: установка соединения через прокси на быстром
-    канале занимала бы большую часть замера и занижала цифру вдвое и больше.
-    """
+async def _download_mbps(proxy: Optional[str], url: str) -> Optional[float]:
+    """Общая скорость `SPEED_STREAMS` параллельных закачек; None — данных нет."""
     timeout = httpx.Timeout(SPEED_STALL_SECONDS, connect=SPEED_CONNECT_TIMEOUT)
-    headers = {"Range": f"bytes=0-{SPEED_BYTES - 1}"}
     deadline = time.perf_counter() + SPEED_MAX_TIME
-    received = 0
-    first_byte_at = last_byte_at = 0.0
+    streams = [_StreamProgress() for _ in range(SPEED_STREAMS)]
     try:
         # Потолок поверх таймаутов httpx: SOCKS-рукопожатие ими не покрыто, и
         # повисший туннель держал бы замер, а с ним и прогон, бесконечно
         async with asyncio.timeout(SPEED_MAX_TIME + SPEED_STALL_SECONDS):
             async with httpx.AsyncClient(proxy=proxy, timeout=timeout, trust_env=False) as client:
-                async with client.stream("GET", url, headers=headers) as response:
-                    response.raise_for_status()
-                    async for chunk in response.aiter_bytes():
-                        last_byte_at = time.perf_counter()
-                        if not received:
-                            first_byte_at = last_byte_at
-                        received += len(chunk)
-                        if received >= SPEED_BYTES or last_byte_at >= deadline:
-                            break
-    except (TimeoutError, httpx.HTTPError):
-        # Канал встал посреди закачки: годится то, что успело прийти, а почти
-        # пустой ответ `_mbps` отбракует
+                await asyncio.gather(*(
+                    _pull(client, url, deadline, progress) for progress in streams
+                ))
+    except TimeoutError:
+        # Окно вышло на зависшем рукопожатии — годится то, что успело прийти
         pass
-    return _mbps(received, last_byte_at - first_byte_at)
+    return _aggregate_mbps(streams)
+
+
+async def _pull(
+    client: httpx.AsyncClient, url: str, deadline: float, progress: _StreamProgress,
+) -> None:
+    headers = {"Range": f"bytes=0-{SPEED_STREAM_BYTES - 1}"}
+    try:
+        async with client.stream("GET", url, headers=headers) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                now = time.perf_counter()
+                if not progress.received:
+                    progress.first_byte_at = now
+                progress.received += len(chunk)
+                progress.last_byte_at = now
+                if progress.received >= SPEED_STREAM_BYTES or now >= deadline:
+                    return
+    except httpx.HTTPError:
+        # Упавший поток не обрывает соседей, а пришедшее до сбоя — тоже данные
+        return
+
+
+def _aggregate_mbps(streams: list[_StreamProgress]) -> Optional[float]:
+    """Скорость всех потоков по общему окну — от первого байта до последнего.
+
+    Время идёт от первого байта: установка соединения через прокси на быстром
+    канале занимала бы большую часть замера. Сумма скоростей отдельных потоков
+    завышала бы цифру — потоки, кончившие в разное время, вместе не шли.
+    """
+    active = [stream for stream in streams if stream.received]
+    if not active:
+        return None
+    elapsed = max(s.last_byte_at for s in active) - min(s.first_byte_at for s in active)
+    return _mbps(sum(s.received for s in active), elapsed)
 
 
 def _mbps(received: int, elapsed: float) -> Optional[float]:
