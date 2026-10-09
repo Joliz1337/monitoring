@@ -64,7 +64,7 @@ class MbpsTest(unittest.TestCase):
         self.assertIsNone(probes._mbps(16 * 1024, 0.5))
 
     def test_zero_time_rejected(self):
-        self.assertIsNone(probes._mbps(probes.SPEED_STREAM_BYTES, 0.0))
+        self.assertIsNone(probes._mbps(probes.SPEED_REQUEST_BYTES, 0.0))
 
 
 class AggregateTest(unittest.TestCase):
@@ -101,6 +101,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         type(self).requests += 1
+        if self.path == "/deny":
+            self.send_response(429)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         size = 1_000_000 if self.path == "/fast" else 16 * 1024
         self.send_response(206)
         self.send_header("Content-Length", str(size if self.path == "/fast" else 25_000_000))
@@ -109,13 +114,26 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"x" * size)
             self.wfile.flush()
             if self.path == "/stall":
-                time.sleep(3)
+                time.sleep(6)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
 
+class CurlCommandTest(unittest.TestCase):
+    def test_goes_through_proxy_with_remote_dns(self):
+        """DNS цели резолвит выход ключа, а не панель: иначе замер шёл бы до чужого узла CDN."""
+        command = probes._curl_command("socks5h://127.0.0.1:7501", "https://x.example/f", 3.5)
+        self.assertIn("socks5h://127.0.0.1:7501", command)
+        self.assertEqual(command[-1], "https://x.example/f")
+
+    def test_transfer_bounded_by_window(self):
+        command = probes._curl_command(None, "https://x.example/f", 3.5)
+        self.assertEqual(command[command.index("--max-time") + 1], "3.50")
+        self.assertNotIn("--proxy", command)
+
+
 class DownloadStreamsTest(unittest.IsolatedAsyncioTestCase):
-    """Настоящие закачки с локального сервера: потоки, окно и зависание."""
+    """Настоящие закачки curl с локального сервера: потоки, окно, зависание, отказ."""
 
     @classmethod
     def setUpClass(cls):
@@ -128,21 +146,37 @@ class DownloadStreamsTest(unittest.IsolatedAsyncioTestCase):
         cls.server.shutdown()
         cls.server.server_close()
 
-    async def test_streams_run_in_parallel(self):
+    async def test_streams_repeat_until_window_ends(self):
+        """Объём не ограничен: докачав файл, поток запрашивает его снова.
+
+        Иначе быстрый канал выбирал бы файлы за доли секунды и замер мерил бы
+        разгон соединения, а Cloudflare больше 99 МБ за запрос не отдаёт.
+        """
         _Handler.requests = 0
-        mbps = await probes._download_mbps(None, f"{self.base}/fast")
+        started = time.perf_counter()
+        with mock.patch.object(probes, "SPEED_MAX_TIME", 1.5):
+            mbps = await probes._download_mbps(None, f"{self.base}/fast")
 
         self.assertIsNotNone(mbps)
-        self.assertEqual(_Handler.requests, probes.SPEED_STREAMS)
+        self.assertGreater(_Handler.requests, probes.SPEED_STREAMS)
+        self.assertLess(time.perf_counter() - started, 4.0)
 
     async def test_stalled_server_dropped_quickly(self):
         """Так выглядит Cloudflare под ТСПУ: 16 КБ на поток и тишина."""
         started = time.perf_counter()
-        with mock.patch.object(probes, "SPEED_STALL_SECONDS", 0.5):
+        with mock.patch.object(probes, "SPEED_STALL_SECONDS", 1):
             mbps = await probes._download_mbps(None, f"{self.base}/stall")
 
         self.assertIsNone(mbps)
-        self.assertLess(time.perf_counter() - started, 2.5)
+        self.assertLess(time.perf_counter() - started, 4.5)
+
+    async def test_refusal_not_retried(self):
+        """429 — сервер ограничил закачки: повторы только продлили бы бан."""
+        _Handler.requests = 0
+        mbps = await probes._download_mbps(None, f"{self.base}/deny")
+
+        self.assertIsNone(mbps)
+        self.assertEqual(_Handler.requests, probes.SPEED_STREAMS)
 
 
 class PanelConcurrencyTest(unittest.TestCase):
