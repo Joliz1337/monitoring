@@ -16,7 +16,9 @@
 Бэкенд, который поставил или снял адрес раньше самого скрипта, транзакцию не роняет.
 Снятый адрес хостера уходит с интерфейса, откат его возвращает, а цикл
 самолечения и restore-runtime снимают снова, когда конфиг хостера его вернул;
-возврат ставит адрес обратно и убирает его из suppressed.list.
+возврат ставит адрес обратно и убирает его из suppressed.list. Строка
+routes.list на пропавшей карте не роняет ни самолечение, ни транзакцию, ни откат
+и переживает откат.
 Второй тест гоняет живой трафик через два роутера-namespace: без своего шлюза
 клиент за шлюзом доп. адреса ответов не получает, со шлюзом — получает, основной
 адрес работает по-прежнему, после сноса маршрута самолечение возвращает ответы.
@@ -159,6 +161,17 @@ on_eth0 6.6.6.6/32 || fail "restored address is missing"
 [ -s "$STATE/suppressed.list" ] && fail "restored address is still suppressed"
 bash "$SCRIPT" sync-runtime >/dev/null
 on_eth0 6.6.6.6/32 || fail "self-heal dropped a restored address"
+
+# A NIC that is gone (the cloud detached it, a reboot renamed it) keeps its line
+# in routes.list: the route through it cannot exist, and nothing may wait for it
+printf '%s\n' "gone0 9.9.9.9 9.9.9.1 1005" > "$STATE/routes.list"
+bash "$SCRIPT" sync-runtime >/dev/null || fail "self-heal fails on a missing NIC"
+plan 20260925-120700-1111 4.4.4.4/32 "" "eth0 4.4.4.4/32$NL" "gone0 9.9.9.9 9.9.9.1 1005${NL}eth0 4.4.4.4 4.4.4.1 1001$NL" \
+    | bash "$SCRIPT" apply >/dev/null || fail "apply blocked by a missing NIC"
+ip route get 8.8.8.8 from 4.4.4.4 | grep -q "via 4.4.4.1" || fail "gateway route next to a missing NIC"
+bash "$SCRIPT" rollback 20260925-120700-1111 >/dev/null || fail "rollback blocked by a missing NIC"
+ip rule show | grep -q "4.4.4.4" && fail "rule survived the rollback next to a missing NIC"
+grep -qx "gone0 9.9.9.9 9.9.9.1 1005" "$STATE/routes.list" || fail "rollback lost the line of the missing NIC"
 echo "ALL OK"
 """
 
