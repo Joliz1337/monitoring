@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import shutil
 import socket
 import ssl
 import time
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -61,15 +64,54 @@ SPEED_MIN_BYTES = 256 * 1024
 # делили бы канал точки, и каждая мерила бы свою долю
 SPEED_CONCURRENCY = 1
 SPEED_ATTEMPTS = 3
-# Худший случай замера: каждый сервер дотянул до жёсткого потолка попытки
-SPEED_BUDGET = SPEED_ATTEMPTS * (SPEED_MAX_TIME + SPEED_CONNECT_TIMEOUT)
 RU_EXIT_COUNTRIES = frozenset({"RU"})
+
+# iperf3 — основной замер: сервер сам гонит трафик, и публичные iperf3-серверы
+# отдают одному IP 7,6–8,5 Гбит/с там, где файлы упираются в 2–6 и в 429.
+# SOCKS iperf3 не умеет, поэтому в ключ он заходит пробросом порта в ядре
+# (`config_builder.build_forward`). Первые секунды — разгон соединения, в итог
+# они не идут.
+IPERF_DURATION = 6
+IPERF_OMIT = 2
+IPERF_CONNECT_TIMEOUT_MS = 5000
+IPERF_SERVER_ATTEMPTS = 3
+# Порт iperf3-сервера держит один тест разом, занятый отвечает сразу
+IPERF_PORT_ATTEMPTS = 5
+# Недоступный через выход сервер iperf3 сам не бросит: проброс принимает
+# соединение мгновенно, а ответа нет — этот потолок и решает
+IPERF_RUN_TIMEOUT = IPERF_DURATION + IPERF_OMIT + IPERF_CONNECT_TIMEOUT_MS / 1000 + 5
+IPERF_BUDGET = 45.0
+SPEED_FILE_BUDGET = SPEED_ATTEMPTS * (SPEED_MAX_TIME + SPEED_CONNECT_TIMEOUT)
+# Худший случай замера: iperf3 съел свой потолок, и каждый файловый сервер тоже
+SPEED_BUDGET = IPERF_BUDGET + SPEED_FILE_BUDGET
 
 
 @dataclass(frozen=True)
 class SpeedServer:
     name: str
     url: str
+
+
+@dataclass(frozen=True)
+class IperfServer:
+    name: str
+    host: str
+    ports: tuple[int, ...]
+
+
+# Российские — из списка меню проверки скорости установщика (по мотивам
+# itdoginfo/russian-iperf3-servers). Европейские проверены рукопожатием iperf3
+# с NL-выхода: у Leaseweb порты 10G. Не годятся: Bouygues, as49434 и 014.fr
+# молчат, NovoServe не резолвится, у Worldstream и HE единственный порт занят.
+_IPERF_PORTS = tuple(range(5201, 5210))
+IPERF_SERVERS_RU = (
+    IperfServer("hostkey MSK", "spd-rudp.hostkey.ru", _IPERF_PORTS),
+    IperfServer("ertelecom SPB", "st.spb.ertelecom.ru", _IPERF_PORTS),
+)
+IPERF_SERVERS_WORLD = (
+    IperfServer("Leaseweb AMS", "speedtest.ams1.nl.leaseweb.net", _IPERF_PORTS),
+    IperfServer("Leaseweb FRA", "speedtest.fra1.de.leaseweb.net", _IPERF_PORTS),
+)
 
 
 # Файлы отдаются частями (Range) и имеют постоянное имя. Сервер нужен рядом с
@@ -134,6 +176,20 @@ class ExitIdentity:
 class SpeedResult:
     mbps: Optional[float] = None
     server: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class IperfRun:
+    mbps: Optional[float] = None
+    busy: bool = False
+
+
+# Скачивание (-R) — итог в строке receiver; -f m держит единицы в Мбит/с
+_IPERF_RECEIVER = re.compile(r"\[SUM\].*?([\d.]+)\s+Mbits/sec.*receiver")
+
+# Проброс в ключ: async-контекст отдаёт локальный порт, ведущий на iperf3-сервер,
+# либо None, если ядро с пробросом не поднялось
+ForwardOpener = Callable[[str, int], AbstractAsyncContextManager[Optional[int]]]
 
 
 @dataclass
@@ -361,11 +417,89 @@ def speed_servers_for(exit_country: Optional[str]) -> tuple[SpeedServer, ...]:
     выходом в РФ и неизвестной страной иначе достались бы одни зависания.
     Исполнитель на ноде получает уже готовые списки и сам их не составляет.
     """
+    return _by_exit(exit_country, SPEED_SERVERS_RU, SPEED_SERVERS_WORLD)[:SPEED_ATTEMPTS]
+
+
+def iperf_servers_for(exit_country: Optional[str]) -> tuple[IperfServer, ...]:
+    """Порядок iperf3-серверов — по тому же правилу, что у файловых."""
+    return _by_exit(exit_country, IPERF_SERVERS_RU, IPERF_SERVERS_WORLD)[:IPERF_SERVER_ATTEMPTS]
+
+
+def _by_exit(exit_country: Optional[str], ru: tuple, world: tuple) -> tuple:
     if (exit_country or "").upper() in RU_EXIT_COUNTRIES:
-        ordered = SPEED_SERVERS_RU + SPEED_SERVERS_WORLD
-    else:
-        ordered = SPEED_SERVERS_WORLD + SPEED_SERVERS_RU
-    return ordered[:SPEED_ATTEMPTS]
+        return ru + world
+    return world + ru
+
+
+async def measure_speed(
+    socks_port: int, exit_country: Optional[str], open_forward: "ForwardOpener",
+) -> SpeedResult:
+    """iperf3 первым, закачка файлов — если ни один iperf3-сервер не дал цифры."""
+    return (
+        await iperf_speed(exit_country, open_forward)
+        or await download_speed(socks_port, exit_country)
+    )
+
+
+async def iperf_speed(
+    exit_country: Optional[str], open_forward: "ForwardOpener",
+) -> Optional[SpeedResult]:
+    """Скачивание iperf3 через проброс в ключ; None — замерить не вышло.
+
+    Занятый порт — повод взять следующий порт того же сервера, любой другой
+    отказ — следующий сервер: недоступный через этот выход сервер не ответит
+    ни на одном порту, а каждая попытка стоит потолка `IPERF_RUN_TIMEOUT`.
+    """
+    if shutil.which("iperf3") is None:
+        return None
+    try:
+        async with asyncio.timeout(IPERF_BUDGET):
+            for server in iperf_servers_for(exit_country):
+                for target_port in server.ports[:IPERF_PORT_ATTEMPTS]:
+                    async with open_forward(server.host, target_port) as local_port:
+                        if local_port is None:
+                            # Ядро с пробросом не поднялось — дело не в сервере
+                            return None
+                        run = await _iperf_run(local_port)
+                    if run.mbps:
+                        return SpeedResult(mbps=run.mbps, server=f"{server.name} · iperf3")
+                    if not run.busy:
+                        break
+    except TimeoutError:
+        return None
+    return None
+
+
+async def _iperf_run(local_port: int) -> IperfRun:
+    process = await asyncio.create_subprocess_exec(
+        *iperf_command(local_port),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), IPERF_RUN_TIMEOUT)
+    except TimeoutError:
+        return IperfRun()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+    return parse_iperf_output(output.decode(errors="replace"))
+
+
+def iperf_command(local_port: int) -> list[str]:
+    return [
+        "iperf3", "-c", "127.0.0.1", "-p", str(local_port),
+        "-R", "-P", str(SPEED_STREAMS),
+        "-t", str(IPERF_DURATION), "-O", str(IPERF_OMIT),
+        "-f", "m", "--connect-timeout", str(IPERF_CONNECT_TIMEOUT_MS),
+    ]
+
+
+def parse_iperf_output(text: str) -> IperfRun:
+    if "busy" in text:
+        return IperfRun(busy=True)
+    match = _IPERF_RECEIVER.search(text)
+    return IperfRun(mbps=float(match.group(1))) if match else IperfRun()
 
 
 async def download_speed(socks_port: int, exit_country: Optional[str]) -> SpeedResult:

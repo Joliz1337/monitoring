@@ -1346,7 +1346,7 @@
     "full_mode": "Full check (start the core and pass real traffic)",
     "tls_inspect": "Inspect the SNI domain certificate",
     "measure_speed": "Measure link speed",
-    "measure_speed_hint": "Downloads for 8 seconds in 8 streams like a speed test, with no volume cap: a fast key spends up to several GB. The server is picked by the exit country. Keys are speed-tested one at a time",
+    "measure_speed_hint": "iperf3 through the key, file downloads as a fallback: 8 seconds in 8 streams with no volume cap, a fast key spends up to several GB. The server is picked by the exit country. Keys are speed-tested one at a time",
     "core_will_download": "Core {{core}} {{version}} will be downloaded on first run",
     "start": "Start",
     "stop": "Stop",

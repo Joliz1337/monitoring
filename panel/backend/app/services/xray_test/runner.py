@@ -21,12 +21,18 @@ import signal
 import socket
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Protocol as TypingProtocol
+from typing import AsyncIterator, Optional, Protocol as TypingProtocol
 
 from app.services.xray_test import core_manager, core_output, probes
-from app.services.xray_test.config_builder import BatchEntry, build_batch, build_config
+from app.services.xray_test.config_builder import (
+    BatchEntry,
+    build_batch,
+    build_config,
+    build_forward,
+)
 from app.services.xray_test.config_builder.batch import INBOUND_TAG, OUTBOUND_TAG
 from app.services.xray_test.errors import CoreDownloadError, UnsupportedConfigError
 from app.services.xray_test.models import (
@@ -34,6 +40,7 @@ from app.services.xray_test.models import (
     Core,
     FailReason,
     ProbeTimings,
+    ProxyEndpoint,
     Security,
     TestCell,
     Verdict,
@@ -253,7 +260,7 @@ class LocalCoreRunner:
 
             try:
                 results = await asyncio.gather(*(
-                    self._probe_slot(launched, item, options, position, on_result)
+                    self._probe_slot(launched, item, options, position, core, binary, on_result)
                     for position, item in enumerate(chunk)
                 ))
                 return {item.cell.index: result for item, result in zip(chunk, results)}
@@ -266,9 +273,12 @@ class LocalCoreRunner:
         item: _Ready,
         options: probes.ProbeOptions,
         position: int,
+        core: Core,
+        binary: Path,
         on_result: ResultSink = None,
     ) -> CellResult:
         port = launched.ports[position]
+        forward = self._forward_opener(item.cell.endpoint, core, binary)
         # Слот в тегах конфига — номер ячейки, а не место в пачке: он же
         # приходит с ноды, и по нему из общего лога отбираются свои строки
         slot = str(item.cell.index)
@@ -276,7 +286,7 @@ class LocalCoreRunner:
             async with asyncio.timeout(_cell_timeout(options)):
                 return _report(await self._explain(
                     item.cell,
-                    await self._run_probes(launched, options, item.result, port, slot),
+                    await self._run_probes(launched, options, item.result, port, forward, slot),
                 ), on_result)
         except asyncio.TimeoutError:
             core_detail, hint = _core_reason(launched, slot)
@@ -301,8 +311,9 @@ class LocalCoreRunner:
 
         try:
             async with asyncio.timeout(_cell_timeout(options)):
+                forward = self._forward_opener(cell.endpoint, core, binary)
                 return await self._explain(
-                    cell, await self._run_probes(launched, options, result, launched.port)
+                    cell, await self._run_probes(launched, options, result, launched.port, forward)
                 )
         except asyncio.TimeoutError:
             core_detail, hint = _core_reason(launched)
@@ -350,6 +361,7 @@ class LocalCoreRunner:
         options: probes.ProbeOptions,
         result: CellResult,
         port: int,
+        forward: probes.ForwardOpener,
         slot: Optional[str] = None,
     ) -> CellResult:
         http = await probes.http_through_proxy(port, options.extra_headers)
@@ -373,11 +385,35 @@ class LocalCoreRunner:
             result.exit_asn = identity.asn
 
         if options.speed:
-            speed = await probes.download_speed(port, result.exit_country)
+            speed = await probes.measure_speed(port, result.exit_country, forward)
             result.timings.speed_mbps = speed.mbps
             result.speed_server = speed.server
 
         return _apply_verdict(result, options)
+
+    def _forward_opener(
+        self, endpoint: ProxyEndpoint, core: Core, binary: Path,
+    ) -> probes.ForwardOpener:
+        """Проброс в ключ для iperf3: своё ядро на один запуск, тот же исходящий.
+
+        Отдельный процесс, а не ещё один вход в ядре проверки: iperf3-сервер
+        выбирается по стране выхода, которая известна только после проверки.
+        """
+        @asynccontextmanager
+        async def open_forward(host: str, port: int) -> AsyncIterator[Optional[int]]:
+            local_port = _free_port()
+            config = build_forward(endpoint, core, local_port, host, port)
+            try:
+                launched = await self._spawn(config, [local_port], binary, prefix="iperf-")
+            except _CoreStartError:
+                yield None
+                return
+            try:
+                yield local_port
+            finally:
+                await _shutdown_core(launched)
+
+        return open_forward
 
     async def _launch(self, cell: TestCell, core: Core, binary: Path) -> _LaunchedCore:
         port = _free_port()

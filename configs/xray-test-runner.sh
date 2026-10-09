@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.12.0"
+RUNNER_VERSION="2.13.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -48,6 +48,17 @@ SPEED_CONNECT_TIMEOUT=5
 SPEED_STALL_RATE=16384
 SPEED_STALL_SECONDS=4
 SPEED_MIN_BYTES=262144
+# iperf3 — основной замер, файлы запасные: сервер сам гонит трафик, и публичные
+# iperf3-серверы отдают одному IP 7,6–8,5 Гбит/с там, где файлы упираются в
+# 2–6 и в 429. SOCKS iperf3 не умеет, поэтому ходит в ключ через проброс порта
+# в ядре. Первые IPERF_OMIT секунд — разгон соединения, в итог они не идут.
+IPERF_DURATION=6
+IPERF_OMIT=2
+IPERF_CONNECT_TIMEOUT_MS=5000
+# Недоступный через выход сервер iperf3 сам не бросит: проброс принимает
+# соединение мгновенно, а ответа нет — этот потолок и решает
+IPERF_RUN_TIMEOUT=18
+IPERF_BUDGET=45
 DEGRADED_RTT_MS=1500
 # Больше самого длинного задания: пачки идут параллельно, и уборщик не должен
 # добивать живое ядро соседнего прогона
@@ -65,6 +76,11 @@ TRACE_URL="https://cloudflare.com/cdn-cgi/trace"
 # панель — отдельно для выхода в РФ и для остальных, — здесь их только выбирают
 SPEED_RU=()
 SPEED_WORLD=()
+# iperf3-серверы, «имя<TAB>адрес<TAB>порты,через,запятую», и шаблоны проброса
+# по номеру проверки: адрес и порт сервера подставляются вместо меток
+IPERF_RU=()
+IPERF_WORLD=()
+declare -A FWD_PORT=() FWD_TEMPLATE=()
 
 WORKDIR=""
 CORE_PGID=""
@@ -378,6 +394,77 @@ speed_stream() {
     done
 }
 
+# Одна попытка iperf3 через проброс: своё ядро на попытку, потому что сервер
+# выбирается по стране выхода, известной только после проверки. Печатает
+# Мбит/с, «busy» (порт занят другим тестом), «nocore» (ядро с пробросом не
+# поднялось) или ничего (сервер не ответил). Конфиг лежит в своём каталоге:
+# уборщик брошенных ядер узнаёт живое по каталогу при `-c …/config.json`.
+iperf_through() {
+    local index="$1" core_name="$2" lport="$3" conf="$4" host="$5" port="$6"
+    local dir="$WORKDIR/fwd-$index" pid out deadline
+    mkdir -p "$dir"
+    conf=${conf//__IPERF_HOST__/$host}
+    printf '%s' "${conf//__IPERF_PORT__/$port}" > "$dir/config.json"
+    setsid "${CORE_PATHS[$core_name]}" run -c "$dir/config.json" >"$dir/core.log" 2>&1 &
+    pid=$!
+    deadline=$(( SECONDS + CORE_START_TIMEOUT ))
+    until (exec 3<>"/dev/tcp/127.0.0.1/$lport") 2>/dev/null; do
+        if ! kill -0 "$pid" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+            kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+            printf 'nocore'
+            return
+        fi
+        sleep 0.1
+    done
+    out=$(timeout "$IPERF_RUN_TIMEOUT" iperf3 -c 127.0.0.1 -p "$lport" -R -P "$SPEED_STREAMS" \
+        -t "$IPERF_DURATION" -O "$IPERF_OMIT" -f m \
+        --connect-timeout "$IPERF_CONNECT_TIMEOUT_MS" 2>&1)
+    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    case "$out" in *busy*) printf 'busy'; return ;; esac
+    # Скачивание (-R): итог в строке receiver, -f m держит единицы в Мбит/с
+    printf '%s' "$out" | LC_ALL=C awk '
+        /\[SUM\].*receiver/ { for (i = 1; i < NF; i++) if ($(i + 1) == "Mbits/sec") v = $i }
+        END { if (v > 0) print v }'
+}
+
+# Скорость iperf3 через ключ: SPEED_MBPS и SPEED_SERVER. Занятый порт — повод
+# взять следующий порт того же сервера, любой другой отказ — следующий сервер:
+# недоступный через этот выход не ответит ни на одном порту, а каждая попытка
+# стоит потолка IPERF_RUN_TIMEOUT.
+measure_iperf() {
+    local index="$1" core_name="$2" country="$3"
+    local lport="${FWD_PORT[$index]:-}" template entry name host ports port out
+    local until=$(( SECONDS + IPERF_BUDGET ))
+    local -a servers port_list
+    [ -n "$lport" ] && [ -n "${CORE_PATHS[$core_name]:-}" ] || return 1
+    command -v iperf3 >/dev/null 2>&1 || return 1
+    template=$(printf '%s' "${FWD_TEMPLATE[$index]}" | base64 -d 2>/dev/null) || return 1
+    if [ "$country" = "RU" ]; then
+        servers=("${IPERF_RU[@]}")
+    else
+        servers=("${IPERF_WORLD[@]}")
+    fi
+    for entry in "${servers[@]}"; do
+        IFS=$'\t' read -r name host ports <<< "$entry"
+        IFS=, read -r -a port_list <<< "$ports"
+        for port in "${port_list[@]}"; do
+            [ "$SECONDS" -lt "$until" ] || return 1
+            out=$(iperf_through "$index" "$core_name" "$lport" "$template" "$host" "$port")
+            case "$out" in
+                busy) continue ;;
+                nocore) return 1 ;;
+                '') break ;;
+            esac
+            SPEED_MBPS=$out
+            SPEED_SERVER="$name · iperf3"
+            return 0
+        done
+    done
+    return 1
+}
+
 # Скорость через прокси до первого сервера, отдавшего данные: SPEED_MBPS и
 # SPEED_SERVER. Скорость общая — байты всех закачек на окно от самого раннего
 # первого байта до самого позднего последнего. От первого байта, потому что
@@ -531,7 +618,10 @@ run_cell() {
             done <<< "$trace"
         fi
 
-        if [ "$OPT_SPEED" = "1" ] && measure_speed "$socks" "$exit_country"; then
+        if [ "$OPT_SPEED" = "1" ] && {
+            measure_iperf "$index" "$core_name" "$exit_country" \
+                || measure_speed "$socks" "$exit_country"
+        }; then
             speed=$SPEED_MBPS
             json_str_to J_SPEED_SERVER "$SPEED_SERVER"
         fi
@@ -593,6 +683,17 @@ main() {
                 else
                     SPEED_WORLD+=("$b"$'\t'"$c")
                 fi
+                ;;
+            IPERF)
+                if [ "$a" = "ru" ]; then
+                    IPERF_RU+=("$b"$'\t'"$c"$'\t'"$d")
+                else
+                    IPERF_WORLD+=("$b"$'\t'"$c"$'\t'"$d")
+                fi
+                ;;
+            FWD)
+                FWD_PORT[$a]="$b"
+                FWD_TEMPLATE[$a]="$c"
                 ;;
             CELL)
                 cells+=("$a"$'	'"$b"$'	'"$c"$'	'"$d"$'	'"$e"$'	'"$f"$'	'"$g")

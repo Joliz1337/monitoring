@@ -10,7 +10,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    bash curl git rsync openssl haproxy nginx
+    bash curl git rsync openssl haproxy nginx iperf3
 
 # Copy requirements and install Python dependencies with cache
 COPY backend/requirements.txt .
