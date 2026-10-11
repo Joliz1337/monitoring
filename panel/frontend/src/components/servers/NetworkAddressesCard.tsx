@@ -13,12 +13,14 @@ import {
   type NetworkPreview,
   type NetworkState,
   type NetworkTransaction,
+  type NicRoutingInterface,
   type Server,
 } from '../../api/client'
 import { nodeAllows } from '../../utils/nodeCapabilities'
 import { versionAtLeast } from '../../utils/version'
 import { Tooltip } from '../ui/Tooltip'
 import { Checkbox } from '../ui/Checkbox'
+import { Toggle } from '../ui/Toggle'
 import { CopyableIp } from '../ui/CopyableIp'
 import { FAQIcon } from '../FAQ'
 
@@ -28,6 +30,7 @@ const DEFAULT_ROLLBACK_SEC = 120
 const MIN_NODE_VERSION_GATEWAY = '10.31.0'
 const MIN_NODE_VERSION_HOSTER_REMOVAL = '10.31.0'
 const MIN_NODE_VERSION_LINK_UP = '10.32.0'
+const MIN_NODE_VERSION_NIC_ROUTING = '10.33.0'
 // Потолок ноды на одну транзакцию (добавление + удаление)
 const MAX_ADDRESSES_PER_APPLY = 256
 
@@ -92,6 +95,7 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
   // Выбор для массового удаления — по интерфейсам: одна транзакция ноды меняет один интерфейс
   const [selected, setSelected] = useState<Record<string, Set<string>>>({})
   const [busy, setBusy] = useState(false)
+  const [nicRoutingBusy, setNicRoutingBusy] = useState(false)
   const [now, setNow] = useState(() => Date.now())
 
   const load = useCallback(async () => {
@@ -215,6 +219,20 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
     }
   }
 
+  const toggleNicRouting = async (enabled: boolean) => {
+    setNicRoutingBusy(true)
+    try {
+      const res = await proxyApi.setNicRouting(serverId, enabled)
+      setState(prev => (prev ? { ...prev, nic_routing: res.data } : prev))
+      toast.success(t(enabled ? 'server_details.network_nic_routing_toast_on' : 'server_details.network_nic_routing_toast_off'))
+    } catch (err) {
+      toast.error(errorDetail(err) || t('server_details.network_toast_failed'))
+      load()
+    } finally {
+      setNicRoutingBusy(false)
+    }
+  }
+
   const rollbackTimeout = state?.rollback_timeout_sec ?? DEFAULT_ROLLBACK_SEC
   const minGatewayVersion = state?.min_node_version_gateway ?? MIN_NODE_VERSION_GATEWAY
   const gatewaySupported = versionAtLeast(state?.node_version, minGatewayVersion)
@@ -312,6 +330,16 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
           onRestore={ref => restoreAddress(iface.name, ref)}
         />
       ))}
+
+      {state && (
+        <NicRoutingSection
+          state={state}
+          minVersion={state.min_node_version_nic_routing ?? MIN_NODE_VERSION_NIC_ROUTING}
+          writable={writable}
+          busy={nicRoutingBusy}
+          onToggle={toggleNicRouting}
+        />
+      )}
 
       <AnimatePresence>
         {addOpen && state && (
@@ -444,6 +472,95 @@ function InterfaceBlock({
           />
         ))}
       </div>
+    </div>
+  )
+}
+
+/** Ответы через свою карту. Виден, когда у ноды есть карта с адресами кроме основной
+ *  (или функция уже включена): на ноде с одной картой отвечать «не туда» нечему. */
+function NicRoutingSection({ state, minVersion, writable, busy, onToggle }: {
+  state: NetworkState
+  minVersion: string
+  writable: boolean
+  busy: boolean
+  onToggle: (enabled: boolean) => void
+}) {
+  const { t } = useTranslation()
+  const routing = state.nic_routing
+  if (!routing) {
+    const withIpv4 = state.interfaces.filter(iface => iface.kind === 'physical'
+      && iface.addresses.some(addr => addr.family === 'ipv4'))
+    if (withIpv4.length < 2) return null
+    return (
+      <p className="mt-4 pt-3 border-t border-dark-800/60 text-xs text-dark-500">
+        {t('server_details.network_nic_routing_needs_node', { version: minVersion })}
+      </p>
+    )
+  }
+  const secondary = routing.interfaces.filter(nic => nic.role !== 'primary')
+  if (!routing.enabled && secondary.length === 0) return null
+  const routed = secondary.filter(nic => nic.role === 'routed')
+
+  return (
+    <div className="mt-4 pt-3 border-t border-dark-800/60">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm text-dark-200 font-medium">{t('server_details.network_nic_routing_title')}</div>
+          <p className="text-xs text-dark-500 mt-0.5">{t('server_details.network_nic_routing_desc')}</p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {busy && <Loader2 className="w-4 h-4 animate-spin text-dark-500" />}
+          <Toggle
+            on={routing.enabled}
+            onClick={() => onToggle(!routing.enabled)}
+            disabled={!writable || busy || !routing.supported}
+          />
+        </div>
+      </div>
+      {!routing.supported && <p className="text-xs text-warning mt-2">{routing.message}</p>}
+      {routing.supported && !routing.enabled && routed.length > 0 && (
+        <div className="mt-2 p-3 rounded-lg bg-warning/10 border border-warning/30 text-warning text-xs flex gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>{t('server_details.network_nic_routing_hint', { interfaces: routed.map(nic => nic.name).join(', ') })}</span>
+        </div>
+      )}
+      {routing.enabled && !routing.active && (
+        <p className="text-xs text-warning mt-2">{t('server_details.network_nic_routing_inactive')}</p>
+      )}
+      {routing.enabled && routing.active && !routing.in_sync && (
+        <p className="text-xs text-dark-500 mt-2">{t('server_details.network_nic_routing_out_of_sync')}</p>
+      )}
+      {secondary.length > 0 && (
+        <div className="mt-2 space-y-1">
+          {secondary.map(nic => <NicRoutingRow key={nic.name} nic={nic} enabled={routing.enabled} />)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function NicRoutingRow({ nic, enabled }: { nic: NicRoutingInterface; enabled: boolean }) {
+  const { t } = useTranslation()
+  return (
+    <div className="flex items-center gap-2 text-sm px-2 py-1 rounded-lg bg-dark-800/60 flex-wrap">
+      <span className="font-mono text-dark-200">{nic.name}</span>
+      <span className="font-mono text-xs text-dark-400">{nic.addresses.join(', ')}</span>
+      {nic.gateway && <span className="text-xs font-mono text-dark-500">via {nic.gateway}</span>}
+      <span className="ml-auto">
+        {nic.role === 'routed' && (enabled
+          ? <Badge tone="success">{t('server_details.network_nic_routing_own')}</Badge>
+          : <Badge tone="muted">{t('server_details.network_nic_routing_main')}</Badge>)}
+        {nic.role === 'no_gateway' && (
+          <Tooltip label={t('server_details.network_nic_routing_no_gateway_hint')} maxWidth={320}>
+            <span className="cursor-help"><Badge tone="warning">{t('server_details.network_nic_routing_no_gateway')}</Badge></span>
+          </Tooltip>
+        )}
+        {nic.role === 'out_of_range' && (
+          <Tooltip label={t('server_details.network_nic_routing_out_of_range_hint')} maxWidth={320}>
+            <span className="cursor-help"><Badge tone="warning">{t('server_details.network_nic_routing_skipped')}</Badge></span>
+          </Tooltip>
+        )}
+      </span>
     </div>
   )
 }

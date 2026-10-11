@@ -1116,6 +1116,8 @@ export const proxyApi = {
     api.post<NetworkJobSnapshot>(`/proxy/${serverId}/network/apply`, data, { timeout: 45000 }),
   rollbackNetworkTransaction: (serverId: number, transaction_id: string) =>
     api.post<{ success: boolean; status: string | null; message: string }>(`/proxy/${serverId}/network/rollback`, { transaction_id }, { timeout: 45000 }),
+  setNicRouting: (serverId: number, enabled: boolean) =>
+    api.post<NicRoutingState>(`/proxy/${serverId}/network/nic-routing`, { enabled }, { timeout: 45000 }),
 
   // DNAT (проброс портов через iptables nat)
   getDnatState: (serverId: number) => api.get<DnatNodeState>(`/proxy/${serverId}/dnat/state`),
@@ -3357,6 +3359,28 @@ export interface NetworkJobSnapshot {
   reachability: Record<string, boolean> | null
 }
 
+/** primary — карта основного default, отвечает через неё и так; routed — через свою таблицу */
+export type NicRoutingRole = 'primary' | 'routed' | 'no_gateway' | 'out_of_range'
+
+export interface NicRoutingInterface {
+  name: string
+  role: NicRoutingRole
+  table: number
+  gateway: string | null
+  addresses: string[]
+}
+
+export interface NicRoutingState {
+  supported: boolean
+  message?: string | null
+  enabled: boolean
+  /** Служба на хосте ноды работает и возвращает правила после перезапуска сети */
+  active: boolean
+  /** Включено — правила в ядре на месте; выключено — своих правил не осталось */
+  in_sync: boolean
+  interfaces: NicRoutingInterface[]
+}
+
 export interface NetworkState {
   supported: boolean
   message?: string | null
@@ -3364,6 +3388,7 @@ export interface NetworkState {
   min_node_version_gateway?: string
   min_node_version_hoster_removal?: string
   min_node_version_link_up?: string
+  min_node_version_nic_routing?: string
   // Адрес, по которому панель ходит на ноду: его удалить нельзя
   access_address?: string | null
   node_version?: string | null
@@ -3379,6 +3404,8 @@ export interface NetworkState {
   history: NetworkTransaction[]
   rollback_timeout_sec?: number
   job: NetworkJobSnapshot | null
+  /** Ответы через свою карту; нет у нод старше min_node_version_nic_routing */
+  nic_routing?: NicRoutingState | null
 }
 
 export interface NetworkPreview {

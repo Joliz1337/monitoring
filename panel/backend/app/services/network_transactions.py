@@ -46,6 +46,8 @@ MIN_NODE_VERSION_NETWORK_GATEWAY = "10.31.0"
 MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL = "10.31.0"
 # Старая нода отказывает в адресах на опущенной карте («interface is down»)
 MIN_NODE_VERSION_NETWORK_LINK_UP = "10.32.0"
+# Ответы через свою карту: служба на хосте ноды, эндпоинт /api/system/network/nic-routing
+MIN_NODE_VERSION_NETWORK_NIC_ROUTING = "10.33.0"
 ROLLBACK_TIMEOUT_SEC = 120
 STATE_TIMEOUT_SECONDS = 10.0
 # Не больше proxy_read_timeout у location /api/system/network/ на ноде (тест-инвариант)
@@ -222,6 +224,12 @@ def node_supports_link_up(node_version: Optional[str]) -> bool:
     if not node_version:
         return False
     return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_NETWORK_LINK_UP)
+
+
+def node_supports_nic_routing(node_version: Optional[str]) -> bool:
+    if not node_version:
+        return False
+    return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_NETWORK_NIC_ROUTING)
 
 
 def node_host(server_url: str) -> Optional[str]:
