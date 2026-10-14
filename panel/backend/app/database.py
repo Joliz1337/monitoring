@@ -1911,6 +1911,33 @@ async def _migrate_cloud_billing(conn):
         logger.warning(f"Could not convert yandex_cloud billing rows: {e}")
 
 
+# Остаток VK Cloud раньше включал бонусы: старые снимки истории выше новых на сумму
+# бонусов, и этот скачок посчитался бы расходом. Метка — чтобы сбросить один раз.
+VK_PERSONAL_BALANCE_MARKER = "migration_vk_cloud_personal_balance"
+
+
+async def _migrate_vk_cloud_personal_balance(conn):
+    try:
+        done = await conn.execute(
+            text("SELECT 1 FROM panel_settings WHERE key = :key"),
+            {"key": VK_PERSONAL_BALANCE_MARKER},
+        )
+        if done.first():
+            return
+        await conn.execute(text("""
+            UPDATE billing_servers
+            SET cloud_balance_history = NULL, cloud_daily_cost = NULL
+            WHERE cloud_provider = 'vk_cloud'
+        """))
+        await conn.execute(
+            text("INSERT INTO panel_settings (key, value) VALUES (:key, '1')"),
+            {"key": VK_PERSONAL_BALANCE_MARKER},
+        )
+        logger.info("Reset VK Cloud balance history: balance no longer includes bonuses")
+    except Exception as e:
+        logger.warning(f"Could not reset VK Cloud balance history: {e}")
+
+
 async def _migrate_wildcard_ssl(conn):
     # Колонки wildcard SSL в servers
     result = await conn.execute(text("""
@@ -2272,6 +2299,7 @@ async def init_db():
         await _migrate_remnawave_ephemeral_ips(conn)
         await _migrate_hwid_user_id(conn)
         await _migrate_cloud_billing(conn)
+        await _migrate_vk_cloud_personal_balance(conn)
         await _migrate_wildcard_ssl(conn)
         await _migrate_aggregated_metrics_unique(conn)
         await _migrate_bigint_pk_ids(conn)

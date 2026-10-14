@@ -45,7 +45,7 @@ If the provider API is unreachable from the panel's address, or accounts shouldn
 - For Yandex Cloud spending is measured from actual consumption over the last three days, so after a sharp increase the number catches up within a couple of days.
 - For Selectel the term comes from Selectel itself: its own “balance lasts for N days” forecast is shown as is, and the daily cost is the balance divided by those days.
 - Timeweb Cloud has no charge history in its API, so the panel remembers the balance on every check and derives spending from its decline; top-ups don't affect the math. For the first hours after adding, while there's little history, the current plan price is shown instead.
-- VK Cloud balance includes bonuses, because bonuses are spent first. Spending is the average of the last three full days from the usage report.
+- VK Cloud shows only the personal account, without bonuses: each bonus can be spent only on its own services, and the project is frozen as soon as the personal account goes negative. Spending is how much money leaves the personal account per day.
 - Cloud.ru spending is also derived from the balance decline between checks. For the first hours after adding, yesterday's spending from the usage report is shown. Bonus grants are not included in the balance.
 - The summary on top shows monthly spend, total balance and how many projects expire within a week. Different currencies are listed separately instead of being added up.
 - Overdue and expiring servers are highlighted — you see them the moment you open the page.
