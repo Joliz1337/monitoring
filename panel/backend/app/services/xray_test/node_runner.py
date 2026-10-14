@@ -23,8 +23,8 @@ from app.models import Server
 from app.services.http_client import get_external_client, get_node_client, node_auth_headers
 from app.services.node_capabilities import learn_from_denial
 from app.services.update_channel import current_branch, github_configs_base
-from app.services.xray_test import bundle, core_manager, core_output
-from app.services.xray_test.config_builder import BatchEntry, build_batch
+from app.services.xray_test import bundle, core_manager, core_output, probes
+from app.services.xray_test.config_builder import BatchEntry, build_batch, build_forward_template
 from app.services.xray_test.errors import XrayTestError
 from app.services.xray_test.models import CellResult, Core, FailReason, TestCell, Verdict
 from app.services.xray_test.report import ResultSink, report as _report
@@ -72,14 +72,23 @@ MIN_NODE_CONCURRENCY = 8
 # Исполнитель гонит проверки внутри задания по числу портов пачки
 NODE_PARALLEL_CELLS = NODE_BATCH_SIZE
 # Худший случай на проверку: TCP-пинги, запрос с повтором по таймауту и выходной
-# IP. Замер скорости качает десять мегабайт и добавляется отдельно.
+# IP. Замер скорости добавляется отдельно — до трёх серверов по очереди.
 CELL_BUDGET = 60
-SPEED_BUDGET = 25
+SPEED_BUDGET = int(probes.SPEED_BUDGET)
 EXEC_OVERHEAD = 30
 EXEC_TIMEOUT_CAP = 600
 # Запас поверх задания: нода должна успеть дослать последние строки
 STREAM_GRACE = 30
 CORE_INSTALL_TIMEOUT = 300
+# apt на ноде бывает занят обновлениями, а списки пакетов — устаревшими:
+# сначала установка как есть, при неудаче — с обновлением списков
+IPERF_INSTALL_TIMEOUT = 240
+IPERF_INSTALL_COMMAND = (
+    "command -v iperf3 >/dev/null && exit 0; export DEBIAN_FRONTEND=noninteractive; "
+    "apt-get install -y -q iperf3 >/dev/null 2>&1 "
+    "|| { apt-get update -q >/dev/null 2>&1 && apt-get install -y -q iperf3 >/dev/null 2>&1; }; "
+    "command -v iperf3"
+)
 COMMAND_LIMIT = 60000
 # Задание для исполнителя: строки через перевод, поля внутри строки — табом
 SEP = "\t"
@@ -102,8 +111,9 @@ class NodeCoreRunner:
     и тот же локальный порт ноды.
     """
 
-    def __init__(self, server: Server) -> None:
+    def __init__(self, server: Server, measure_speed: bool = False) -> None:
         self.server = server
+        self._measure_speed = measure_speed
         self._ports: asyncio.Queue[int] = asyncio.Queue()
         for port in PORT_POOL:
             self._ports.put_nowait(port)
@@ -114,8 +124,13 @@ class NodeCoreRunner:
         # `capacity` — сколько проверок идёт одновременно. Заданий при этом
         # меньше во столько раз, сколько проверок в каждом, и каждое держит свои
         # порты: иначе пул кончился бы раньше, чем набралась параллельность.
-        self.capacity = _node_capacity(server)
-        self.batch_size = min(NODE_BATCH_SIZE, self.capacity)
+        if measure_speed:
+            # Закачки делят канал ноды: при нескольких одновременных каждая
+            # мерила бы свою долю, поэтому проверки с замером идут по одной.
+            self.capacity, self.batch_size = probes.SPEED_CONCURRENCY, 1
+        else:
+            self.capacity = _node_capacity(server)
+            self.batch_size = min(NODE_BATCH_SIZE, self.capacity)
         self.workers = max(1, self.capacity // self.batch_size)
         self._batch_slots = asyncio.Semaphore(self.workers)
         self._prepared = False
@@ -132,6 +147,8 @@ class NodeCoreRunner:
             if self._prepared:
                 return
             await _ensure_runner(self.server)
+            if self._measure_speed:
+                await _ensure_iperf(self.server)
             for core in _cores_for(cells):
                 ticket = await bundle.issue_ticket(core)
                 self._tickets[core] = ticket
@@ -219,6 +236,8 @@ class NodeCoreRunner:
 
         async with self._batch_slots:
             ports = [await self._ports.get() for _ in chunk]
+            # Порт проброса для iperf3 — из того же зарезервированного пула
+            forward_ports = [await self._ports.get() for _ in chunk] if options.speed else []
             # Исполнитель печатает строку на каждую готовую проверку, поэтому
             # результат отдаётся сразу — иначе пачка молчала бы до конца задания
             # и таблица заполнялась бы рывками по шестнадцать строк
@@ -234,7 +253,7 @@ class NodeCoreRunner:
                 early[cell.index] = _report(_parse_result(cell, event), on_result)
 
             try:
-                payload = _build_payload(chunk, ports, core, ticket, options)
+                payload = _build_payload(chunk, ports, core, ticket, options, forward_ports)
                 lines = await _execute(
                     self.server, payload, _exec_timeout(len(chunk), options), relay
                 )
@@ -245,7 +264,7 @@ class NodeCoreRunner:
                 }
                 return {**early, **failed}
             finally:
-                for port in ports:
+                for port in ports + forward_ports:
                     self._ports.put_nowait(port)
 
         return _parse_results(chunk, lines, early, on_result)
@@ -284,6 +303,7 @@ def _build_payload(
     core: Core,
     ticket: bundle.BundleTicket,
     options: ProbeOptions,
+    forward_ports: list[int],
 ) -> str:
     """Одно задание на пачку: общий конфиг ядра плюс строка на каждую проверку.
 
@@ -307,6 +327,32 @@ def _build_payload(
         ]),
         SEP.join(["CONF", core.value, config_b64]),
     ]
+    if options.speed:
+        # Порядок попыток считается здесь, исполнитель лишь выбирает список по
+        # стране выхода: адреса и правило выбора живут в одном месте
+        groups = (("ru", "RU"), ("world", None))
+        rows.extend(
+            SEP.join(["SPEED", group, server.name, server.url])
+            for group, country in groups
+            for server in probes.speed_servers_for(country)
+        )
+        rows.extend(
+            SEP.join([
+                "IPERF", group, server.name, server.host,
+                ",".join(map(str, server.ports[:probes.IPERF_PORT_ATTEMPTS])),
+            ])
+            for group, country in groups
+            for server in probes.iperf_servers_for(country)
+        )
+        # Шаблон проброса: iperf3-сервер исполнитель подставит сам, когда
+        # узнает страну выхода
+        rows.extend(
+            SEP.join([
+                "FWD", str(cell.index), str(port),
+                b64encode(build_forward_template(cell.endpoint, core, port).encode()).decode(),
+            ])
+            for cell, port in zip(chunk, forward_ports)
+        )
     rows.extend(
         SEP.join([
             "CELL",
@@ -430,6 +476,16 @@ async def _ensure_core_on_node(server: Server, ticket: bundle.BundleTicket) -> N
             "xray-test: core %s %s delivered to server %s",
             ticket.core.value, ticket.version, server.id,
         )
+
+
+async def _ensure_iperf(server: Server) -> bool:
+    """Поставить iperf3 на ноду; без него она мерит скорость закачкой файлов."""
+    try:
+        await _run_command(server, IPERF_INSTALL_COMMAND, timeout=IPERF_INSTALL_TIMEOUT)
+    except NodeExecError as exc:
+        logger.warning("xray-test: iperf3 не поставился на сервер %s: %s", server.id, exc)
+        return False
+    return True
 
 
 async def _ensure_runner(server: Server) -> None:
@@ -606,6 +662,7 @@ def _parse_result(cell: TestCell, payload: dict) -> CellResult:
     result.timings.handshake_ms = payload.get("handshake_ms")
     result.timings.rtt_ms = payload.get("rtt_ms")
     result.timings.speed_mbps = payload.get("speed_mbps")
+    result.speed_server = payload.get("speed_server")
     return result
 
 

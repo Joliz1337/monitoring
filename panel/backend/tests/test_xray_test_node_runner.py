@@ -20,8 +20,12 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.models import Server  # noqa: E402
-from app.services.xray_test import node_runner  # noqa: E402
+from app.services.xray_test import node_runner, probes  # noqa: E402
 from app.services.xray_test.bundle import BundleTicket  # noqa: E402
+from app.services.xray_test.config_builder import (  # noqa: E402
+    FORWARD_HOST_TOKEN,
+    FORWARD_PORT_TOKEN,
+)
 from app.services.xray_test.matrix import build_matrix  # noqa: E402
 from app.services.xray_test.models import Core, FailReason, Verdict  # noqa: E402
 from app.services.xray_test.node_runner import (  # noqa: E402
@@ -54,10 +58,13 @@ def _ticket(core: Core = Core.XRAY) -> BundleTicket:
 
 
 class PayloadTest(unittest.TestCase):
-    def _rows(self, cells=None, ports=None, core=Core.XRAY, **kwargs) -> list[list[str]]:
+    def _rows(self, cells=None, ports=None, core=Core.XRAY, forward_ports=None, **kwargs) -> list[list[str]]:
         options = ProbeOptions(**kwargs) if kwargs else ProbeOptions()
+        cells = cells or [_cell()]
+        if forward_ports is None and options.speed:
+            forward_ports = [7600 + i for i in range(len(cells))]
         payload = _build_payload(
-            cells or [_cell()], ports or [7501], core, _ticket(core), options
+            cells, ports or [7501], core, _ticket(core), options, forward_ports or []
         )
         decoded = base64.b64decode(payload).decode()
         return [line.split(TAB) for line in decoded.splitlines()]
@@ -141,6 +148,52 @@ class PayloadTest(unittest.TestCase):
         rows = self._rows()
         self.assertEqual([row[0] for row in rows], ["CORE", "OPTS", "CONF", "CELL"])
 
+    def test_speed_servers_sent_in_attempt_order(self):
+        """Порядок попыток считает панель: исполнитель лишь выбирает список по стране."""
+        rows = [row for row in self._rows(speed=True) if row[0] == "SPEED"]
+
+        for group, country in (("ru", "RU"), ("world", None)):
+            sent = [(row[2], row[3]) for row in rows if row[1] == group]
+            expected = [(s.name, s.url) for s in probes.speed_servers_for(country)]
+            self.assertEqual(sent, expected)
+        self.assertTrue(all(len(row) == 4 for row in rows))
+
+    def test_no_speed_servers_without_measurement(self):
+        self.assertFalse([row for row in self._rows() if row[0] in ("SPEED", "IPERF", "FWD")])
+
+    def test_iperf_servers_sent_in_attempt_order(self):
+        rows = [row for row in self._rows(speed=True) if row[0] == "IPERF"]
+
+        for group, country in (("ru", "RU"), ("world", None)):
+            sent = [tuple(row[2:]) for row in rows if row[1] == group]
+            expected = [
+                (s.name, s.host, ",".join(map(str, s.ports[:probes.IPERF_PORT_ATTEMPTS])))
+                for s in probes.iperf_servers_for(country)
+            ]
+            self.assertEqual(sent, expected)
+
+    def test_forward_template_per_cell(self):
+        """У каждой проверки свой порт проброса и шаблон с её же ключом."""
+        cells = _cells(
+            f"vless://{UUID}@a.io:443?security=tls#one",
+            f"vless://{UUID}@b.io:443?security=tls#two",
+        )
+        rows = self._rows(cells=cells, ports=[7501, 7502], forward_ports=[7601, 7602], speed=True)
+        forwards = [row for row in rows if row[0] == "FWD"]
+
+        self.assertEqual([row[1] for row in forwards], [str(c.index) for c in cells])
+        self.assertEqual([row[2] for row in forwards], ["7601", "7602"])
+        for row, cell in zip(forwards, cells):
+            template = base64.b64decode(row[3]).decode()
+            self.assertIn(FORWARD_HOST_TOKEN, template)
+            filled = template.replace(FORWARD_HOST_TOKEN, "iperf.example").replace(
+                FORWARD_PORT_TOKEN, "5203"
+            )
+            config = json.loads(filled)
+            self.assertEqual(config["inbounds"][0]["port"], int(row[2]))
+            server = config["outbounds"][0]["settings"]["vnext"][0]["address"]
+            self.assertEqual(server, cell.endpoint.address)
+
 
 class ParseResultTest(unittest.TestCase):
     def test_successful_cell(self):
@@ -156,6 +209,13 @@ class ParseResultTest(unittest.TestCase):
         self.assertEqual(result.exit_country, "NL")
         self.assertEqual(result.timings.rtt_ms, 95)
         self.assertEqual(result.timings.speed_mbps, 85.5)
+
+    def test_speed_server_reported(self):
+        result = _parse_result(_cell(), {
+            "type": "cell", "index": 0, "verdict": "ok", "reason": None,
+            "speed_mbps": 40.2, "speed_server": "Selectel",
+        })
+        self.assertEqual(result.speed_server, "Selectel")
 
     def test_failed_cell_keeps_reason(self):
         result = _parse_result(_cell(), {
@@ -328,6 +388,50 @@ class PortPoolTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(all(r.reason is FailReason.NODE_ERROR for r in results))
         self.assertEqual(runner._ports.qsize(), len(node_runner.PORT_POOL))
+
+
+class ForwardPortsTest(unittest.IsolatedAsyncioTestCase):
+    """Порт проброса тоже из зарезервированного пула: эфемерный у ноды могло бы
+    занять её же исходящее соединение."""
+
+    async def test_taken_from_pool_and_returned(self):
+        server = Server(id=1, name="node", url="https://node.example")
+        runner = NodeCoreRunner(server, measure_speed=True)
+        runner._tickets[Core.XRAY] = _ticket()
+        runner._prepared = True
+        seen: list[str] = []
+
+        async def fake_execute(server, payload, budget, on_event=None):
+            rows = base64.b64decode(payload).decode().splitlines()
+            seen.extend(row.split(TAB)[2] for row in rows if row.startswith("FWD"))
+            return []
+
+        cells = build_matrix([
+            parse_link(f"vless://{UUID}@h{i}.io:443?security=tls#n{i}") for i in range(2)
+        ])
+        with mock.patch.object(node_runner, "_execute", fake_execute):
+            await runner.probe_batch(cells, ProbeOptions(speed=True))
+
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(all(int(port) in node_runner.PORT_POOL for port in seen))
+        self.assertEqual(runner._ports.qsize(), len(node_runner.PORT_POOL))
+
+
+class EnsureIperfTest(unittest.IsolatedAsyncioTestCase):
+    """iperf3 на ноду ставит панель; не вышло — нода мерит файлами, прогон идёт."""
+
+    async def test_install_command_sent(self):
+        server = Server(id=1, name="node", url="https://node.example")
+        run = mock.AsyncMock(return_value="ok")
+        with mock.patch.object(node_runner, "_run_command", new=run):
+            self.assertTrue(await node_runner._ensure_iperf(server))
+        self.assertIn("iperf3", run.call_args.args[1])
+
+    async def test_failure_does_not_stop_run(self):
+        server = Server(id=1, name="node", url="https://node.example")
+        run = mock.AsyncMock(side_effect=node_runner.NodeExecError("apt занят"))
+        with mock.patch.object(node_runner, "_run_command", new=run):
+            self.assertFalse(await node_runner._ensure_iperf(server))
 
 
 class StreamHangTest(unittest.IsolatedAsyncioTestCase):
@@ -601,6 +705,15 @@ class BatchAccountingTest(unittest.TestCase):
         r = self._runner(1)
         self.assertLessEqual(r.batch_size, r.capacity)
         self.assertGreaterEqual(r.workers, 1)
+
+    def test_speed_measurement_limits_parallel_checks(self):
+        """Закачки делят канал ноды: при десятках сразу каждая мерила бы свою долю."""
+        server = Server(id=1, name="n", url="https://n.example",
+                        last_metrics=json.dumps({"cpu": {"cores_logical": 16}}))
+        r = NodeCoreRunner(server, measure_speed=True)
+
+        self.assertEqual(r.capacity, probes.SPEED_CONCURRENCY)
+        self.assertLessEqual(r.workers * r.batch_size, r.capacity)
 
 
 class ExecTimeoutTest(unittest.TestCase):

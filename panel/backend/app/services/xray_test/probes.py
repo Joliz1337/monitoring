@@ -8,11 +8,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import re
+import shutil
 import socket
 import ssl
 import time
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -27,15 +31,106 @@ TRACE_URLS = (
     "https://cloudflare.com/cdn-cgi/trace",
     "https://ipinfo.io/json",
 )
-SPEED_URL = "https://speed.cloudflare.com/__down?bytes={size}"
 
 TCP_ATTEMPTS = 3
 TCP_TIMEOUT = 3.0
 TLS_TIMEOUT = 5.0
 HTTP_TIMEOUT = 10.0
-SPEED_TIMEOUT = 20.0
-SPEED_BYTES = 10_000_000
 DEGRADED_RTT_MS = 1500.0
+
+# Замер скорости — как у спидтестов: несколько потоков разом и фиксированное
+# окно без лимита объёма, чтобы мерить до 10 Гбит/с. Один поток через VPN
+# упирается в окно TCP при задержке пути (через ключ: один поток ~400 Мбит/с,
+# четыре ~700), а закачка фиксированного объёма на быстром канале кончается
+# раньше, чем соединение успевает разогнаться.
+SPEED_STREAMS = 8
+SPEED_MAX_TIME = 8.0
+# Столько запрашивается за раз; докачав, поток запрашивает файл снова
+SPEED_REQUEST_BYTES = 1_000_000_000
+# Cloudflare за запрос отдаёт меньше 100 000 000 байт: на ровно 100 млн — 403
+CLOUDFLARE_MAX_BYTES = 99_000_000
+# Новая закачка короче секунды мерила бы только установку соединения
+SPEED_MIN_TRANSFER_TIME = 1.0
+SPEED_CONNECT_TIMEOUT = 5.0
+# Поток медленнее порога столько секунд подряд встал — так выглядит Cloudflare
+# под ТСПУ: первые 16 КБ приходят, потом соединение замирает. Порог не ниже
+# 16 КБ/с, потому что curl усредняет скорость за последние секунды: при пороге
+# в килобайт всплеск первых 16 КБ держал бы среднее выше него, и зависший
+# сервер съедал бы всё окно.
+SPEED_STALL_RATE = 16384
+SPEED_STALL_SECONDS = 4
+SPEED_MIN_BYTES = 256 * 1024
+# Замер идёт по одной проверке на точку: две многопоточные закачки разом
+# делили бы канал точки, и каждая мерила бы свою долю
+SPEED_CONCURRENCY = 1
+SPEED_ATTEMPTS = 3
+RU_EXIT_COUNTRIES = frozenset({"RU"})
+
+# iperf3 — основной замер: сервер сам гонит трафик, и публичные iperf3-серверы
+# отдают одному IP 7,6–8,5 Гбит/с там, где файлы упираются в 2–6 и в 429.
+# SOCKS iperf3 не умеет, поэтому в ключ он заходит пробросом порта в ядре
+# (`config_builder.build_forward`). Первые секунды — разгон соединения, в итог
+# они не идут.
+IPERF_DURATION = 6
+IPERF_OMIT = 2
+IPERF_CONNECT_TIMEOUT_MS = 5000
+IPERF_SERVER_ATTEMPTS = 3
+# Порт iperf3-сервера держит один тест разом, занятый отвечает сразу
+IPERF_PORT_ATTEMPTS = 5
+# Недоступный через выход сервер iperf3 сам не бросит: проброс принимает
+# соединение мгновенно, а ответа нет — этот потолок и решает
+IPERF_RUN_TIMEOUT = IPERF_DURATION + IPERF_OMIT + IPERF_CONNECT_TIMEOUT_MS / 1000 + 5
+IPERF_BUDGET = 45.0
+SPEED_FILE_BUDGET = SPEED_ATTEMPTS * (SPEED_MAX_TIME + SPEED_CONNECT_TIMEOUT)
+# Худший случай замера: iperf3 съел свой потолок, и каждый файловый сервер тоже
+SPEED_BUDGET = IPERF_BUDGET + SPEED_FILE_BUDGET
+
+
+@dataclass(frozen=True)
+class SpeedServer:
+    name: str
+    url: str
+
+
+@dataclass(frozen=True)
+class IperfServer:
+    name: str
+    host: str
+    ports: tuple[int, ...]
+
+
+# Российские — из списка меню проверки скорости установщика (по мотивам
+# itdoginfo/russian-iperf3-servers). Европейские проверены рукопожатием iperf3
+# с NL-выхода: у Leaseweb порты 10G. Не годятся: Bouygues, as49434 и 014.fr
+# молчат, NovoServe не резолвится, у Worldstream и HE единственный порт занят.
+_IPERF_PORTS = tuple(range(5201, 5210))
+IPERF_SERVERS_RU = (
+    IperfServer("hostkey MSK", "spd-rudp.hostkey.ru", _IPERF_PORTS),
+    IperfServer("ertelecom SPB", "st.spb.ertelecom.ru", _IPERF_PORTS),
+)
+IPERF_SERVERS_WORLD = (
+    IperfServer("Leaseweb AMS", "speedtest.ams1.nl.leaseweb.net", _IPERF_PORTS),
+    IperfServer("Leaseweb FRA", "speedtest.fra1.de.leaseweb.net", _IPERF_PORTS),
+)
+
+
+# Файлы отдаются частями (Range) и имеют постоянное имя. Сервер нужен рядом с
+# выходом ключа: замер до другого конца света упирается в задержку пути, а не
+# в канал прокси. И он обязан отдавать несколько потоков одному IP: Hetzner на
+# часть параллельных отвечает 429, Vultr — 503. OVH держит четыре потока из
+# восьми, остальным отвечает 429 — замер считается по тем, что качали. Cloudflare
+# и OVH после пары гигабайт с одного IP отказывают целиком — тогда замер уходит
+# к следующему серверу.
+SPEED_SERVERS_RU = (
+    SpeedServer("Selectel", "https://speedtest.selectel.ru/1GB"),
+    # Образ Arch в latest/ меняется раз в месяц, имя у него постоянное
+    SpeedServer("Yandex", "https://mirror.yandex.ru/archlinux/iso/latest/archlinux-x86_64.iso"),
+)
+SPEED_SERVERS_WORLD = (
+    # Anycast: файл отдаёт ближайшая к выходу точка присутствия
+    SpeedServer("Cloudflare", f"https://speed.cloudflare.com/__down?bytes={CLOUDFLARE_MAX_BYTES}"),
+    SpeedServer("OVH", "https://proof.ovh.net/files/1Gb.dat"),
+)
 
 
 @dataclass
@@ -75,6 +170,33 @@ class ExitIdentity:
     ip: Optional[str] = None
     country: Optional[str] = None
     asn: Optional[str] = None
+
+
+@dataclass
+class SpeedResult:
+    mbps: Optional[float] = None
+    server: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class IperfRun:
+    mbps: Optional[float] = None
+    busy: bool = False
+
+
+# Скачивание (-R) — итог в строке receiver; -f m держит единицы в Мбит/с
+_IPERF_RECEIVER = re.compile(r"\[SUM\].*?([\d.]+)\s+Mbits/sec.*receiver")
+
+# Проброс в ключ: async-контекст отдаёт локальный порт, ведущий на iperf3-сервер,
+# либо None, если ядро с пробросом не поднялось
+ForwardOpener = Callable[[str, int], AbstractAsyncContextManager[Optional[int]]]
+
+
+@dataclass
+class _StreamProgress:
+    received: int = 0
+    first_byte_at: float = 0.0
+    last_byte_at: float = 0.0
 
 
 @dataclass
@@ -288,22 +410,200 @@ async def exit_identity(socks_port: int) -> ExitIdentity:
     return ExitIdentity()
 
 
-async def download_speed(socks_port: int, size: int = SPEED_BYTES) -> Optional[float]:
-    """Мбит/с на скачивании тестового файла через прокси."""
-    proxy = f"socks5://127.0.0.1:{socks_port}"
-    received = 0
-    started = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(proxy=proxy, timeout=SPEED_TIMEOUT, trust_env=False) as client:
-            async with client.stream("GET", SPEED_URL.format(size=size)) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    received += len(chunk)
-    except httpx.HTTPError:
-        return None
+def speed_servers_for(exit_country: Optional[str]) -> tuple[SpeedServer, ...]:
+    """Порядок попыток замера: серверы своей группы, затем другой.
 
-    elapsed = time.perf_counter() - started
-    if elapsed <= 0 or received == 0:
+    Другая группа — на случай, когда страна выхода не определилась: ключу с
+    выходом в РФ и неизвестной страной иначе достались бы одни зависания.
+    Исполнитель на ноде получает уже готовые списки и сам их не составляет.
+    """
+    return _by_exit(exit_country, SPEED_SERVERS_RU, SPEED_SERVERS_WORLD)[:SPEED_ATTEMPTS]
+
+
+def iperf_servers_for(exit_country: Optional[str]) -> tuple[IperfServer, ...]:
+    """Порядок iperf3-серверов — по тому же правилу, что у файловых."""
+    return _by_exit(exit_country, IPERF_SERVERS_RU, IPERF_SERVERS_WORLD)[:IPERF_SERVER_ATTEMPTS]
+
+
+def _by_exit(exit_country: Optional[str], ru: tuple, world: tuple) -> tuple:
+    if (exit_country or "").upper() in RU_EXIT_COUNTRIES:
+        return ru + world
+    return world + ru
+
+
+async def measure_speed(
+    socks_port: int, exit_country: Optional[str], open_forward: "ForwardOpener",
+) -> SpeedResult:
+    """iperf3 первым, закачка файлов — если ни один iperf3-сервер не дал цифры."""
+    return (
+        await iperf_speed(exit_country, open_forward)
+        or await download_speed(socks_port, exit_country)
+    )
+
+
+async def iperf_speed(
+    exit_country: Optional[str], open_forward: "ForwardOpener",
+) -> Optional[SpeedResult]:
+    """Скачивание iperf3 через проброс в ключ; None — замерить не вышло.
+
+    Занятый порт — повод взять следующий порт того же сервера, любой другой
+    отказ — следующий сервер: недоступный через этот выход сервер не ответит
+    ни на одном порту, а каждая попытка стоит потолка `IPERF_RUN_TIMEOUT`.
+    """
+    if shutil.which("iperf3") is None:
+        return None
+    try:
+        async with asyncio.timeout(IPERF_BUDGET):
+            for server in iperf_servers_for(exit_country):
+                for target_port in server.ports[:IPERF_PORT_ATTEMPTS]:
+                    async with open_forward(server.host, target_port) as local_port:
+                        if local_port is None:
+                            # Ядро с пробросом не поднялось — дело не в сервере
+                            return None
+                        run = await _iperf_run(local_port)
+                    if run.mbps:
+                        return SpeedResult(mbps=run.mbps, server=f"{server.name} · iperf3")
+                    if not run.busy:
+                        break
+    except TimeoutError:
+        return None
+    return None
+
+
+async def _iperf_run(local_port: int) -> IperfRun:
+    process = await asyncio.create_subprocess_exec(
+        *iperf_command(local_port),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), IPERF_RUN_TIMEOUT)
+    except TimeoutError:
+        return IperfRun()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+    return parse_iperf_output(output.decode(errors="replace"))
+
+
+def iperf_command(local_port: int) -> list[str]:
+    return [
+        "iperf3", "-c", "127.0.0.1", "-p", str(local_port),
+        "-R", "-P", str(SPEED_STREAMS),
+        "-t", str(IPERF_DURATION), "-O", str(IPERF_OMIT),
+        "-f", "m", "--connect-timeout", str(IPERF_CONNECT_TIMEOUT_MS),
+    ]
+
+
+def parse_iperf_output(text: str) -> IperfRun:
+    if "busy" in text:
+        return IperfRun(busy=True)
+    match = _IPERF_RECEIVER.search(text)
+    return IperfRun(mbps=float(match.group(1))) if match else IperfRun()
+
+
+async def download_speed(socks_port: int, exit_country: Optional[str]) -> SpeedResult:
+    """Скорость через прокси до первого сервера, отдавшего данные."""
+    # socks5h: адрес цели резолвит выход ключа, а не панель — иначе anycast
+    # Cloudflare отдал бы узел рядом с панелью
+    proxy = f"socks5h://127.0.0.1:{socks_port}"
+    for server in speed_servers_for(exit_country):
+        mbps = await _download_mbps(proxy, server.url)
+        if mbps is not None:
+            return SpeedResult(mbps=mbps, server=server.name)
+    return SpeedResult()
+
+
+async def _download_mbps(proxy: Optional[str], url: str) -> Optional[float]:
+    """Общая скорость `SPEED_STREAMS` потоков за окно `SPEED_MAX_TIME`; None — данных нет.
+
+    Качает curl, а не httpx: Python в одном потоке через ключ давал вдвое меньше
+    curl (366 против 842 Мбит/с) и до гигабит не дотянул бы, а процессы curl
+    раскладываются по ядрам.
+    """
+    deadline = time.monotonic() + SPEED_MAX_TIME
+    streams = await asyncio.gather(*(_pull(proxy, url, deadline) for _ in range(SPEED_STREAMS)))
+    return _aggregate_mbps([transfer for stream in streams for transfer in stream])
+
+
+async def _pull(proxy: Optional[str], url: str, deadline: float) -> list[_StreamProgress]:
+    """Один поток: докачав файл, запрашивает его снова, пока не кончится окно.
+
+    Отказ, зависание или закачка, оборванная окном, поток заканчивают: повтор
+    после 429 только продлил бы ограничение со стороны сервера.
+    """
+    transfers: list[_StreamProgress] = []
+    while (left := deadline - time.monotonic()) >= SPEED_MIN_TRANSFER_TIME:
+        transfer, finished = await _curl_transfer(proxy, url, left)
+        if transfer is not None:
+            transfers.append(transfer)
+        if not finished:
+            break
+    return transfers
+
+
+async def _curl_transfer(
+    proxy: Optional[str], url: str, budget: float,
+) -> tuple[Optional[_StreamProgress], bool]:
+    """Одна закачка: что пришло и докачан ли файл целиком."""
+    started = time.monotonic()
+    process = await asyncio.create_subprocess_exec(
+        *_curl_command(proxy, url, budget),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        # Потолок поверх --max-time: повисший curl держал бы замер, а с ним и прогон
+        output, _ = await asyncio.wait_for(process.communicate(), budget + SPEED_CONNECT_TIMEOUT)
+    except TimeoutError:
+        return None, False
+    finally:
+        # И при отмене проверки: иначе curl качал бы дальше уже без хозяина
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+
+    fields = output.decode(errors="replace").split()
+    if len(fields) != 4 or fields[0] not in ("200", "206") or not float(fields[1]):
+        return None, False
+    transfer = _StreamProgress(
+        received=int(float(fields[1])),
+        first_byte_at=started + float(fields[2]),
+        last_byte_at=started + float(fields[3]),
+    )
+    return transfer, process.returncode == 0
+
+
+def _curl_command(proxy: Optional[str], url: str, budget: float) -> list[str]:
+    command = [
+        "curl", "-s", "-o", os.devnull,
+        "-r", f"0-{SPEED_REQUEST_BYTES - 1}",
+        "--connect-timeout", f"{SPEED_CONNECT_TIMEOUT:g}",
+        "--max-time", f"{budget:.2f}",
+        "--speed-limit", str(SPEED_STALL_RATE),
+        "--speed-time", str(SPEED_STALL_SECONDS),
+        "-w", "%{http_code} %{size_download} %{time_starttransfer} %{time_total}",
+    ]
+    if proxy:
+        command += ["--proxy", proxy]
+    return command + [url]
+
+
+def _aggregate_mbps(streams: list[_StreamProgress]) -> Optional[float]:
+    """Скорость всех закачек по общему окну — от первого байта до последнего.
+
+    Время идёт от первого байта: установка соединения через прокси на быстром
+    канале занимала бы большую часть замера. Сумма скоростей отдельных потоков
+    завышала бы цифру — потоки, кончившие в разное время, вместе не шли.
+    """
+    active = [stream for stream in streams if stream.received]
+    if not active:
+        return None
+    elapsed = max(s.last_byte_at for s in active) - min(s.first_byte_at for s in active)
+    return _mbps(sum(s.received for s in active), elapsed)
+
+
+def _mbps(received: int, elapsed: float) -> Optional[float]:
+    if received < SPEED_MIN_BYTES or elapsed <= 0:
         return None
     return round(received * 8 / elapsed / 1_000_000, 2)
 

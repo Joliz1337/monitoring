@@ -250,14 +250,21 @@ set_link() {
 
 # ------------------------------------------------- gateway routes (policy routing)
 
-# Lines of a routes file (`<iface> <addr> <gateway> <table>`) for one family
+# Lines of a routes file (`<iface> <addr> <gateway> <table>`) for one family.
+# A NIC that is gone (the cloud detached it, a reboot renamed it) took its routes
+# with it and `ip route ... dev` fails on it: its lines wait until it is back,
+# instead of failing every verification, rollback and self-heal pass.
 routes_of_family() {
+    local iface rest
     [ -f "$1" ] || return 0
     awk -v fam="$2" -v lo="$GW_TABLE_MIN" -v hi="$GW_TABLE_MAX" '
         NF == 4 && $4 ~ /^[0-9]+$/ && $4 + 0 >= lo + 0 && $4 + 0 <= hi + 0 {
             six = index($2, ":") > 0
             if ((fam == 6) == six) print
-        }' "$1"
+        }' "$1" | while read -r iface rest; do
+            [ -d "/sys/class/net/$iface" ] || continue
+            printf '%s %s\n' "$iface" "$rest"
+        done
 }
 
 # "<addr> <table>" of our per-address rules; other priorities and tables are not ours

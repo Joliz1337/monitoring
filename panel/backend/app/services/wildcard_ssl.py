@@ -2,16 +2,19 @@ import asyncio
 import logging
 import os
 import tempfile
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import docker
-from sqlalchemy import select
+from sqlalchemy import delete, insert, select
 
 from app.config import get_settings
 from app.database import async_session
-from app.models import WildcardCertificate, Server, PanelSettings, AlertSettings
+from app.models import (
+    WildcardCertificate, ServerWildcardCertificate, Server, PanelSettings, AlertSettings,
+)
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.node_capabilities import Capability, server_allows
 
@@ -22,6 +25,11 @@ PANEL_NGINX_CONTAINER = "panel-nginx"
 LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
 LETSENCRYPT_RENEWAL = Path("/etc/letsencrypt/renewal")
 USE_FOR_PANEL_SETTING = "wildcard_use_for_panel"
+
+NO_CERTIFICATES_MESSAGE = "No certificates selected for this server"
+CUSTOM_PATHS_SINGLE_CERT_MESSAGE = (
+    "Custom paths hold a single certificate: select only one for this server"
+)
 
 
 def wildcard_covers_domain(base_domain: str, domain: str) -> bool:
@@ -36,6 +44,53 @@ def wildcard_covers_domain(base_domain: str, domain: str) -> bool:
         return True
     suffix = f".{base_domain}"
     return domain.endswith(suffix) and "." not in domain[: -len(suffix)]
+
+
+def uses_custom_paths(server: Server) -> bool:
+    return bool(
+        server.wildcard_ssl_custom_path_enabled
+        and server.wildcard_ssl_custom_fullchain_path
+        and server.wildcard_ssl_custom_privkey_path
+    )
+
+
+async def linked_certificates(db, server_ids: list[int]) -> dict[int, list[WildcardCertificate]]:
+    """Закреплённые за серверами сертификаты: server_id → список в порядке выпуска."""
+    if not server_ids:
+        return {}
+    # Связи и сертификаты отдельными запросами: JOIN тянул бы PEM на каждую пару
+    # сервер–сертификат, на сотнях нод это мегабайты одинаковых строк
+    links = (await db.execute(
+        select(ServerWildcardCertificate.server_id, ServerWildcardCertificate.certificate_id)
+        .where(ServerWildcardCertificate.server_id.in_(server_ids))
+        .order_by(ServerWildcardCertificate.certificate_id)
+    )).all()
+    if not links:
+        return {}
+    certs = {
+        c.id: c for c in (await db.execute(
+            select(WildcardCertificate).where(WildcardCertificate.id.in_({cert_id for _, cert_id in links}))
+        )).scalars().all()
+    }
+    by_server: dict[int, list[WildcardCertificate]] = defaultdict(list)
+    for server_id, cert_id in links:
+        by_server[server_id].append(certs[cert_id])
+    return by_server
+
+
+async def replace_certificate_links(db, server_ids: list[int], cert_ids: list[int]) -> None:
+    """Задать серверам ровно этот набор сертификатов (несуществующие id пропускаются)."""
+    known = list((await db.execute(
+        select(WildcardCertificate.id).where(WildcardCertificate.id.in_(cert_ids))
+    )).scalars().all()) if cert_ids else []
+    await db.execute(
+        delete(ServerWildcardCertificate).where(ServerWildcardCertificate.server_id.in_(server_ids))
+    )
+    if known:
+        await db.execute(
+            insert(ServerWildcardCertificate),
+            [{"server_id": s, "certificate_id": c} for s in server_ids for c in known],
+        )
 
 # Статус выпуска/продления (in-memory, для polling)
 _issue_status = {
@@ -106,23 +161,20 @@ class WildcardSSLManager:
                 return False, "Certificate files not found after issuance"
 
             async with async_session() as db:
-                # Удалить старый cert для этого домена если есть
-                existing = (await db.execute(
+                # Повторный выпуск домена обновляет запись на месте: id и закреплённые
+                # за сертификатом серверы сохраняются. Новый сертификат ни за кем не
+                # закрепляется — серверы для него выбирает пользователь
+                cert = (await db.execute(
                     select(WildcardCertificate).where(WildcardCertificate.base_domain == base_domain)
-                )).scalar_one_or_none()
-                if existing:
-                    await db.delete(existing)
-                    await db.flush()
-
-                cert = WildcardCertificate(
-                    domain=f"*.{base_domain}",
-                    base_domain=base_domain,
-                    fullchain_pem=fullchain,
-                    privkey_pem=privkey,
-                    expiry_date=expiry,
-                    issued_at=datetime.now(timezone.utc),
-                )
-                db.add(cert)
+                )).scalars().first()
+                if cert is None:
+                    cert = WildcardCertificate(domain=f"*.{base_domain}", base_domain=base_domain)
+                    db.add(cert)
+                cert.fullchain_pem = fullchain
+                cert.privkey_pem = privkey
+                cert.expiry_date = expiry
+                cert.issued_at = datetime.now(timezone.utc)
+                cert.last_renewed = None
                 await db.commit()
 
             _issue_status["last_result"] = "success"
@@ -201,14 +253,8 @@ class WildcardSSLManager:
 
     # ─── Deploy ───
 
-    async def deploy_to_server(self, cert_id: int, server_id: int) -> dict:
+    async def deploy_to_server(self, server_id: int) -> dict:
         async with async_session() as db:
-            cert = (await db.execute(
-                select(WildcardCertificate).where(WildcardCertificate.id == cert_id)
-            )).scalar_one_or_none()
-            if not cert:
-                return {"success": False, "message": "Certificate not found", "server_id": server_id}
-
             server = (await db.execute(
                 select(Server).where(Server.id == server_id)
             )).scalar_one_or_none()
@@ -219,72 +265,92 @@ class WildcardSSLManager:
                 return {"success": False, "message": "Node restricts SSL section",
                         "server_id": server.id, "server_name": server.name}
 
-            return await self.deploy_to_node(cert, server)
+            linked = (await linked_certificates(db, [server.id])).get(server.id, [])
+
+        return await self.deploy_to_node(server, linked)
 
     async def get_deploy_targets(
-        self, cert_id: int, server_ids: Optional[list[int]] = None
-    ) -> tuple[Optional[WildcardCertificate], list[Server]]:
-        """Сертификат и серверы для раскатки: явный список или все включённые.
+        self, server_ids: Optional[list[int]] = None, cert_id: Optional[int] = None
+    ) -> list[tuple[Server, list[WildcardCertificate]]]:
+        """Серверы для раскатки и закреплённые за каждым сертификаты.
 
-        Явный выбор пользователя не требует wildcard_ssl_enabled — он и есть согласие.
+        server_ids — явный выбор (он и есть согласие, wildcard_ssl_enabled не нужен),
+        None — все включённые. cert_id оставляет только серверы с этим сертификатом.
         """
         async with async_session() as db:
-            cert = (await db.execute(
-                select(WildcardCertificate).where(WildcardCertificate.id == cert_id)
-            )).scalar_one_or_none()
-            if not cert:
-                return None, []
-
             query = select(Server).where(Server.is_active == True)
             if server_ids is None:
                 query = query.where(Server.wildcard_ssl_enabled == True)
             else:
                 query = query.where(Server.id.in_(server_ids))
-            servers = list((await db.execute(query.order_by(Server.position))).scalars().all())
+            servers = [
+                s for s in (await db.execute(query.order_by(Server.position))).scalars().all()
+                if server_allows(s, Capability.SSL, write=True)
+            ]
+            linked = await linked_certificates(db, [s.id for s in servers])
 
-        return cert, [s for s in servers if server_allows(s, Capability.SSL, write=True)]
+        targets = [(s, linked.get(s.id, [])) for s in servers]
+        if cert_id is None:
+            return targets
+        return [(s, certs) for s, certs in targets if any(c.id == cert_id for c in certs)]
 
     async def deploy_to_all(self, cert_id: int) -> list[dict]:
-        # Читаем cert и серверы в короткой сессии и закрываем её до сетевого fan-out:
-        # expire_on_commit=False оставляет объекты доступными, а коннект пула не висит
-        # открытым на всё время раскатки.
-        async with async_session() as db:
-            cert = (await db.execute(
-                select(WildcardCertificate).where(WildcardCertificate.id == cert_id)
-            )).scalar_one_or_none()
-            if not cert:
-                return [{"success": False, "message": "Certificate not found"}]
-
-            servers = list((await db.execute(
-                select(Server).where(
-                    Server.wildcard_ssl_enabled == True,
-                    Server.is_active == True,
-                )
-            )).scalars().all())
-
-        # Ноды с закрытым разделом отсекаем до отправки, иначе уведомление
-        # «развёрнуто на N из M» считало бы их провалом
-        servers = [s for s in servers if server_allows(s, Capability.SSL, write=True)]
-        if not servers:
-            return [{"success": False, "message": "No servers with wildcard SSL enabled"}]
+        # Ноды с закрытым разделом get_deploy_targets отсекает до отправки, иначе
+        # уведомление «развёрнуто на N из M» считало бы их провалом
+        targets = await self.get_deploy_targets(cert_id=cert_id)
+        if not targets:
+            return [{"success": False, "message": "No servers with this certificate enabled"}]
 
         # Bounded fan-out: на сотнях нод не открываем разом сотни TLS-соединений.
         sem = asyncio.Semaphore(30)
 
-        async def _guarded(s):
+        async def _guarded(server: Server, linked: list[WildcardCertificate]):
             async with sem:
-                return await self.deploy_to_node(cert, s)
+                return await self.deploy_to_node(server, linked, cert_id)
 
-        return await asyncio.gather(*[_guarded(s) for s in servers], return_exceptions=False)
+        return await asyncio.gather(*[_guarded(s, certs) for s, certs in targets])
 
-    async def deploy_to_node(self, cert: WildcardCertificate, server: Server) -> dict:
+    async def deploy_to_node(
+        self, server: Server, linked: list[WildcardCertificate], cert_id: Optional[int] = None
+    ) -> dict:
+        """Раскатать закреплённые за сервером сертификаты, cert_id — только один из них."""
+        result = {"server_id": server.id, "server_name": server.name}
+        if not linked:
+            return {**result, "success": False, "message": NO_CERTIFICATES_MESSAGE}
+        # Свои пути — одна пара файлов на сервер: второй сертификат затирал бы первый,
+        # и при каждом продлении они сменяли бы друг друга
+        if len(linked) > 1 and uses_custom_paths(server):
+            return {**result, "success": False, "message": CUSTOM_PATHS_SINGLE_CERT_MESSAGE}
+
+        certs = [c for c in linked if cert_id is None or c.id == cert_id]
+        reload_command = server.wildcard_ssl_reload_cmd or ""
+        reload_result = None
+        message = ""
+        for index, cert in enumerate(certs):
+            # Службу перечитываем один раз — после того как легли файлы всех сертификатов
+            is_last = index == len(certs) - 1
+            ok, message, reload_result = await self._push_certificate(
+                server, cert, reload_command if is_last else ""
+            )
+            if not ok:
+                if len(certs) > 1:
+                    message = f"{cert.domain}: {message}"
+                return {**result, "success": False, "message": message, "reload_result": reload_result}
+
+        if len(certs) > 1:
+            message = f"Deployed {', '.join(c.domain for c in certs)}"
+        return {**result, "success": True, "message": message, "reload_result": reload_result}
+
+    async def _push_certificate(
+        self, server: Server, cert: WildcardCertificate, reload_command: str
+    ) -> tuple[bool, str, Optional[dict]]:
         payload = {
             "fullchain_pem": cert.fullchain_pem,
             "privkey_pem": cert.privkey_pem,
-            "reload_command": server.wildcard_ssl_reload_cmd or "",
+            "reload_command": reload_command,
         }
 
-        if server.wildcard_ssl_custom_path_enabled and server.wildcard_ssl_custom_fullchain_path and server.wildcard_ssl_custom_privkey_path:
+        if uses_custom_paths(server):
             payload["custom_fullchain_path"] = server.wildcard_ssl_custom_fullchain_path
             payload["custom_privkey_path"] = server.wildcard_ssl_custom_privkey_path
         else:
@@ -311,28 +377,12 @@ class WildcardSSLManager:
                     detail = response.json().get("detail", "")
                 except Exception:
                     pass
-                return {
-                    "success": False,
-                    "message": detail or f"HTTP {response.status_code}",
-                    "server_id": server.id,
-                    "server_name": server.name,
-                }
+                return False, detail or f"HTTP {response.status_code}", None
             data = response.json()
-            return {
-                "success": data.get("success", False),
-                "message": data.get("message", "Unknown"),
-                "server_id": server.id,
-                "server_name": server.name,
-                "reload_result": data.get("reload_result"),
-            }
+            return data.get("success", False), data.get("message", "Unknown"), data.get("reload_result")
         except Exception as e:
-            logger.error(f"Deploy to {server.name} failed: {e}")
-            return {
-                "success": False,
-                "message": str(e),
-                "server_id": server.id,
-                "server_name": server.name,
-            }
+            logger.error(f"Deploy of {cert.domain} to {server.name} failed: {e}")
+            return False, str(e), None
 
     # ─── Deploy to panel itself ───
 
@@ -425,10 +475,14 @@ class WildcardSSLManager:
     async def _apply_to_panel_if_enabled(self, base_domain: str, notify: bool = True) -> Optional[dict]:
         """Применить сертификат к панели, если настройка включена.
 
-        Возвращает None, когда настройка выключена. Сбой применения не роняет
-        выпуск/продление: ошибка логируется и (в фоновых сценариях) уходит
-        в Telegram.
+        Возвращает None, когда настройка выключена или сертификат выпущен на
+        другой домен — из нескольких сертификатов панели подходит только её
+        собственный. Сбой применения не роняет выпуск/продление: ошибка
+        логируется и (в фоновых сценариях) уходит в Telegram.
         """
+        if not wildcard_covers_domain(base_domain, get_settings().domain or ""):
+            return None
+
         async with async_session() as db:
             enabled = await self._get_setting(db, USE_FOR_PANEL_SETTING)
             alerts = None

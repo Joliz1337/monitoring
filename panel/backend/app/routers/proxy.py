@@ -683,6 +683,10 @@ async def hoster_access_purge(
 # заново подключившись к ноде (см. services/network_transactions.py).
 
 
+# Проход по картам и `systemctl enable --now` на хосте ноды — секунды; nginx панели режет /api/ на 60 с
+NIC_ROUTING_TIMEOUT = 30.0
+
+
 class NetworkPreviewRequest(BaseModel):
     add_text: str = ""
     gateway: str = Field("", max_length=64)
@@ -705,6 +709,10 @@ class NetworkApplyRequest(BaseModel):
 
 class NetworkRollbackRequest(BaseModel):
     transaction_id: str = Field(..., min_length=1, max_length=64)
+
+
+class NicRoutingRequest(BaseModel):
+    enabled: bool
 
 
 def _network_unsupported(server: Server) -> dict:
@@ -766,6 +774,7 @@ async def get_network_state(
     state["min_node_version_gateway"] = network_transactions.MIN_NODE_VERSION_NETWORK_GATEWAY
     state["min_node_version_hoster_removal"] = network_transactions.MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL
     state["min_node_version_link_up"] = network_transactions.MIN_NODE_VERSION_NETWORK_LINK_UP
+    state["min_node_version_nic_routing"] = network_transactions.MIN_NODE_VERSION_NETWORK_NIC_ROUTING
     state["access_address"] = await network_transactions.access_address(server)
     state["node_version"] = server.node_version
     state["job"] = network_transactions.job_snapshot(server.id)
@@ -863,6 +872,31 @@ async def rollback_network_transaction(
         return await network_transactions.rollback(server, data.transaction_id)
     except (network_transactions.NodeNetworkError, network_transactions.NodeUnreachableError) as exc:
         await _raise_for_node_error(server, exc)
+
+
+@router.post("/{server_id}/network/nic-routing")
+async def set_nic_routing(
+    server_id: int,
+    data: NicRoutingRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Ответы через свою карту. Карту основного default нода не трогает, поэтому
+    связь панели с нодой не меняется и подтверждение с таймером отката не нужно."""
+    server = await get_server_by_id(server_id, db)
+    require_capability(server, Capability.SYSTEM, write=True)
+    if not network_transactions.node_supports_nic_routing(server.node_version):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Ответы через свою карту поддерживает нода {network_transactions.MIN_NODE_VERSION_NETWORK_NIC_ROUTING} "
+                f"и новее (сейчас {server.node_version or 'неизвестно'}) — обновите ноду"
+            ),
+        )
+    return await proxy_request(
+        server, "/api/system/network/nic-routing", method="POST",
+        json_data=data.model_dump(), timeout=NIC_ROUTING_TIMEOUT,
+    )
 
 
 # ==================== Traffic Tracking ====================

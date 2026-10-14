@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import { Checkbox } from '../ui/Checkbox'
 import { SecretInput } from '../ui/SecretInput'
+import CertificateChips from '../wildcard/CertificateChips'
 import ReloadCmdPresetChips from '../wildcard/ReloadCmdPresetChips'
 import type {
   RemnawaveCertProfile,
@@ -11,6 +12,7 @@ import type {
   FirewallProfile,
   DnatProfile,
   RemnawaveNginxProfile,
+  WildcardCertificate,
   WildcardReloadCmdPreset,
 } from '../../api/client'
 
@@ -45,6 +47,8 @@ export interface DeployFormData {
   remnawaveNginxDomain: string
   wildcardSslEnabled: boolean
   wildcardReloadCmd: string
+  // null — все выпущенные сертификаты
+  wildcardCertIds: number[] | null
   dedicatedCert: boolean
 }
 
@@ -77,6 +81,7 @@ export const DEPLOY_DEFAULTS: DeployFormData = {
   remnawaveNginxDomain: '',
   wildcardSslEnabled: false,
   wildcardReloadCmd: '',
+  wildcardCertIds: null,
   dedicatedCert: false,
 }
 
@@ -88,6 +93,7 @@ interface Props {
   firewallProfiles: FirewallProfile[]
   dnatProfiles: DnatProfile[]
   nginxProfiles: RemnawaveNginxProfile[]
+  wildcardCerts: WildcardCertificate[]
   reloadPresets: WildcardReloadCmdPreset[]
   savingCert: boolean
   onSaveCert: () => void
@@ -106,6 +112,7 @@ export default function DeployTargetFields({
   firewallProfiles,
   dnatProfiles,
   nginxProfiles,
+  wildcardCerts,
   reloadPresets,
   savingCert,
   onSaveCert,
@@ -535,6 +542,17 @@ export default function DeployTargetFields({
               exit={{ height: 0, opacity: 0 }}
               transition={{ duration: 0.15 }}
             >
+              {/* С одним сертификатом выбирать нечего — он и раскатается */}
+              {wildcardCerts.length > 1 && (
+                <>
+                  <label className="block text-xs text-dark-400">{t('servers.deploy_wildcard_certs')}</label>
+                  <CertificateChips
+                    certificates={wildcardCerts}
+                    selected={deploy.wildcardCertIds ?? wildcardCerts.map(c => c.id)}
+                    onChange={(ids) => onChange({ wildcardCertIds: ids })}
+                  />
+                </>
+              )}
               <label className="block text-xs text-dark-400">{t('servers.deploy_wildcard_reload_cmd')}</label>
               <ReloadCmdPresetChips
                 presets={reloadPresets}

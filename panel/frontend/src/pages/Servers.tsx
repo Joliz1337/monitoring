@@ -50,6 +50,7 @@ import {
   FirewallProfile,
   DnatProfile,
   RemnawaveNginxProfile,
+  WildcardCertificate,
   WildcardReloadCmdPreset,
 } from '../api/client'
 import InfraTree from '../components/Infra/InfraTree'
@@ -225,6 +226,7 @@ export default function Servers() {
   const [firewallProfiles, setFirewallProfiles] = useState<FirewallProfile[]>([])
   const [dnatProfiles, setDnatProfiles] = useState<DnatProfile[]>([])
   const [nginxProfiles, setNginxProfiles] = useState<RemnawaveNginxProfile[]>([])
+  const [wildcardCerts, setWildcardCerts] = useState<WildcardCertificate[]>([])
   const [reloadPresets, setReloadPresets] = useState<WildcardReloadCmdPreset[]>([])
   const [savingReloadPreset, setSavingReloadPreset] = useState(false)
   const [deployLog, setDeployLog] = useState<string[]>([])
@@ -363,6 +365,9 @@ export default function Servers() {
     wildcardSSLApi.getReloadCmdPresets()
       .then(res => setReloadPresets(res.data.presets))
       .catch(() => {})
+    wildcardSSLApi.getCertificates()
+      .then(res => setWildcardCerts(res.data.certificates))
+      .catch(() => {})
   }, [showForm, editingId])
 
   const handleSubmit = async (e: FormEvent) => {
@@ -439,6 +444,7 @@ export default function Servers() {
     if (d.installProxy && !d.proxyUrl.trim()) return t('servers.deploy_no_proxy')
     if (d.changePassword && d.newPassword.length < 8) return t('servers.deploy_password_short')
     if (d.wildcardSslEnabled && d.wildcardReloadCmd.trim().length > 512) return t('servers.deploy_wildcard_cmd_too_long')
+    if (d.wildcardSslEnabled && d.wildcardCertIds?.length === 0) return t('servers.deploy_wildcard_no_certs')
     if (d.installRemnawave && d.remnawaveNginxProfileId != null) {
       const profile = nginxProfiles.find(p => p.id === d.remnawaveNginxProfileId)
       if (profile && profile.config_content.includes(NGINX_DOMAIN_PLACEHOLDER) && !d.remnawaveNginxDomain.trim()) {
@@ -477,6 +483,7 @@ export default function Servers() {
     dnat_profile_id: d.dnatProfileId ?? null,
     wildcard_ssl_enabled: d.wildcardSslEnabled,
     wildcard_ssl_reload_cmd: d.wildcardSslEnabled ? d.wildcardReloadCmd.trim() || null : null,
+    wildcard_ssl_cert_ids: d.wildcardSslEnabled ? d.wildcardCertIds : null,
     remnawave_nginx_profile_id: d.installRemnawave ? d.remnawaveNginxProfileId : null,
     remnawave_nginx_domain: d.installRemnawave ? d.remnawaveNginxDomain.trim() || null : null,
     dedicated_cert: d.dedicatedCert,
@@ -1565,6 +1572,7 @@ export default function Servers() {
                         firewallProfiles={firewallProfiles}
                         dnatProfiles={dnatProfiles}
                         nginxProfiles={nginxProfiles}
+                        wildcardCerts={wildcardCerts}
                         reloadPresets={reloadPresets}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}
@@ -1618,6 +1626,7 @@ export default function Servers() {
                         firewallProfiles={firewallProfiles}
                         dnatProfiles={dnatProfiles}
                         nginxProfiles={nginxProfiles}
+                        wildcardCerts={wildcardCerts}
                         reloadPresets={reloadPresets}
                         savingCert={savingCert}
                         onSaveCert={handleSaveCert}

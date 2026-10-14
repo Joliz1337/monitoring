@@ -1,4 +1,4 @@
-"""Pydantic-схемы управления дополнительными IP-адресами интерфейса."""
+"""Pydantic-схемы управления дополнительными IP-адресами интерфейса и ответами через свою карту."""
 
 import ipaddress
 from typing import Literal, Optional, Union
@@ -173,6 +173,34 @@ class TransactionInfo(BaseModel):
     warnings: list[str]
 
 
+NicRoutingRole = Literal["primary", "routed", "no_gateway", "out_of_range"]
+
+
+class NicRoutingInterface(BaseModel):
+    """Физическая карта с IPv4-адресами. primary — карта основного default, её
+    ответы и так идут через неё; routed — отвечает через свою таблицу."""
+    name: str
+    role: NicRoutingRole
+    table: int
+    gateway: Optional[str] = None
+    addresses: list[str]
+
+
+class NicRoutingState(BaseModel):
+    supported: bool
+    message: Optional[str] = None
+    enabled: bool = False
+    # Служба на хосте работает (следит за ядром и возвращает правила)
+    active: bool = False
+    # Включено — правила в ядре совпадают с желаемыми; выключено — своих правил нет
+    in_sync: bool = True
+    interfaces: list[NicRoutingInterface] = Field(default_factory=list)
+
+
+class NicRoutingRequest(BaseModel):
+    enabled: bool
+
+
 class NetworkStateResponse(BaseModel):
     supported: bool
     message: Optional[str] = None
@@ -187,6 +215,7 @@ class NetworkStateResponse(BaseModel):
     transaction: Optional[TransactionInfo]
     history: list[TransactionInfo]
     rollback_timeout_sec: int = DEFAULT_ROLLBACK_TIMEOUT_SEC
+    nic_routing: Optional[NicRoutingState] = None
 
 
 class NetworkApplyResponse(BaseModel):

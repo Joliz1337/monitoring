@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.9.0"
+RUNNER_VERSION="2.13.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -28,8 +28,37 @@ PROBE_TIMEOUT=10
 # занятых портов простаивает, а пропускная способность ноды падает вдвое.
 # Нагрузка при этом небольшая: процесс ядра один, остальное — ожидание сети.
 PARALLEL_CELLS=8
-SPEED_TIMEOUT=20
-SPEED_BYTES=10000000
+# Замер скорости — как у спидтестов и как в probes.py панели: SPEED_STREAMS
+# потоков разом и окно SPEED_MAX_TIME без лимита объёма, чтобы мерить до
+# 10 Гбит/с. Один поток через VPN упирается в окно TCP, а закачка
+# фиксированного объёма на быстром канале кончается раньше, чем соединение
+# успевает разогнаться. Докачав SPEED_REQUEST_BYTES, поток запрашивает файл
+# снова; новую закачку короче SPEED_MIN_TRANSFER_MS не начинает — она мерила бы
+# только установку соединения.
+# Поток, качающий медленнее порога четыре секунды подряд, встал — так выглядит
+# Cloudflare под ТСПУ: первые 16 КБ приходят, потом соединение замирает. Порог
+# не ниже 16 КБ/с, потому что curl усредняет скорость за последние секунды: при
+# пороге в килобайт всплеск первых 16 КБ держал бы среднее выше него, и
+# зависший сервер съедал бы всё окно.
+SPEED_STREAMS=8
+SPEED_MAX_TIME=8
+SPEED_REQUEST_BYTES=1000000000
+SPEED_MIN_TRANSFER_MS=1000
+SPEED_CONNECT_TIMEOUT=5
+SPEED_STALL_RATE=16384
+SPEED_STALL_SECONDS=4
+SPEED_MIN_BYTES=262144
+# iperf3 — основной замер, файлы запасные: сервер сам гонит трафик, и публичные
+# iperf3-серверы отдают одному IP 7,6–8,5 Гбит/с там, где файлы упираются в
+# 2–6 и в 429. SOCKS iperf3 не умеет, поэтому ходит в ключ через проброс порта
+# в ядре. Первые IPERF_OMIT секунд — разгон соединения, в итог они не идут.
+IPERF_DURATION=6
+IPERF_OMIT=2
+IPERF_CONNECT_TIMEOUT_MS=5000
+# Недоступный через выход сервер iperf3 сам не бросит: проброс принимает
+# соединение мгновенно, а ответа нет — этот потолок и решает
+IPERF_RUN_TIMEOUT=18
+IPERF_BUDGET=45
 DEGRADED_RTT_MS=1500
 # Больше самого длинного задания: пачки идут параллельно, и уборщик не должен
 # добивать живое ядро соседнего прогона
@@ -43,7 +72,15 @@ GENERATE_204_URL="https://cp.cloudflare.com/generate_204"
 # должен выглядеть сбоем всех конфигураций разом
 FALLBACK_204_URL="https://www.gstatic.com/generate_204"
 TRACE_URL="https://cloudflare.com/cdn-cgi/trace"
-SPEED_URL="https://speed.cloudflare.com/__down?bytes=${SPEED_BYTES}"
+# Серверы замера скорости, «имя<TAB>адрес» в порядке попыток. Списки присылает
+# панель — отдельно для выхода в РФ и для остальных, — здесь их только выбирают
+SPEED_RU=()
+SPEED_WORLD=()
+# iperf3-серверы, «имя<TAB>адрес<TAB>порты,через,запятую», и шаблоны проброса
+# по номеру проверки: адрес и порт сервера подставляются вместо меток
+IPERF_RU=()
+IPERF_WORLD=()
+declare -A FWD_PORT=() FWD_TEMPLATE=()
 
 WORKDIR=""
 CORE_PGID=""
@@ -330,6 +367,147 @@ core_failure_line() {
     printf '%s' "$line" | cut -c1-700
 }
 
+# Один поток замера: закачки подряд до конца окна, на каждую — строка
+# «байт  мс_первого_байта  мс_последнего» в общих часах. Отказ, зависание или
+# закачка, оборванная окном, поток заканчивают: повтор после 429 только продлил
+# бы ограничение со стороны сервера.
+speed_stream() {
+    local socks="$1" url="$2" deadline="$3" started left out rc code bytes first total
+    while :; do
+        started=$(now_ms)
+        left=$(( deadline - started ))
+        [ "$left" -ge "$SPEED_MIN_TRANSFER_MS" ] || return 0
+        out=$(curl_socks "$socks" -o /dev/null -r "0-$((SPEED_REQUEST_BYTES - 1))" \
+            --connect-timeout "$SPEED_CONNECT_TIMEOUT" \
+            --max-time "$((left / 1000)).$(printf '%03d' $((left % 1000)))" \
+            --speed-limit "$SPEED_STALL_RATE" --speed-time "$SPEED_STALL_SECONDS" \
+            -w '%{http_code} %{size_download} %{time_starttransfer} %{time_total}' \
+            "$url" 2>/dev/null)
+        rc=$?
+        read -r code bytes first total <<< "$out"
+        case "$code" in 200|206) ;; *) return 0 ;; esac
+        [ "${bytes:-0}" -gt 0 ] 2>/dev/null || return 0
+        secs_to_ms "$first"; first=$MS
+        secs_to_ms "$total"; total=$MS
+        printf '%s %s %s\n' "$bytes" "$((started + first))" "$((started + total))"
+        [ "$rc" -eq 0 ] || return 0
+    done
+}
+
+# Одна попытка iperf3 через проброс: своё ядро на попытку, потому что сервер
+# выбирается по стране выхода, известной только после проверки. Печатает
+# Мбит/с, «busy» (порт занят другим тестом), «nocore» (ядро с пробросом не
+# поднялось) или ничего (сервер не ответил). Конфиг лежит в своём каталоге:
+# уборщик брошенных ядер узнаёт живое по каталогу при `-c …/config.json`.
+iperf_through() {
+    local index="$1" core_name="$2" lport="$3" conf="$4" host="$5" port="$6"
+    local dir="$WORKDIR/fwd-$index" pid out deadline
+    mkdir -p "$dir"
+    conf=${conf//__IPERF_HOST__/$host}
+    printf '%s' "${conf//__IPERF_PORT__/$port}" > "$dir/config.json"
+    setsid "${CORE_PATHS[$core_name]}" run -c "$dir/config.json" >"$dir/core.log" 2>&1 &
+    pid=$!
+    deadline=$(( SECONDS + CORE_START_TIMEOUT ))
+    until (exec 3<>"/dev/tcp/127.0.0.1/$lport") 2>/dev/null; do
+        if ! kill -0 "$pid" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+            kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+            printf 'nocore'
+            return
+        fi
+        sleep 0.1
+    done
+    out=$(timeout "$IPERF_RUN_TIMEOUT" iperf3 -c 127.0.0.1 -p "$lport" -R -P "$SPEED_STREAMS" \
+        -t "$IPERF_DURATION" -O "$IPERF_OMIT" -f m \
+        --connect-timeout "$IPERF_CONNECT_TIMEOUT_MS" 2>&1)
+    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    case "$out" in *busy*) printf 'busy'; return ;; esac
+    # Скачивание (-R): итог в строке receiver, -f m держит единицы в Мбит/с
+    printf '%s' "$out" | LC_ALL=C awk '
+        /\[SUM\].*receiver/ { for (i = 1; i < NF; i++) if ($(i + 1) == "Mbits/sec") v = $i }
+        END { if (v > 0) print v }'
+}
+
+# Скорость iperf3 через ключ: SPEED_MBPS и SPEED_SERVER. Занятый порт — повод
+# взять следующий порт того же сервера, любой другой отказ — следующий сервер:
+# недоступный через этот выход не ответит ни на одном порту, а каждая попытка
+# стоит потолка IPERF_RUN_TIMEOUT.
+measure_iperf() {
+    local index="$1" core_name="$2" country="$3"
+    local lport="${FWD_PORT[$index]:-}" template entry name host ports port out
+    local until=$(( SECONDS + IPERF_BUDGET ))
+    local -a servers port_list
+    [ -n "$lport" ] && [ -n "${CORE_PATHS[$core_name]:-}" ] || return 1
+    command -v iperf3 >/dev/null 2>&1 || return 1
+    template=$(printf '%s' "${FWD_TEMPLATE[$index]}" | base64 -d 2>/dev/null) || return 1
+    if [ "$country" = "RU" ]; then
+        servers=("${IPERF_RU[@]}")
+    else
+        servers=("${IPERF_WORLD[@]}")
+    fi
+    for entry in "${servers[@]}"; do
+        IFS=$'\t' read -r name host ports <<< "$entry"
+        IFS=, read -r -a port_list <<< "$ports"
+        for port in "${port_list[@]}"; do
+            [ "$SECONDS" -lt "$until" ] || return 1
+            out=$(iperf_through "$index" "$core_name" "$lport" "$template" "$host" "$port")
+            case "$out" in
+                busy) continue ;;
+                nocore) return 1 ;;
+                '') break ;;
+            esac
+            SPEED_MBPS=$out
+            SPEED_SERVER="$name · iperf3"
+            return 0
+        done
+    done
+    return 1
+}
+
+# Скорость через прокси до первого сервера, отдавшего данные: SPEED_MBPS и
+# SPEED_SERVER. Скорость общая — байты всех закачек на окно от самого раннего
+# первого байта до самого позднего последнего. От первого байта, потому что
+# установка соединения через прокси на быстром канале занимала бы большую часть
+# замера; общая, потому что сумма скоростей потоков завышала бы цифру —
+# кончившие в разное время вместе не шли.
+SPEED_MBPS=""; SPEED_SERVER=""
+measure_speed() {
+    local socks="$1" country="$2" entry i deadline
+    local -a servers
+    if [ "$country" = "RU" ]; then
+        servers=("${SPEED_RU[@]}")
+    else
+        servers=("${SPEED_WORLD[@]}")
+    fi
+    for entry in "${servers[@]}"; do
+        deadline=$(( $(now_ms) + SPEED_MAX_TIME * 1000 ))
+        # Почти пустой итог — не скорость канала, а зависание после первых
+        # килобайт: пробуем следующий сервер
+        SPEED_MBPS=$(
+            {
+                for (( i = 0; i < SPEED_STREAMS; i++ )); do
+                    speed_stream "$socks" "${entry#*$'\t'}" "$deadline" &
+                done
+                wait
+            } | LC_ALL=C awk -v min="$SPEED_MIN_BYTES" '
+                {
+                    bytes += $1
+                    if (!seen++ || $2 < first) first = $2
+                    if ($3 > last) last = $3
+                }
+                END {
+                    elapsed = (last - first) / 1000
+                    if (bytes < min || elapsed <= 0) exit 1
+                    printf "%.2f", bytes * 8 / elapsed / 1000000
+                }'
+        ) || continue
+        SPEED_SERVER=${entry%%$'\t'*}
+        return 0
+    done
+    return 1
+}
+
 # ── основной цикл ───────────────────────────────────────────────────────────
 
 # Строка результата собирается одной печатью и без единой подстановки:
@@ -338,11 +516,11 @@ core_failure_line() {
 # налезают друг на друга в общем выводе.
 emit_cell() {
     escape_var "$4"
-    printf '{"type":"cell","index":%s,"verdict":"%s","reason":%s,"detail":"%s","tcp_min_ms":%s,"handshake_ms":%s,"rtt_ms":%s,"http_status":%s,"exit_ip":%s,"exit_country":%s,"speed_mbps":%s,"resolved_ip":%s,"dns_ms":%s,"tcp_avg_ms":%s,"tcp_jitter_ms":%s}\n' \
+    printf '{"type":"cell","index":%s,"verdict":"%s","reason":%s,"detail":"%s","tcp_min_ms":%s,"handshake_ms":%s,"rtt_ms":%s,"http_status":%s,"exit_ip":%s,"exit_country":%s,"speed_mbps":%s,"resolved_ip":%s,"dns_ms":%s,"tcp_avg_ms":%s,"tcp_jitter_ms":%s,"speed_server":%s}\n' \
         "$1" "$2" "$3" "$ESC" \
         "${5:-null}" "${6:-null}" "${7:-null}" "${8:-null}" \
         "${9:-null}" "${10:-null}" "${11:-null}" \
-        "${12:-null}" "${13:-null}" "${14:-null}" "${15:-null}"
+        "${12:-null}" "${13:-null}" "${14:-null}" "${15:-null}" "${16:-null}"
 }
 
 
@@ -351,7 +529,7 @@ run_cell() {
     local tcp_ms="" tcp_avg="" tcp_jitter="" handshake="" rtt="" status=""
     local exit_ip="" exit_country="" speed="" resolved_ip="" dns_ms=""
 
-    local resolved J_RESOLVED=null J_EXIT_IP=null J_EXIT_CC=null
+    local resolved J_RESOLVED=null J_EXIT_IP=null J_EXIT_CC=null J_SPEED_SERVER=null
     resolved=$(resolve_host "$address")
     if [ -n "$resolved" ]; then
         resolved_ip=${resolved%% *}
@@ -440,11 +618,12 @@ run_cell() {
             done <<< "$trace"
         fi
 
-        if [ "$OPT_SPEED" = "1" ]; then
-            local bps
-            bps=$(curl_socks "$socks" -o /dev/null --max-time "$SPEED_TIMEOUT" \
-                -w '%{speed_download}' "$SPEED_URL" 2>/dev/null)
-            speed=$(printf '%s' "$bps" | awk '{printf "%.2f", $1*8/1000000}')
+        if [ "$OPT_SPEED" = "1" ] && {
+            measure_iperf "$index" "$core_name" "$exit_country" \
+                || measure_speed "$socks" "$exit_country"
+        }; then
+            speed=$SPEED_MBPS
+            json_str_to J_SPEED_SERVER "$SPEED_SERVER"
         fi
     fi
 
@@ -464,7 +643,8 @@ run_cell() {
     emit_cell "$index" "$verdict" "$reason" "" "${tcp_ms:-null}" "${handshake:-null}" \
         "${rtt:-null}" "${status:-null}" "$J_EXIT_IP" \
         "$J_EXIT_CC" "${speed:-null}" \
-        "$J_RESOLVED" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}"
+        "$J_RESOLVED" "${dns_ms:-null}" "${tcp_avg:-null}" "${tcp_jitter:-null}" \
+        "$J_SPEED_SERVER"
 }
 
 main() {
@@ -496,6 +676,24 @@ main() {
                 ;;
             CONF)
                 batch_core="$a"; batch_conf="$b"
+                ;;
+            SPEED)
+                if [ "$a" = "ru" ]; then
+                    SPEED_RU+=("$b"$'\t'"$c")
+                else
+                    SPEED_WORLD+=("$b"$'\t'"$c")
+                fi
+                ;;
+            IPERF)
+                if [ "$a" = "ru" ]; then
+                    IPERF_RU+=("$b"$'\t'"$c"$'\t'"$d")
+                else
+                    IPERF_WORLD+=("$b"$'\t'"$c"$'\t'"$d")
+                fi
+                ;;
+            FWD)
+                FWD_PORT[$a]="$b"
+                FWD_TEMPLATE[$a]="$c"
                 ;;
             CELL)
                 cells+=("$a"$'	'"$b"$'	'"$c"$'	'"$d"$'	'"$e"$'	'"$f"$'	'"$g")

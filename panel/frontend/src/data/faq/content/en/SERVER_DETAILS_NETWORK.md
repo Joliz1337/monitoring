@@ -26,6 +26,10 @@ Usually the field stays empty: replies from the new address leave through the pr
 
 If the cloud attached another network to the server, for example the external network as a second interface in VK Cloud, the new card shows up in the list as down. Pick it when adding addresses: the node brings the card up together with them, keeps it up after every reboot and takes it down again once you remove its last address. If the addresses come from another network, fill in the gateway too, so replies from them leave through the new card. Requires node 10.32.0 or newer.
 
+## Replies via their own NIC
+
+When a server has two network cards with public addresses, the second card's address may not answer at all: the request comes in through that card, but the reply leaves through the main one and the cloud drops it. The "Replies via their own NIC" switch below the interface list sends each reply through the card the request came in on. The main card stays as it is, so the panel keeps its connection to the node and there is no rollback timer here. The node picks up new addresses and cards by itself and restores the setting after a reboot. The block shows up when the node has a second card with addresses. Requires node 10.33.0 or newer.
+
 ## How the change is applied
 
 1. The node backs up its config, writes the addresses, applies them and starts a 120-second rollback timer.

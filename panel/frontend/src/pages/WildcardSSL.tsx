@@ -2,13 +2,13 @@ import { useEffect, useState, useCallback, useMemo, useRef, FormEvent } from 're
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
 import { useOpenIds } from '../hooks/useOpenIds'
 import { nodeAllows } from '../utils/nodeCapabilities'
-import { ShieldCheck, RefreshCw, Server, Upload, Globe, Loader2, CheckCircle2, XCircle, Trash2, Eye, EyeOff, Save, Search, Send, Settings2, Info, ChevronDown, ChevronRight, Folder, FolderOpen, ToggleLeft, ToggleRight, Lock, X } from 'lucide-react'
+import { ShieldCheck, RefreshCw, Server, Upload, Globe, Loader2, CheckCircle2, XCircle, Trash2, Eye, EyeOff, Save, Search, Send, Settings2, Info, ChevronDown, ChevronRight, Folder, FolderOpen, ToggleLeft, ToggleRight, Lock, X, Plus, AlertTriangle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
   wildcardSSLApi,
-  wildcardDeployStreamUrl,
+  WILDCARD_DEPLOY_STREAM_URL,
   WildcardCertificate,
   WildcardDeployResult,
   WildcardSSLSettings,
@@ -19,6 +19,7 @@ import {
 import { FAQIcon } from '../components/FAQ'
 import { Checkbox } from '../components/ui/Checkbox'
 import { SecretInput } from '../components/ui/SecretInput'
+import CertificateChips from '../components/wildcard/CertificateChips'
 import CertificateMaterials from '../components/wildcard/CertificateMaterials'
 import ReloadCmdPresetChips from '../components/wildcard/ReloadCmdPresetChips'
 import { WildcardDeployProgress } from '../components/wildcard/WildcardDeployProgress'
@@ -37,6 +38,20 @@ function wildcardCoversDomain(baseDomain: string, domain: string): boolean {
   if (domain === baseDomain) return true
   const suffix = '.' + baseDomain
   return domain.endsWith(suffix) && !domain.slice(0, -suffix.length).includes('.')
+}
+
+function certDaysColor(days: number | null): string {
+  if (days === null) return 'text-dark-400'
+  if (days <= 0) return 'text-red-400'
+  if (days <= 14) return 'text-yellow-400'
+  return 'text-green-400'
+}
+
+function certDotColor(days: number | null): string {
+  if (days === null) return 'bg-dark-500'
+  if (days <= 0) return 'bg-red-400'
+  if (days <= 14) return 'bg-yellow-400'
+  return 'bg-green-400'
 }
 
 // Пресеты избавляют от ручного ввода одной и той же команды на каждом сервере —
@@ -97,12 +112,13 @@ export interface ServerSavePayload {
   custom_path_enabled: boolean
   custom_fullchain_path: string
   custom_privkey_path: string
+  cert_ids: number[]
 }
 
 
 function ServerCard({
   srv,
-  cert,
+  certs,
   deployingServer,
   expanded,
   selected,
@@ -119,7 +135,7 @@ function ServerCard({
   t,
 }: {
   srv: WildcardServerConfig
-  cert: WildcardCertificate | null
+  certs: WildcardCertificate[]
   deployingServer: number | null
   expanded: boolean
   selected: boolean
@@ -142,8 +158,10 @@ function ServerCard({
   const [localCustomMode, setLocalCustomMode] = useState(srv.wildcard_ssl_custom_path_enabled)
   const [localCustomFullchainPath, setLocalCustomFullchainPath] = useState(srv.wildcard_ssl_custom_fullchain_path)
   const [localCustomPrivkeyPath, setLocalCustomPrivkeyPath] = useState(srv.wildcard_ssl_custom_privkey_path)
+  const [localCertIds, setLocalCertIds] = useState(srv.wildcard_ssl_cert_ids)
   const [dirty, setDirty] = useState(false)
   const [saved, setSaved] = useState(false)
+  const certIdsKey = srv.wildcard_ssl_cert_ids.join(',')
 
   useEffect(() => {
     setLocalPath(srv.wildcard_ssl_deploy_path)
@@ -153,7 +171,9 @@ function ServerCard({
     setLocalCustomMode(srv.wildcard_ssl_custom_path_enabled)
     setLocalCustomFullchainPath(srv.wildcard_ssl_custom_fullchain_path)
     setLocalCustomPrivkeyPath(srv.wildcard_ssl_custom_privkey_path)
+    setLocalCertIds(srv.wildcard_ssl_cert_ids)
     setDirty(false)
+    // certIdsKey вместо массива: новый массив с теми же id после refetch не сбрасывает правки
   }, [
     srv.wildcard_ssl_deploy_path,
     srv.wildcard_ssl_reload_cmd,
@@ -162,6 +182,7 @@ function ServerCard({
     srv.wildcard_ssl_custom_path_enabled,
     srv.wildcard_ssl_custom_fullchain_path,
     srv.wildcard_ssl_custom_privkey_path,
+    certIdsKey,
   ])
 
   const markDirty = () => {
@@ -175,7 +196,10 @@ function ServerCard({
   const handlePrivkeyNameChange = (val: string) => { setLocalPrivkeyName(val); markDirty() }
   const handleCustomFullchainPathChange = (val: string) => { setLocalCustomFullchainPath(val); markDirty() }
   const handleCustomPrivkeyPathChange = (val: string) => { setLocalCustomPrivkeyPath(val); markDirty() }
+  const handleCertIdsChange = (ids: number[]) => { setLocalCertIds(ids); markDirty() }
   const handleCustomModeToggle = () => {
+    // Свои пути вмещают один сертификат — при включении оставляем первый из выбранных
+    if (!localCustomMode && localCertIds.length > 1) setLocalCertIds(localCertIds.slice(0, 1))
     setLocalCustomMode(prev => !prev)
     markDirty()
   }
@@ -189,22 +213,27 @@ function ServerCard({
       custom_path_enabled: localCustomMode,
       custom_fullchain_path: localCustomFullchainPath,
       custom_privkey_path: localCustomPrivkeyPath,
+      cert_ids: localCertIds,
     })
     setDirty(false)
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
   }
 
-  const basePath = localPath || DEFAULT_DEPLOY_PATH
-  const domain = cert?.base_domain || 'example.com'
-  const folderPath = `${basePath.replace(/\/+$/, '')}/${domain}`
-  const previewFullchain = localCustomMode
-    ? (localCustomFullchainPath || '/etc/pve/local/pveproxy-ssl.pem')
-    : `${folderPath}/${localFullchainName || DEFAULT_FULLCHAIN_NAME}`
-  const previewPrivkey = localCustomMode
-    ? (localCustomPrivkeyPath || '/etc/pve/local/pveproxy-ssl.key')
-    : `${folderPath}/${localPrivkeyName || DEFAULT_PRIVKEY_NAME}`
+  const basePath = (localPath || DEFAULT_DEPLOY_PATH).replace(/\/+$/, '')
+  const selectedCerts = certs.filter(c => localCertIds.includes(c.id))
+  const previewDomains = selectedCerts.length > 0 ? selectedCerts.map(c => c.base_domain) : ['example.com']
+  const previewPairs = localCustomMode
+    ? [[
+        localCustomFullchainPath || '/etc/pve/local/pveproxy-ssl.pem',
+        localCustomPrivkeyPath || '/etc/pve/local/pveproxy-ssl.key',
+      ]]
+    : previewDomains.map(domain => [
+        `${basePath}/${domain}/${localFullchainName || DEFAULT_FULLCHAIN_NAME}`,
+        `${basePath}/${domain}/${localPrivkeyName || DEFAULT_PRIVKEY_NAME}`,
+      ])
   const isEnabled = srv.wildcard_ssl_enabled
+  const linkedCerts = certs.filter(c => srv.wildcard_ssl_cert_ids.includes(c.id))
 
   return (
     <div className={`rounded-xl border transition-all duration-200 ${
@@ -247,13 +276,32 @@ function ServerCard({
           {restricted && (
             <Lock className="w-3.5 h-3.5 text-purple shrink-0 ml-2" />
           )}
-          <ChevronRight className={`w-4 h-4 shrink-0 transition-all duration-200 ${
-            expanded ? 'rotate-90 text-accent-400' : 'text-dark-500 group-hover:text-dark-400'
-          }`} />
+          <span className="flex items-center gap-1.5 ml-auto pl-2 min-w-0">
+            {isEnabled && linkedCerts.length === 0 && certs.length > 0 && (
+              <span className="flex items-center gap-1 text-2xs text-yellow-400 shrink-0">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                {t('wildcard_ssl.server_no_certs')}
+              </span>
+            )}
+            {/* С одним сертификатом в панели подписи лишние — он и так один на всех */}
+            {certs.length > 1 && linkedCerts.map(c => (
+              <span
+                key={c.id}
+                className={`hidden sm:inline text-2xs font-mono px-1.5 py-0.5 rounded truncate ${
+                  isEnabled ? 'bg-dark-700/60 text-dark-300' : 'bg-dark-800/60 text-dark-500'
+                }`}
+              >
+                {c.domain}
+              </span>
+            ))}
+            <ChevronRight className={`w-4 h-4 shrink-0 transition-all duration-200 ${
+              expanded ? 'rotate-90 text-accent-400' : 'text-dark-500 group-hover:text-dark-400'
+            }`} />
+          </span>
         </button>
 
         {/* Deploy button */}
-        {cert && isEnabled && (
+        {linkedCerts.length > 0 && isEnabled && (
           <button
             onClick={e => { e.stopPropagation(); onDeploy(srv.server_id) }}
             disabled={deployingServer === srv.server_id}
@@ -278,6 +326,29 @@ function ServerCard({
             className="overflow-hidden"
           >
             <div className="px-4 pb-4 space-y-3 border-t border-dark-700/40 pt-3">
+              <div className="px-1">
+                <div className="text-xs text-dark-300 font-medium mb-1.5">{t('wildcard_ssl.certificates')}</div>
+                {certs.length === 0 ? (
+                  <p className="text-2xs text-dark-500">{t('wildcard_ssl.no_certs_issued')}</p>
+                ) : (
+                  <>
+                    <CertificateChips
+                      certificates={certs}
+                      selected={localCertIds}
+                      onChange={handleCertIdsChange}
+                      single={localCustomMode}
+                    />
+                    {localCustomMode && localCertIds.length > 1 ? (
+                      <p className="text-2xs text-yellow-400 mt-1.5">{t('wildcard_ssl.custom_path_single_cert')}</p>
+                    ) : (
+                      <p className="text-2xs text-dark-500 mt-1.5">
+                        {localCustomMode ? t('wildcard_ssl.server_certs_custom_hint') : t('wildcard_ssl.server_certs_hint')}
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+
               <div className="flex items-center justify-between gap-3 px-1">
                 <div className="min-w-0">
                   <div className="text-xs text-dark-300 font-medium">{t('wildcard_ssl.custom_path_mode')}</div>
@@ -387,10 +458,14 @@ function ServerCard({
                 </div>
               )}
 
-              <p className="text-2xs text-dark-500 font-mono bg-dark-900/50 px-2.5 py-1.5 rounded-lg break-all">
-                ssl_certificate {previewFullchain};<br />
-                ssl_certificate_key {previewPrivkey};
-              </p>
+              <div className="text-2xs text-dark-500 font-mono bg-dark-900/50 px-2.5 py-1.5 rounded-lg break-all space-y-1">
+                {previewPairs.map(([fullchain, privkey]) => (
+                  <p key={fullchain}>
+                    ssl_certificate {fullchain};<br />
+                    ssl_certificate_key {privkey};
+                  </p>
+                ))}
+              </div>
 
               {dirty && (
                 <motion.div
@@ -451,6 +526,7 @@ const BULK_TEXT_FIELDS: { key: BulkTextFieldKey; labelKey: string; placeholder: 
 // включённое и пустое — сбрасывает значение к дефолту
 function WildcardBulkEditForm({
   count,
+  certs,
   saving,
   onSave,
   onClose,
@@ -459,6 +535,7 @@ function WildcardBulkEditForm({
   t,
 }: {
   count: number
+  certs: WildcardCertificate[]
   saving: boolean
   onSave: (patch: WildcardServerConfigPatch) => void
   onClose: () => void
@@ -467,6 +544,7 @@ function WildcardBulkEditForm({
   t: (key: string, opts?: any) => string
 }) {
   const [customMode, setCustomMode] = useState(KEEP)
+  const [certIds, setCertIds] = useState<{ on: boolean; value: number[] }>({ on: false, value: [] })
   const [texts, setTexts] = useState<Record<BulkTextFieldKey, { on: boolean; value: string }>>(
     () => Object.fromEntries(
       BULK_TEXT_FIELDS.map(f => [f.key, { on: false, value: '' }])
@@ -481,6 +559,7 @@ function WildcardBulkEditForm({
   const handleSubmit = () => {
     const patch: WildcardServerConfigPatch = {}
     if (customMode !== KEEP) patch.wildcard_ssl_custom_path_enabled = customMode === 'on'
+    if (certIds.on) patch.wildcard_ssl_cert_ids = certIds.value
     for (const field of BULK_TEXT_FIELDS) {
       const state = texts[field.key]
       if (state.on) patch[field.key] = state.value.trim()
@@ -514,7 +593,10 @@ function WildcardBulkEditForm({
           <label className="block text-xs text-dark-400 mb-1">{t('wildcard_ssl.custom_path_mode')}</label>
           <select
             value={customMode}
-            onChange={e => setCustomMode(e.target.value)}
+            onChange={e => {
+              setCustomMode(e.target.value)
+              if (e.target.value === 'on') setCertIds(prev => ({ ...prev, value: prev.value.slice(0, 1) }))
+            }}
             className="w-full sm:w-64 px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-dark-200 text-sm focus:outline-none focus:border-accent-500"
           >
             <option value={KEEP}>{t('wildcard_ssl.bulk_keep')}</option>
@@ -522,6 +604,24 @@ function WildcardBulkEditForm({
             <option value="on">{t('wildcard_ssl.bulk_custom_on')}</option>
           </select>
         </div>
+
+        {certs.length > 0 && (
+          <div>
+            <label className="flex items-center gap-2 text-xs text-dark-400 mb-1.5 cursor-pointer w-fit">
+              <Checkbox
+                checked={certIds.on}
+                onChange={() => setCertIds(prev => ({ ...prev, on: !prev.on }))}
+              />
+              {t('wildcard_ssl.certificates')}
+            </label>
+            <CertificateChips
+              certificates={certs}
+              selected={certIds.value}
+              onChange={value => setCertIds({ on: true, value })}
+              single={customMode === 'on'}
+            />
+          </div>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {BULK_TEXT_FIELDS.map(field => {
@@ -583,12 +683,15 @@ export default function WildcardSSL() {
   const { t } = useTranslation()
 
   // Certificate state
-  const [cert, setCert] = useState<WildcardCertificate | null>(null)
+  const [certs, setCerts] = useState<WildcardCertificate[]>([])
+  const [activeCertId, setActiveCertId] = useState<number | null>(null)
+  const [showIssueForm, setShowIssueForm] = useState(false)
   const [certLoading, setCertLoading] = useState(true)
   const [issuing, setIssuing] = useState(false)
   const [renewing, setRenewing] = useState(false)
   const [issueDomain, setIssueDomain] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const cert = certs.find(c => c.id === activeCertId) ?? certs[0] ?? null
 
   // Settings state
   const [settings, setSettings] = useState<WildcardSSLSettings | null>(null)
@@ -626,12 +729,14 @@ export default function WildcardSSL() {
     useBulkStream<WildcardDeployResult>()
 
   // Fetch all data
-  const fetchCert = useCallback(async () => {
+  const fetchCerts = useCallback(async (): Promise<WildcardCertificate[]> => {
     try {
       const res = await wildcardSSLApi.getCertificates()
-      const certs = res.data.certificates
-      setCert(certs.length > 0 ? certs[0] : null)
-    } catch { /* ignore */ } finally {
+      setCerts(res.data.certificates)
+      return res.data.certificates
+    } catch {
+      return []
+    } finally {
       setCertLoading(false)
     }
   }, [])
@@ -667,11 +772,11 @@ export default function WildcardSSL() {
   }, [])
 
   useEffect(() => {
-    fetchCert()
+    fetchCerts()
     fetchSettings()
     fetchServers()
     fetchReloadPresets()
-  }, [fetchCert, fetchSettings, fetchServers, fetchReloadPresets])
+  }, [fetchCerts, fetchSettings, fetchServers, fetchReloadPresets])
 
   useEffect(() => {
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
@@ -680,10 +785,11 @@ export default function WildcardSSL() {
   // Issue certificate
   const handleIssue = async (e: FormEvent) => {
     e.preventDefault()
-    if (!issueDomain.trim()) return
+    const domain = issueDomain.trim()
+    if (!domain) return
     setIssuing(true)
     try {
-      await wildcardSSLApi.issueCertificate({ domain: issueDomain.trim() })
+      await wildcardSSLApi.issueCertificate({ domain })
       pollRef.current = setInterval(async () => {
         try {
           const res = await wildcardSSLApi.getIssueStatus()
@@ -693,7 +799,11 @@ export default function WildcardSSL() {
             setIssuing(false)
             if (res.data.last_result === 'success') {
               toast.success(t('wildcard_ssl.issue_success'))
-              fetchCert()
+              const fresh = await fetchCerts()
+              const issued = fresh.find(c => c.base_domain === domain)
+              if (issued) setActiveCertId(issued.id)
+              setShowIssueForm(false)
+              setIssueDomain('')
             } else {
               toast.error(res.data.last_error || t('wildcard_ssl.issue_error'))
             }
@@ -716,7 +826,7 @@ export default function WildcardSSL() {
     try {
       await wildcardSSLApi.renewCertificate(cert.id)
       toast.success(t('wildcard_ssl.renew_success'))
-      fetchCert()
+      fetchCerts()
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || t('wildcard_ssl.renew_error'))
     } finally {
@@ -740,17 +850,22 @@ export default function WildcardSSL() {
     }
   }
 
+  // Каждый включённый сервер получает закреплённые за ним сертификаты
   const handleDeployAll = async () => {
+    const state = await runDeploy(WILDCARD_DEPLOY_STREAM_URL, { server_ids: null })
+    notifyDeployFinished(state)
+  }
+
+  const handleDeployCert = async () => {
     if (!cert) return
-    const state = await runDeploy(wildcardDeployStreamUrl(cert.id), { server_ids: null })
+    const state = await runDeploy(WILDCARD_DEPLOY_STREAM_URL, { server_ids: null, certificate_id: cert.id })
     notifyDeployFinished(state)
   }
 
   const handleDeployOne = async (serverId: number) => {
-    if (!cert) return
     setDeployingServer(serverId)
     try {
-      const res = await wildcardSSLApi.deployToServer(cert.id, serverId)
+      const res = await wildcardSSLApi.deployToServer(serverId)
       if (res.data.success) {
         toast.success(`${res.data.server_name}: OK`)
       } else {
@@ -764,10 +879,12 @@ export default function WildcardSSL() {
   }
 
   const handleDelete = async () => {
-    if (!cert || !confirm(t('wildcard_ssl.delete_confirm'))) return
+    if (!cert || !confirm(t('wildcard_ssl.delete_confirm', { domain: cert.domain }))) return
     try {
       await wildcardSSLApi.deleteCertificate(cert.id)
-      setCert(null)
+      setActiveCertId(null)
+      fetchCerts()
+      fetchServers()
       toast.success('OK')
     } catch {
       toast.error('Delete failed')
@@ -845,6 +962,7 @@ export default function WildcardSSL() {
       wildcard_ssl_custom_path_enabled: data.custom_path_enabled,
       wildcard_ssl_custom_fullchain_path: data.custom_fullchain_path,
       wildcard_ssl_custom_privkey_path: data.custom_privkey_path,
+      wildcard_ssl_cert_ids: data.cert_ids,
     }
     try {
       await wildcardSSLApi.updateServer(serverId, payload)
@@ -856,14 +974,12 @@ export default function WildcardSSL() {
     }
   }
 
-  const certDaysColor = (days: number | null) => {
-    if (days === null) return 'text-dark-400'
-    if (days <= 0) return 'text-red-400'
-    if (days <= 14) return 'text-yellow-400'
-    return 'text-green-400'
-  }
-
   const enabledCount = servers.filter(s => s.wildcard_ssl_enabled).length
+  const certServerCount = cert
+    ? servers.filter(s => s.wildcard_ssl_enabled && s.wildcard_ssl_cert_ids.includes(cert.id)).length
+    : 0
+  const panelCovered = !!settings?.panel_domain
+    && certs.some(c => wildcardCoversDomain(c.base_domain, settings.panel_domain))
 
   const groupedServers = useMemo(() => {
     const folders = new Map<string, WildcardServerConfig[]>()
@@ -979,12 +1095,11 @@ export default function WildcardSSL() {
   }
 
   const handleBulkDeploy = async () => {
-    if (!cert) return
     if (eligibleIds.length === 0) {
       toast.error(t('wildcard_ssl.bulk_deploy_blocked', { count: blockedCount }))
       return
     }
-    const state = await runDeploy(wildcardDeployStreamUrl(cert.id), { server_ids: eligibleIds })
+    const state = await runDeploy(WILDCARD_DEPLOY_STREAM_URL, { server_ids: eligibleIds })
     notifyDeployFinished(state)
   }
 
@@ -992,7 +1107,7 @@ export default function WildcardSSL() {
     <ServerCard
       key={srv.server_id}
       srv={srv}
-      cert={cert}
+      certs={certs}
       deployingServer={deployingServer}
       expanded={expandedServers.includes(srv.server_id)}
       selected={selectedIds.includes(srv.server_id)}
@@ -1048,7 +1163,7 @@ export default function WildcardSSL() {
         className="card group hover:border-dark-700 transition-all">
         <div className="flex items-center gap-2 mb-4">
           <Globe className="w-5 h-5 text-accent-400" />
-          <h2 className="text-lg font-semibold text-dark-100">{t('wildcard_ssl.certificate')}</h2>
+          <h2 className="text-lg font-semibold text-dark-100">{t('wildcard_ssl.certificates')}</h2>
           <FAQIcon screen="WILDCARD_SSL_ACME" size="sm" />
         </div>
 
@@ -1056,83 +1171,142 @@ export default function WildcardSSL() {
           <div className="flex items-center justify-center py-8">
             <Loader2 className="w-6 h-6 text-accent-400 animate-spin" />
           </div>
-        ) : cert ? (
-          <div className="space-y-4">
-            <div className="p-4 bg-dark-800/50 rounded-xl border border-dark-700/50">
-              <div className="flex items-center justify-between flex-wrap gap-3">
-                <div>
-                  <div className="text-lg font-mono text-dark-100">{cert.domain}</div>
-                  <div className="text-sm text-dark-400 mt-1">
-                    {t('wildcard_ssl.expires')}: {cert.expiry_date ? new Date(cert.expiry_date).toLocaleDateString() : '—'}
-                    <span className={`ml-2 font-medium ${certDaysColor(cert.days_left)}`}>
-                      {cert.days_left !== null
-                        ? cert.days_left <= 0
-                          ? t('wildcard_ssl.expired')
-                          : t('wildcard_ssl.days_left', { days: cert.days_left })
-                        : ''}
-                    </span>
-                  </div>
-                  {cert.last_renewed && (
-                    <div className="text-xs text-dark-500 mt-1">
-                      {t('wildcard_ssl.renew')}: {new Date(cert.last_renewed).toLocaleDateString()}
-                    </div>
-                  )}
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button onClick={handleRenew} disabled={renewing}
-                    className="px-3 py-1.5 bg-accent-500/20 text-accent-400 rounded-lg text-sm hover:bg-accent-500/30 transition-colors disabled:opacity-50 flex items-center gap-1.5">
-                    {renewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                    {renewing ? t('wildcard_ssl.renewing') : t('wildcard_ssl.renew')}
-                  </button>
-                  <button onClick={handleDeployAll} disabled={deployProgress.active || enabledCount === 0}
-                    className="px-3 py-1.5 bg-blue-500/20 text-blue-400 rounded-lg text-sm hover:bg-blue-500/30 transition-colors disabled:opacity-50 flex items-center gap-1.5">
-                    {deployProgress.active ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-                    {deployProgress.active ? t('wildcard_ssl.deploying') : t('wildcard_ssl.deploy_all')}
-                  </button>
-                  <button onClick={handleDelete}
-                    className="px-3 py-1.5 bg-red-500/20 text-red-400 rounded-lg text-sm hover:bg-red-500/30 transition-colors flex items-center gap-1.5">
-                    <Trash2 className="w-4 h-4" />
-                    {t('wildcard_ssl.delete')}
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* key по времени выпуска: после продления компонент пересоздаётся и не отдаёт старый PEM */}
-            <CertificateMaterials
-              key={cert.last_renewed || cert.issued_at || cert.id}
-              certId={cert.id}
-            />
-          </div>
         ) : (
-          <form onSubmit={handleIssue} className="space-y-4">
-            <p className="text-dark-400 text-sm">{t('wildcard_ssl.no_certificate')}</p>
-            {!settings?.cloudflare_api_token_set && (
-              <div className="flex items-start gap-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
-                <Info className="w-4 h-4 text-yellow-400 mt-0.5 shrink-0" />
-                <span className="text-xs text-yellow-300">{t('wildcard_ssl.issue_prereq')}</span>
+          <div className="space-y-4">
+            {certs.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {certs.map(c => {
+                  const active = !showIssueForm && c.id === cert?.id
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => { setActiveCertId(c.id); setShowIssueForm(false) }}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-mono transition-colors ${
+                        active
+                          ? 'border-accent-500/50 bg-accent-500/10 text-accent-300'
+                          : 'border-dark-700/50 bg-dark-800/50 text-dark-300 hover:text-dark-100'
+                      }`}
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${certDotColor(c.days_left)}`} />
+                      {c.domain}
+                    </button>
+                  )
+                })}
+                <button
+                  type="button"
+                  onClick={() => setShowIssueForm(true)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-dashed text-sm transition-colors ${
+                    showIssueForm
+                      ? 'border-accent-500/50 bg-accent-500/10 text-accent-300'
+                      : 'border-dark-700 text-dark-400 hover:text-dark-100'
+                  }`}
+                >
+                  {issuing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                  {t('wildcard_ssl.add_certificate')}
+                </button>
               </div>
             )}
-            <div>
-              <label className="block text-sm text-dark-300 mb-1">{t('wildcard_ssl.domain_label')}</label>
-              <input
-                type="text"
-                value={issueDomain}
-                onChange={e => setIssueDomain(e.target.value)}
-                placeholder={t('wildcard_ssl.domain_placeholder')}
-                className="w-full sm:w-80 px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500"
-              />
-              <p className="text-xs text-dark-500 mt-1">{t('wildcard_ssl.domain_hint')}</p>
-            </div>
-            <div className="flex items-center gap-3">
-              <button type="submit" disabled={issuing || !issueDomain.trim() || !settings?.cloudflare_api_token_set}
-                className="px-4 py-2 bg-accent-500 text-white rounded-lg hover:bg-accent-600 transition-colors disabled:opacity-50 flex items-center gap-2">
-                {issuing ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
-                {issuing ? t('wildcard_ssl.issuing') : t('wildcard_ssl.issue_new')}
-              </button>
-              {issuing && <span className="text-xs text-dark-500">{t('wildcard_ssl.dns_note')}</span>}
-            </div>
-          </form>
+
+            {cert && !showIssueForm ? (
+              <>
+                <div className="p-4 bg-dark-800/50 rounded-xl border border-dark-700/50">
+                  <div className="flex items-center justify-between flex-wrap gap-3">
+                    <div>
+                      <div className="text-lg font-mono text-dark-100">{cert.domain}</div>
+                      <div className="text-sm text-dark-400 mt-1">
+                        {t('wildcard_ssl.expires')}: {cert.expiry_date ? new Date(cert.expiry_date).toLocaleDateString() : '—'}
+                        <span className={`ml-2 font-medium ${certDaysColor(cert.days_left)}`}>
+                          {cert.days_left !== null
+                            ? cert.days_left <= 0
+                              ? t('wildcard_ssl.expired')
+                              : t('wildcard_ssl.days_left', { days: cert.days_left })
+                            : ''}
+                        </span>
+                      </div>
+                      {cert.last_renewed && (
+                        <div className="text-xs text-dark-500 mt-1">
+                          {t('wildcard_ssl.renew')}: {new Date(cert.last_renewed).toLocaleDateString()}
+                        </div>
+                      )}
+                      <div className={`text-xs mt-1 flex items-center gap-1 ${
+                        certServerCount === 0 ? 'text-yellow-400' : 'text-dark-500'
+                      }`}>
+                        <Server className="w-3.5 h-3.5" />
+                        {certServerCount === 0
+                          ? t('wildcard_ssl.cert_no_servers')
+                          : t('wildcard_ssl.cert_servers', { count: certServerCount })}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button onClick={handleRenew} disabled={renewing}
+                        className="px-3 py-1.5 bg-accent-500/20 text-accent-400 rounded-lg text-sm hover:bg-accent-500/30 transition-colors disabled:opacity-50 flex items-center gap-1.5">
+                        {renewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                        {renewing ? t('wildcard_ssl.renewing') : t('wildcard_ssl.renew')}
+                      </button>
+                      <button onClick={handleDeployCert} disabled={deployProgress.active || certServerCount === 0}
+                        className="px-3 py-1.5 bg-blue-500/20 text-blue-400 rounded-lg text-sm hover:bg-blue-500/30 transition-colors disabled:opacity-50 flex items-center gap-1.5">
+                        {deployProgress.active ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                        {deployProgress.active ? t('wildcard_ssl.deploying') : t('wildcard_ssl.deploy_cert')}
+                      </button>
+                      <button onClick={handleDelete}
+                        className="px-3 py-1.5 bg-red-500/20 text-red-400 rounded-lg text-sm hover:bg-red-500/30 transition-colors flex items-center gap-1.5">
+                        <Trash2 className="w-4 h-4" />
+                        {t('wildcard_ssl.delete')}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* key по сертификату и времени выпуска: при переключении и после продления
+                    компонент пересоздаётся и не показывает PEM другого или старого сертификата */}
+                <CertificateMaterials
+                  key={`${cert.id}-${cert.last_renewed || cert.issued_at}`}
+                  certId={cert.id}
+                />
+              </>
+            ) : (
+              <form onSubmit={handleIssue} className="space-y-4">
+                {certs.length === 0 && (
+                  <p className="text-dark-400 text-sm">{t('wildcard_ssl.no_certificate')}</p>
+                )}
+                {!settings?.cloudflare_api_token_set && (
+                  <div className="flex items-start gap-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+                    <Info className="w-4 h-4 text-yellow-400 mt-0.5 shrink-0" />
+                    <span className="text-xs text-yellow-300">{t('wildcard_ssl.issue_prereq')}</span>
+                  </div>
+                )}
+                <div>
+                  <label className="block text-sm text-dark-300 mb-1">{t('wildcard_ssl.domain_label')}</label>
+                  <input
+                    type="text"
+                    value={issueDomain}
+                    onChange={e => setIssueDomain(e.target.value)}
+                    placeholder={t('wildcard_ssl.domain_placeholder')}
+                    className="w-full sm:w-80 px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500"
+                  />
+                  <p className="text-xs text-dark-500 mt-1">{t('wildcard_ssl.domain_hint')}</p>
+                  {certs.length > 0 && (
+                    <p className="text-xs text-dark-500 mt-1">{t('wildcard_ssl.issue_more_hint')}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button type="submit" disabled={issuing || !issueDomain.trim() || !settings?.cloudflare_api_token_set}
+                    className="px-4 py-2 bg-accent-500 text-white rounded-lg hover:bg-accent-600 transition-colors disabled:opacity-50 flex items-center gap-2">
+                    {issuing ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+                    {issuing ? t('wildcard_ssl.issuing') : t('wildcard_ssl.issue_new')}
+                  </button>
+                  {certs.length > 0 && !issuing && (
+                    <button type="button" onClick={() => setShowIssueForm(false)}
+                      className="px-4 py-2 text-dark-400 hover:text-dark-200 rounded-lg transition-colors">
+                      {t('common.cancel')}
+                    </button>
+                  )}
+                  {issuing && <span className="text-xs text-dark-500">{t('wildcard_ssl.dns_note')}</span>}
+                </div>
+              </form>
+            )}
+          </div>
         )}
       </motion.div>
 
@@ -1244,11 +1418,11 @@ export default function WildcardSSL() {
                 <Info className="w-3.5 h-3.5 shrink-0" />
                 {t('wildcard_ssl.use_for_panel_hint')}
               </p>
-              {useForPanel && cert && !!settings?.panel_domain && !wildcardCoversDomain(cert.base_domain, settings.panel_domain) && (
+              {useForPanel && certs.length > 0 && !!settings?.panel_domain && !panelCovered && (
                 <div className="flex items-start gap-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
                   <Info className="w-4 h-4 text-yellow-400 mt-0.5 shrink-0" />
                   <span className="text-xs text-yellow-300">
-                    {t('wildcard_ssl.use_for_panel_not_covered', { cert: cert.domain, domain: settings.panel_domain })}
+                    {t('wildcard_ssl.use_for_panel_not_covered', { domain: settings.panel_domain })}
                   </span>
                 </div>
               )}
@@ -1276,7 +1450,7 @@ export default function WildcardSSL() {
               </span>
             )}
           </div>
-          {cert && enabledCount > 0 && (
+          {certs.length > 0 && enabledCount > 0 && (
             <button onClick={handleDeployAll} disabled={deployProgress.active}
               className="px-3 py-1.5 bg-blue-500/20 text-blue-400 rounded-lg text-sm hover:bg-blue-500/30 transition-colors disabled:opacity-50 flex items-center gap-1.5">
               {deployProgress.active ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
@@ -1363,7 +1537,7 @@ export default function WildcardSSL() {
                       <ToggleLeft className="w-4 h-4" />
                       {t('wildcard_ssl.bulk_disable')}
                     </button>
-                    {cert && (
+                    {certs.length > 0 && (
                       <button
                         onClick={handleBulkDeploy}
                         disabled={eligibleIds.length === 0 || deployProgress.active}
@@ -1399,6 +1573,7 @@ export default function WildcardSSL() {
               {showBulkEdit && selectedIds.length > 0 && (
                 <WildcardBulkEditForm
                   count={selectedIds.length}
+                  certs={certs}
                   saving={bulkSaving}
                   onSave={handleBulkEditSave}
                   onClose={() => setShowBulkEdit(false)}

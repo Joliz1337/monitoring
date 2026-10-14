@@ -156,6 +156,8 @@ class DeployRequest(BaseModel):
     dnat_profile_id: Optional[int] = None
     wildcard_ssl_enabled: bool = False
     wildcard_ssl_reload_cmd: Optional[str] = Field(None, max_length=512)
+    # Какие wildcard-сертификаты закрепить за сервером; None — все выпущенные
+    wildcard_ssl_cert_ids: Optional[list[int]] = None
     remnawave_nginx_profile_id: Optional[int] = None
     remnawave_nginx_domain: Optional[str] = None
     # Одноразовый персональный сертификат вместо общего ключа парка:
@@ -347,6 +349,7 @@ async def deploy_server(
         dnat_profile_id=req.dnat_profile_id,
         wildcard_ssl_enabled=req.wildcard_ssl_enabled,
         wildcard_ssl_reload_cmd=(req.wildcard_ssl_reload_cmd or "").strip() or None,
+        wildcard_ssl_cert_ids=req.wildcard_ssl_cert_ids,
         remnawave_nginx_profile_id=(
             req.remnawave_nginx_profile_id if req.install_remnawave else None
         ),

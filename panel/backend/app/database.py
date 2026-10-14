@@ -237,6 +237,7 @@ async def run_migrations(conn):
             ("location", "VARCHAR(40)"),
             ("location_name", "VARCHAR(200)"),
             ("sni_from_config", "BOOLEAN DEFAULT FALSE"),
+            ("speed_server", "VARCHAR(40)"),
         ):
             if col_name in xray_test_columns:
                 continue
@@ -1910,6 +1911,33 @@ async def _migrate_cloud_billing(conn):
         logger.warning(f"Could not convert yandex_cloud billing rows: {e}")
 
 
+# Остаток VK Cloud раньше включал бонусы: старые снимки истории выше новых на сумму
+# бонусов, и этот скачок посчитался бы расходом. Метка — чтобы сбросить один раз.
+VK_PERSONAL_BALANCE_MARKER = "migration_vk_cloud_personal_balance"
+
+
+async def _migrate_vk_cloud_personal_balance(conn):
+    try:
+        done = await conn.execute(
+            text("SELECT 1 FROM panel_settings WHERE key = :key"),
+            {"key": VK_PERSONAL_BALANCE_MARKER},
+        )
+        if done.first():
+            return
+        await conn.execute(text("""
+            UPDATE billing_servers
+            SET cloud_balance_history = NULL, cloud_daily_cost = NULL
+            WHERE cloud_provider = 'vk_cloud'
+        """))
+        await conn.execute(
+            text("INSERT INTO panel_settings (key, value) VALUES (:key, '1')"),
+            {"key": VK_PERSONAL_BALANCE_MARKER},
+        )
+        logger.info("Reset VK Cloud balance history: balance no longer includes bonuses")
+    except Exception as e:
+        logger.warning(f"Could not reset VK Cloud balance history: {e}")
+
+
 async def _migrate_wildcard_ssl(conn):
     # Колонки wildcard SSL в servers
     result = await conn.execute(text("""
@@ -1938,6 +1966,34 @@ async def _migrate_wildcard_ssl(conn):
             except Exception as e:
                 if "already exists" not in str(e).lower():
                     logger.warning(f"Could not add servers.{col_name}: {e}")
+
+
+# Сертификат раскатывается только на закреплённые за ним серверы. Без привязок
+# уже выпущенный сертификат после обновления не доехал бы ни до одной ноды —
+# закрепляем существующие сертификаты за всеми серверами один раз.
+WILDCARD_CERT_LINKS_MARKER = "migration_wildcard_cert_links"
+
+
+async def _migrate_wildcard_cert_links(conn):
+    try:
+        done = await conn.execute(
+            text("SELECT 1 FROM panel_settings WHERE key = :key"),
+            {"key": WILDCARD_CERT_LINKS_MARKER},
+        )
+        if done.first():
+            return
+        await conn.execute(text("""
+            INSERT INTO server_wildcard_certificates (server_id, certificate_id)
+            SELECT s.id, c.id FROM servers s CROSS JOIN wildcard_certificates c
+            ON CONFLICT DO NOTHING
+        """))
+        await conn.execute(
+            text("INSERT INTO panel_settings (key, value) VALUES (:key, '1')"),
+            {"key": WILDCARD_CERT_LINKS_MARKER},
+        )
+        logger.info("Linked existing wildcard certificates to all servers")
+    except Exception as e:
+        logger.warning(f"Could not link wildcard certificates to servers: {e}")
 
 
 async def _migrate_aggregated_metrics_unique(conn):
@@ -2271,7 +2327,9 @@ async def init_db():
         await _migrate_remnawave_ephemeral_ips(conn)
         await _migrate_hwid_user_id(conn)
         await _migrate_cloud_billing(conn)
+        await _migrate_vk_cloud_personal_balance(conn)
         await _migrate_wildcard_ssl(conn)
+        await _migrate_wildcard_cert_links(conn)
         await _migrate_aggregated_metrics_unique(conn)
         await _migrate_bigint_pk_ids(conn)
         await _migrate_drop_redundant_indexes(conn)

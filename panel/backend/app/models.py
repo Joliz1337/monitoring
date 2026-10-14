@@ -1118,6 +1118,16 @@ class WildcardCertificate(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class ServerWildcardCertificate(Base):
+    """Какие wildcard-сертификаты раскатываются на сервер."""
+    __tablename__ = "server_wildcard_certificates"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    certificate_id = Column(
+        Integer, ForeignKey("wildcard_certificates.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
 # ==================== Traffic Accounting ====================
 
 class ServerTraffic(Base):
@@ -1257,6 +1267,7 @@ class XrayTestResult(Base):
     handshake_ms = Column(Float, nullable=True)
     tcp_min_ms = Column(Float, nullable=True)
     speed_mbps = Column(Float, nullable=True)
+    speed_server = Column(String(40), nullable=True)
     exit_ip = Column(String(64), nullable=True)
     exit_country = Column(String(8), nullable=True)
     sni_from_config = Column(Boolean, default=False)

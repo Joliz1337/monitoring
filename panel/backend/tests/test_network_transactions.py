@@ -27,6 +27,7 @@ try:
         MIN_NODE_VERSION_NETWORK_GATEWAY,
         MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL,
         MIN_NODE_VERSION_NETWORK_LINK_UP,
+        MIN_NODE_VERSION_NETWORK_NIC_ROUTING,
         ROLLBACK_TIMEOUT_SEC,
         JobPhase,
         LinkUpUnsupportedError,
@@ -44,6 +45,7 @@ try:
         node_supports_link_up,
         node_supports_network,
         node_supports_network_gateway,
+        node_supports_nic_routing,
         parse_deadline,
         present_on_interface,
         start_apply,
@@ -116,6 +118,13 @@ class InterfaceFilterTests(unittest.TestCase):
         self.assertTrue(node_supports_hoster_removal(MIN_NODE_VERSION_NETWORK_HOSTER_REMOVAL))
         self.assertFalse(node_supports_hoster_removal("10.30.9"))
         self.assertFalse(node_supports_hoster_removal(None))
+
+
+class NicRoutingGateTests(unittest.TestCase):
+    def test_gate(self):
+        self.assertTrue(node_supports_nic_routing(MIN_NODE_VERSION_NETWORK_NIC_ROUTING))
+        self.assertFalse(node_supports_nic_routing("10.32.1"))
+        self.assertFalse(node_supports_nic_routing(None))
 
 
 class LinkUpGateTests(unittest.TestCase):

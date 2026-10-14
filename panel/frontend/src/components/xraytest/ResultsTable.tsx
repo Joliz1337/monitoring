@@ -299,6 +299,7 @@ function ServerCard({
         <span className="hidden md:flex items-center gap-4 text-[13px] shrink-0">
           <Metric label={t('xray_test.col_tcp')} value={ms(best(group.cells, c => c.tcp_min_ms))} />
           <Metric label={t('xray_test.best_rtt')} value={ms(best(group.cells, c => c.rtt_ms))} />
+          <SpeedMetric cells={group.cells} />
         </span>
 
         <span className="text-[13px] text-dark-400 shrink-0 tabular-nums">
@@ -376,6 +377,7 @@ function LocationBlock({
         <span className="hidden md:flex items-center gap-4 text-[13px] shrink-0">
           <Metric label={t('xray_test.col_tcp')} value={ms(best(group.cells, c => c.tcp_min_ms))} />
           <Metric label={t('xray_test.best_rtt')} value={ms(best(group.cells, c => c.rtt_ms))} />
+          <SpeedMetric cells={group.cells} />
         </span>
 
         <span className="text-[13px] text-dark-400 shrink-0 tabular-nums">
@@ -459,7 +461,11 @@ function CheckList({ cells, openCells, onToggleCell, groupBySni }: {
                 <Metric label={t('xray_test.col_handshake')} value={ms(cell.handshake_ms)} />
                 <Metric label={t('xray_test.col_rtt')} value={ms(cell.rtt_ms)} />
                 {cell.speed_mbps ? (
-                  <Metric label={t('xray_test.col_speed')} value={cell.speed_mbps.toFixed(1)} />
+                  <Tooltip label={`${t('xray_test.speed_server')}: ${cell.speed_server ?? '—'}`}>
+                    <span>
+                      <Metric label={t('xray_test.col_speed')} value={cell.speed_mbps.toFixed(1)} />
+                    </span>
+                  </Tooltip>
                 ) : null}
               </span>
 
@@ -528,10 +534,24 @@ function CellDetails({ cell }: { cell: XrayTestCell }) {
           label={t('xray_test.col_location')}
           value={cell.location_name || t('xray_test.location_panel')}
         />
+        {cell.speed_server && (
+          <Detail label={t('xray_test.speed_server')} value={cell.speed_server} />
+        )}
       </div>
       {cell.tls && <TlsBlock tls={cell.tls} />}
     </div>
   )
+}
+
+// Лучшая скорость группы — чтобы сравнивать ключи, не раскрывая каждый.
+// Без замера в прогоне метрики нет совсем, а не прочерк в каждой строке.
+function SpeedMetric({ cells }: { cells: XrayTestCell[] }) {
+  const { t } = useTranslation()
+  const speeds = cells
+    .map(cell => cell.speed_mbps)
+    .filter((value): value is number => typeof value === 'number' && value > 0)
+  if (!speeds.length) return null
+  return <Metric label={t('xray_test.col_speed')} value={Math.max(...speeds).toFixed(1)} />
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

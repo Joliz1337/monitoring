@@ -354,16 +354,17 @@ class VkCloudProviderTests(unittest.TestCase):
     def _fetch(self, client, login="user@example.com", account_id="b5b7ffd4ef05"):
         return asyncio.run(VkCloudProvider().fetch(client, "secret", account_id, login))
 
-    def test_balance_sums_personal_and_bonus_accounts(self):
+    def test_balance_is_personal_account_without_bonuses(self):
+        # Проект заморожен при минусе на лицевом счёте, хотя бонусов ещё тысячи
         client = FakeVkClient({
             VK_TOKEN: keystone_token_response(),
-            VK_BALANCE: FakeVkResponse(200, {"base": 1200.5, "bonus": 300}),
+            VK_BALANCE: FakeVkResponse(200, {"base": -168.82, "bonus": 2757.69}),
             VK_REPORT: FakeVkResponse(200, {"items": []}),
         })
 
         snapshot = self._fetch(client)
 
-        self.assertEqual(snapshot.balance, 1500.5)
+        self.assertEqual(snapshot.balance, -168.82)
         self.assertEqual(snapshot.currency, "RUB")
         self.assertIsNone(snapshot.daily_cost)
 
@@ -393,7 +394,7 @@ class VkCloudProviderTests(unittest.TestCase):
 
         self.assertEqual(self._fetch(client).balance, 1)
 
-    def test_daily_cost_averages_money_and_bonus_over_reported_days(self):
+    def test_daily_cost_averages_money_over_reported_days(self):
         client = FakeVkClient({
             VK_TOKEN: keystone_token_response(),
             VK_BALANCE: FakeVkResponse(200, {"base": 900, "bonus": 0}),
@@ -406,7 +407,7 @@ class VkCloudProviderTests(unittest.TestCase):
 
         snapshot = self._fetch(client)
 
-        self.assertEqual(snapshot.daily_cost, 55.0)
+        self.assertEqual(snapshot.daily_cost, 50.25)
         params = client.calls[2]["params"]
         self.assertEqual(params["timezone"], "Europe/Moscow")
         self.assertLess(params["date_from"], params["date_to"])
@@ -447,6 +448,9 @@ class VkCloudProviderTests(unittest.TestCase):
         self.assertIsNone(_average_daily_spend(None))
         self.assertIsNone(_average_daily_spend([{"money": "5"}]))
         self.assertEqual(_average_daily_spend([report_item("2026-10-01", "7", "bad")]), 7.0)
+
+    def test_spending_covered_by_bonuses_is_not_a_cost(self):
+        self.assertIsNone(_average_daily_spend([report_item("2026-10-01", "0", "30")]))
 
 
 def consumption_row(amount_nds: float, is_delete: bool = False):

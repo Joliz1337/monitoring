@@ -22,6 +22,7 @@ from app.services.ipset_manager import get_ipset_manager
 from app.services.dnat_manager import get_dnat_manager
 from app.services.bandwidth_limit import get_bandwidth_limiter
 from app.services.extra_ips import get_extra_ip_manager
+from app.services.nic_routing import get_nic_routing_manager
 from app.services.exit_proxy.manager import get_exit_proxy_manager
 from app.services.source_pool import get_source_pool_manager
 from app.services.loss_probe import get_loss_probe
@@ -89,6 +90,11 @@ async def lifespan(app: FastAPI):
         await extra_ip_manager.start()
     except Exception as e:
         logger.error(f"Extra IP manager start failed, a stale transaction may stay pending: {e}", exc_info=True)
+
+    try:
+        await get_nic_routing_manager().start()
+    except Exception as e:
+        logger.error(f"NIC routing start failed, the host service may run an outdated script: {e}", exc_info=True)
 
     exit_proxy_manager = get_exit_proxy_manager()
     try:

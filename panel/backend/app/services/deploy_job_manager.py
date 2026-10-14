@@ -71,6 +71,7 @@ class PostDeployOptions:
     dnat_profile_id: Optional[int] = None
     wildcard_ssl_enabled: bool = False
     wildcard_ssl_reload_cmd: Optional[str] = None
+    wildcard_ssl_cert_ids: Optional[list[int]] = None
     remnawave_nginx_profile_id: Optional[int] = None
     remnawave_nginx_domain: Optional[str] = None
     dedicated_cert: bool = False
@@ -531,7 +532,7 @@ class DeployJobManager:
         server_id: int,
         post_opts: PostDeployOptions,
     ) -> None:
-        """Включение сервера в Wildcard SSL и раскатка действующего сертификата.
+        """Включение сервера в Wildcard SSL и раскатка выбранных сертификатов.
         Best-effort: настройки сохраняются в любом случае, раскатку можно повторить
         со страницы Wildcard SSL."""
         if not post_opts.wildcard_ssl_enabled:
@@ -540,7 +541,9 @@ class DeployJobManager:
         # Ленивые импорты — как в _bind_profiles, чтобы не тянуть на уровне модуля
         from app.models import WildcardCertificate
         from app.services.node_capabilities import Capability, server_allows
-        from app.services.wildcard_ssl import get_wildcard_ssl_manager
+        from app.services.wildcard_ssl import (
+            get_wildcard_ssl_manager, linked_certificates, replace_certificate_links,
+        )
 
         try:
             async with async_session_maker() as db:
@@ -551,15 +554,18 @@ class DeployJobManager:
                 server.wildcard_ssl_enabled = True
                 if post_opts.wildcard_ssl_reload_cmd:
                     server.wildcard_ssl_reload_cmd = post_opts.wildcard_ssl_reload_cmd
+                cert_ids = post_opts.wildcard_ssl_cert_ids
+                if cert_ids is None:
+                    cert_ids = list((await db.execute(select(WildcardCertificate.id))).scalars().all())
+                await replace_certificate_links(db, [server_id], cert_ids)
                 # Коммит до раскатки: deploy_to_node читает команду из объекта сервера
                 await db.commit()
 
-                cert = (await db.execute(
-                    select(WildcardCertificate).order_by(WildcardCertificate.id)
-                )).scalars().first()
+                linked = (await linked_certificates(db, [server_id])).get(server_id, [])
             self._log(job, "[panel] Сервер включён в Wildcard SSL")
 
-            if not cert or _wildcard_cert_expired(cert):
+            valid = [c for c in linked if not _wildcard_cert_expired(c)]
+            if not valid:
                 self._log(job, "[panel] Действующего wildcard-сертификата нет — "
                                "раскатайте его позже со страницы Wildcard SSL")
                 return
@@ -567,7 +573,7 @@ class DeployJobManager:
                 self._log(job, "[panel] Нода закрыла раздел SSL — раскатка сертификата пропущена")
                 return
 
-            result = await get_wildcard_ssl_manager().deploy_to_node(cert, server)
+            result = await get_wildcard_ssl_manager().deploy_to_node(server, valid)
             if result.get("success"):
                 self._log(job, "[panel] Wildcard-сертификат раскатан")
             else:

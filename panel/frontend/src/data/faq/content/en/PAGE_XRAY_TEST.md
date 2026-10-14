@@ -36,13 +36,13 @@ Why it matters:
 
 The probe sends nothing through the proxy and costs almost no time, so it can stay on permanently.
 
-**Measure link speed.** Downloads a ~10 MB test file through the proxy and computes megabits per second. Off by default: it takes noticeably longer and spends traffic on every check. Turn it on when suitability of the channel matters, not just liveness.
+**Measure link speed.** Measures download through the proxy like a speed test: 8 seconds in 8 streams with no volume cap, which lets it handle links up to 10 Gbit/s. The main method is iperf3: the panel runs it through the key to a public iperf3 server (hostkey or Dom.ru for an exit in Russia, Leaseweb in Amsterdam or Frankfurt for other countries) and moves to the next one if a server is busy. If iperf3 doesn't work out, the speed is measured by downloading files from Selectel, the Yandex mirror, Cloudflare or OVH — file sites give a single address no more than 2–6 Gbit/s. Hover the speed or open the check details to see how and to which server it was measured. Keys are speed-tested one at a time so downloads don't share the link. That makes the run noticeably longer, and the traffic spent is whatever the key pushes in 8 seconds: about 1 GB at 1 Gbit/s, about 10 GB at 10 Gbit/s. The speed can't exceed the link of the panel or node the check runs from, and is bound by its CPU: on a virtual machine without AES-NI (CPU type "kvm64" in Proxmox) a gRPC key won't show more than ~500 Mbit/s. Off by default: turn it on when suitability of the channel matters, not just liveness.
 
 ## How results are laid out
 
 Results are stacked in three levels:
 
-1. **Configuration** — the key's name and address, best ping, best latency and a counter like "2/6": how many checks passed out of how many. The verdict is the best of what it contains: if at least one SNI works, the configuration is usable. The same address coming from different subscription profiles stays as separate rows, because those are different keys.
+1. **Configuration** — the key's name and address, best ping, best latency, best speed (if measured) and a counter like "2/6": how many checks passed out of how many. The verdict is the best of what it contains: if at least one SNI works, the configuration is usable. The same address coming from different subscription profiles stays as separate rows, because those are different keys.
 2. **Where it ran** — the panel or a specific node. Always shown; a single location is expanded right away.
 3. **SNI** — the check itself with its metrics. Expand it for the failure reason, the hint and the core's verbatim answer.
 

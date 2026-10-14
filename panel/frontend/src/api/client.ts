@@ -646,6 +646,7 @@ export interface XrayTestCell {
   handshake_ms: number | null
   rtt_ms: number | null
   speed_mbps: number | null
+  speed_server: string | null
   tls: {
     reachable: boolean
     issuer: string | null
@@ -1115,6 +1116,8 @@ export const proxyApi = {
     api.post<NetworkJobSnapshot>(`/proxy/${serverId}/network/apply`, data, { timeout: 45000 }),
   rollbackNetworkTransaction: (serverId: number, transaction_id: string) =>
     api.post<{ success: boolean; status: string | null; message: string }>(`/proxy/${serverId}/network/rollback`, { transaction_id }, { timeout: 45000 }),
+  setNicRouting: (serverId: number, enabled: boolean) =>
+    api.post<NicRoutingState>(`/proxy/${serverId}/network/nic-routing`, { enabled }, { timeout: 45000 }),
 
   // DNAT (проброс портов через iptables nat)
   getDnatState: (serverId: number) => api.get<DnatNodeState>(`/proxy/${serverId}/dnat/state`),
@@ -2590,6 +2593,7 @@ export interface WildcardServerConfig {
   wildcard_ssl_custom_path_enabled: boolean
   wildcard_ssl_custom_fullchain_path: string
   wildcard_ssl_custom_privkey_path: string
+  wildcard_ssl_cert_ids: number[]
 }
 
 export interface WildcardDeployResult {
@@ -2612,9 +2616,9 @@ export interface WildcardReloadCmdPreset {
   command: string
 }
 
-// Стриминговый деплой не идёт через axios — нужен полный путь с /api для fetch
-export const wildcardDeployStreamUrl = (certId: number) =>
-  `/api/wildcard-ssl/certificates/${certId}/deploy/stream`
+// Стриминговый деплой не идёт через axios — нужен полный путь с /api для fetch.
+// Тело: { server_ids: number[] | null, certificate_id?: number }
+export const WILDCARD_DEPLOY_STREAM_URL = '/api/wildcard-ssl/deploy/stream'
 
 export const wildcardSSLApi = {
   getCertificates: () =>
@@ -2629,8 +2633,8 @@ export const wildcardSSLApi = {
     api.get<WildcardCertificateMaterial>(`/wildcard-ssl/certificates/${id}/pem`),
   deleteCertificate: (id: number) =>
     api.delete(`/wildcard-ssl/certificates/${id}`),
-  deployToServer: (id: number, serverId: number) =>
-    api.post<WildcardDeployResult>(`/wildcard-ssl/certificates/${id}/deploy/${serverId}`),
+  deployToServer: (serverId: number) =>
+    api.post<WildcardDeployResult>(`/wildcard-ssl/deploy/${serverId}`),
   getSettings: () =>
     api.get<WildcardSSLSettings>('/wildcard-ssl/settings'),
   getTokenRaw: () =>
@@ -3356,6 +3360,28 @@ export interface NetworkJobSnapshot {
   reachability: Record<string, boolean> | null
 }
 
+/** primary — карта основного default, отвечает через неё и так; routed — через свою таблицу */
+export type NicRoutingRole = 'primary' | 'routed' | 'no_gateway' | 'out_of_range'
+
+export interface NicRoutingInterface {
+  name: string
+  role: NicRoutingRole
+  table: number
+  gateway: string | null
+  addresses: string[]
+}
+
+export interface NicRoutingState {
+  supported: boolean
+  message?: string | null
+  enabled: boolean
+  /** Служба на хосте ноды работает и возвращает правила после перезапуска сети */
+  active: boolean
+  /** Включено — правила в ядре на месте; выключено — своих правил не осталось */
+  in_sync: boolean
+  interfaces: NicRoutingInterface[]
+}
+
 export interface NetworkState {
   supported: boolean
   message?: string | null
@@ -3363,6 +3389,7 @@ export interface NetworkState {
   min_node_version_gateway?: string
   min_node_version_hoster_removal?: string
   min_node_version_link_up?: string
+  min_node_version_nic_routing?: string
   // Адрес, по которому панель ходит на ноду: его удалить нельзя
   access_address?: string | null
   node_version?: string | null
@@ -3378,6 +3405,8 @@ export interface NetworkState {
   history: NetworkTransaction[]
   rollback_timeout_sec?: number
   job: NetworkJobSnapshot | null
+  /** Ответы через свою карту; нет у нод старше min_node_version_nic_routing */
+  nic_routing?: NicRoutingState | null
 }
 
 export interface NetworkPreview {

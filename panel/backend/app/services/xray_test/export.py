@@ -29,6 +29,7 @@ REPORT_COLUMNS = (
     ("handshake_ms", "Подключение, мс"),
     ("rtt_ms", "Задержка, мс"),
     ("speed_mbps", "Скорость, Мбит/с"),
+    ("speed_server", "Сервер замера"),
     ("exit_ip", "Выходной IP"),
     ("exit_country", "Страна"),
     ("http_status", "HTTP"),

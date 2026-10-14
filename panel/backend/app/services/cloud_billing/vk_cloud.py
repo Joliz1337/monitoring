@@ -6,8 +6,10 @@ Keystone по логину и паролю (почта аккаунта или �
 это имя проекта в Keystone, поэтому PID берётся из ответа на выдачу токена,
 а не спрашивается отдельным полем.
 
-Бонусы VK Cloud списывает раньше денег, поэтому и в остаток, и в расход
-входят оба счёта: лицевой и бонусный.
+Остаток и расход — только по лицевому счёту. Бонусы VK Cloud типизированы:
+каждый тратится лишь на свои сервисы, и когда кончается бонус нужного типа,
+деньги идут с лицевого счёта при любом остатке остальных бонусов. Проект
+замораживается по минусу на лицевом счёте, так что бонусы срок не продлевают.
 
 Отчёт о потреблении видит только закрытые сутки, а первые сутки проекта
 неполные: в день создания прогноза не было бы вовсе, а следующие три дня
@@ -114,8 +116,7 @@ class VkCloudProvider(CloudProvider):
             client, "GET", f"{BILLING_PROJECTS_URL}/{pid}/balances/amount",
             headers={"X-Auth-Token": token},
         )
-        data = _billing_payload(resp, pid)
-        return _as_number(data.get("base")) + _as_number(data.get("bonus"))
+        return _as_number(_billing_payload(resp, pid).get("base"))
 
     async def _fetch_daily_cost(
         self, client: httpx.AsyncClient, token: str, pid: str
@@ -169,7 +170,7 @@ def _billing_payload(resp: httpx.Response, pid: str) -> dict:
 
 
 def _average_daily_spend(items) -> Optional[float]:
-    """Деньги и бонусы, списанные за сутки, в среднем по дням отчёта.
+    """Деньги, списанные с лицевого счёта за сутки, в среднем по дням отчёта.
 
     Делим на число дней, которые есть в отчёте, а не на всё окно: у проекта,
     созданного вчера, деление на три занизило бы расход втрое."""
@@ -180,8 +181,8 @@ def _average_daily_spend(items) -> Optional[float]:
     for item in items:
         if not isinstance(item, dict) or not item.get("usage_day"):
             continue
-        spent = _as_number(item.get("money")) + _as_number(item.get("bonus"))
-        spent_by_day[item["usage_day"]] = spent_by_day.get(item["usage_day"], 0.0) + spent
+        day = item["usage_day"]
+        spent_by_day[day] = spent_by_day.get(day, 0.0) + _as_number(item.get("money"))
 
     total = sum(spent_by_day.values())
     if total <= 0:
