@@ -22,6 +22,7 @@ import type {
   FirewallProfile,
   DnatProfile,
   RemnawaveNginxProfile,
+  WildcardCertificate,
   WildcardReloadCmdPreset,
 } from '../../api/client'
 
@@ -54,6 +55,7 @@ interface Props {
   firewallProfiles: FirewallProfile[]
   dnatProfiles: DnatProfile[]
   nginxProfiles: RemnawaveNginxProfile[]
+  wildcardCerts: WildcardCertificate[]
   reloadPresets: WildcardReloadCmdPreset[]
   savingCert: boolean
   onSaveCert: () => void
@@ -77,6 +79,7 @@ export default function ExtraServerCard({
   firewallProfiles,
   dnatProfiles,
   nginxProfiles,
+  wildcardCerts,
   reloadPresets,
   savingCert,
   onSaveCert,
@@ -213,6 +216,7 @@ export default function ExtraServerCard({
             firewallProfiles={firewallProfiles}
             dnatProfiles={dnatProfiles}
             nginxProfiles={nginxProfiles}
+            wildcardCerts={wildcardCerts}
             reloadPresets={reloadPresets}
             savingCert={savingCert}
             onSaveCert={onSaveCert}

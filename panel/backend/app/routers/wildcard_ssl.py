@@ -17,6 +17,8 @@ from app.services.wildcard_ssl import (
     USE_FOR_PANEL_SETTING,
     get_wildcard_ssl_manager,
     get_issue_status,
+    linked_certificates,
+    replace_certificate_links,
     wildcard_covers_domain,
 )
 
@@ -49,6 +51,8 @@ class ServerConfigUpdate(BaseModel):
     wildcard_ssl_custom_path_enabled: Optional[bool] = None
     wildcard_ssl_custom_fullchain_path: Optional[str] = None
     wildcard_ssl_custom_privkey_path: Optional[str] = None
+    # Набор сертификатов сервера целиком: [] — ни одного
+    wildcard_ssl_cert_ids: Optional[list[int]] = None
 
 
 class BulkServerConfigUpdate(ServerConfigUpdate):
@@ -57,6 +61,7 @@ class BulkServerConfigUpdate(ServerConfigUpdate):
 
 class DeployStreamRequest(BaseModel):
     server_ids: Optional[list[int]] = None
+    certificate_id: Optional[int] = None
 
 
 class ReloadCmdPreset(BaseModel):
@@ -89,7 +94,9 @@ class SettingsUpdate(BaseModel):
 @router.get("/certificates")
 async def list_certificates(_: dict = Depends(verify_auth)):
     async with async_session() as db:
-        rows = (await db.execute(select(WildcardCertificate))).scalars().all()
+        rows = (await db.execute(
+            select(WildcardCertificate).order_by(WildcardCertificate.id)
+        )).scalars().all()
         return {
             "certificates": [_cert_to_dict(c) for c in rows]
         }
@@ -181,19 +188,19 @@ async def delete_certificate(cert_id: int, _: dict = Depends(verify_auth)):
 
 # ─── Deploy ───
 
-@router.post("/certificates/{cert_id}/deploy/stream")
-async def deploy_stream(
-    cert_id: int,
-    req: DeployStreamRequest,
-    _: dict = Depends(verify_auth),
-):
-    """NDJSON-стрим раскатки: server_ids — явный выбор, null — все включённые."""
+# Объявлен до /deploy/{server_id}, иначе "stream" парсится как server_id
+@router.post("/deploy/stream")
+async def deploy_stream(req: DeployStreamRequest, _: dict = Depends(verify_auth)):
+    """NDJSON-стрим раскатки: каждому серверу — закреплённые за ним сертификаты.
+
+    server_ids — явный выбор, null — все включённые; certificate_id — только этот
+    сертификат и только на серверы, за которыми он закреплён.
+    """
     manager = get_wildcard_ssl_manager()
-    cert, servers = await manager.get_deploy_targets(cert_id, req.server_ids)
-    if not cert:
-        raise HTTPException(status_code=404, detail="Certificate not found")
-    if not servers:
+    targets = await manager.get_deploy_targets(req.server_ids, req.certificate_id)
+    if not targets:
         raise HTTPException(status_code=400, detail="No eligible servers")
+    linked = {server.id: certs for server, certs in targets}
 
     # stream_ndjson создаёт таски на все серверы разом — без семафора это
     # сотни одновременных TLS-соединений на большом флоте
@@ -201,16 +208,14 @@ async def deploy_stream(
 
     async def worker(server):
         async with sem:
-            return await manager.deploy_to_node(cert, server)
+            return await manager.deploy_to_node(server, linked[server.id], req.certificate_id)
 
-    return stream_ndjson(servers, worker, log_action="wildcard_deploy")
+    return stream_ndjson([s for s, _ in targets], worker, log_action="wildcard_deploy")
 
 
-@router.post("/certificates/{cert_id}/deploy/{server_id}")
-async def deploy_to_server(cert_id: int, server_id: int, _: dict = Depends(verify_auth)):
-    manager = get_wildcard_ssl_manager()
-    result = await manager.deploy_to_server(cert_id, server_id)
-    return result
+@router.post("/deploy/{server_id}")
+async def deploy_to_server(server_id: int, _: dict = Depends(verify_auth)):
+    return await get_wildcard_ssl_manager().deploy_to_server(server_id)
 
 
 # ─── Settings ───
@@ -338,6 +343,7 @@ async def get_servers(_: dict = Depends(verify_auth)):
         servers = (await db.execute(
             select(Server).where(Server.is_active == True).order_by(Server.position)
         )).scalars().all()
+        linked = await linked_certificates(db, [s.id for s in servers])
         return {
             "servers": [
                 {
@@ -353,6 +359,7 @@ async def get_servers(_: dict = Depends(verify_auth)):
                     "wildcard_ssl_custom_path_enabled": s.wildcard_ssl_custom_path_enabled or False,
                     "wildcard_ssl_custom_fullchain_path": s.wildcard_ssl_custom_fullchain_path or "",
                     "wildcard_ssl_custom_privkey_path": s.wildcard_ssl_custom_privkey_path or "",
+                    "wildcard_ssl_cert_ids": [c.id for c in linked.get(s.id, [])],
                 }
                 for s in servers
             ]
@@ -365,10 +372,12 @@ async def update_servers_bulk(req: BulkServerConfigUpdate, _: dict = Depends(ver
     """Массовое обновление настроек: поле не передано — не менять, "" — сбросить."""
     changes = {
         k: v
-        for k, v in req.model_dump(exclude_unset=True, exclude={"server_ids"}).items()
+        for k, v in req.model_dump(
+            exclude_unset=True, exclude={"server_ids", "wildcard_ssl_cert_ids"}
+        ).items()
         if v is not None
     }
-    if not changes:
+    if not changes and req.wildcard_ssl_cert_ids is None:
         raise HTTPException(status_code=400, detail="No changes specified")
 
     async with async_session() as db:
@@ -378,7 +387,10 @@ async def update_servers_bulk(req: BulkServerConfigUpdate, _: dict = Depends(ver
         if not found:
             raise HTTPException(status_code=404, detail="No servers found")
 
-        await db.execute(update(Server).where(Server.id.in_(found)).values(**changes))
+        if changes:
+            await db.execute(update(Server).where(Server.id.in_(found)).values(**changes))
+        if req.wildcard_ssl_cert_ids is not None:
+            await replace_certificate_links(db, found, req.wildcard_ssl_cert_ids)
         await db.commit()
     return {"success": True, "updated": len(found)}
 
@@ -412,6 +424,8 @@ async def update_server_config(
             server.wildcard_ssl_custom_fullchain_path = req.wildcard_ssl_custom_fullchain_path
         if req.wildcard_ssl_custom_privkey_path is not None:
             server.wildcard_ssl_custom_privkey_path = req.wildcard_ssl_custom_privkey_path
+        if req.wildcard_ssl_cert_ids is not None:
+            await replace_certificate_links(db, [server.id], req.wildcard_ssl_cert_ids)
 
         await db.commit()
     return {"success": True}

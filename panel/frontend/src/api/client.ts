@@ -2593,6 +2593,7 @@ export interface WildcardServerConfig {
   wildcard_ssl_custom_path_enabled: boolean
   wildcard_ssl_custom_fullchain_path: string
   wildcard_ssl_custom_privkey_path: string
+  wildcard_ssl_cert_ids: number[]
 }
 
 export interface WildcardDeployResult {
@@ -2615,9 +2616,9 @@ export interface WildcardReloadCmdPreset {
   command: string
 }
 
-// Стриминговый деплой не идёт через axios — нужен полный путь с /api для fetch
-export const wildcardDeployStreamUrl = (certId: number) =>
-  `/api/wildcard-ssl/certificates/${certId}/deploy/stream`
+// Стриминговый деплой не идёт через axios — нужен полный путь с /api для fetch.
+// Тело: { server_ids: number[] | null, certificate_id?: number }
+export const WILDCARD_DEPLOY_STREAM_URL = '/api/wildcard-ssl/deploy/stream'
 
 export const wildcardSSLApi = {
   getCertificates: () =>
@@ -2632,8 +2633,8 @@ export const wildcardSSLApi = {
     api.get<WildcardCertificateMaterial>(`/wildcard-ssl/certificates/${id}/pem`),
   deleteCertificate: (id: number) =>
     api.delete(`/wildcard-ssl/certificates/${id}`),
-  deployToServer: (id: number, serverId: number) =>
-    api.post<WildcardDeployResult>(`/wildcard-ssl/certificates/${id}/deploy/${serverId}`),
+  deployToServer: (serverId: number) =>
+    api.post<WildcardDeployResult>(`/wildcard-ssl/deploy/${serverId}`),
   getSettings: () =>
     api.get<WildcardSSLSettings>('/wildcard-ssl/settings'),
   getTokenRaw: () =>

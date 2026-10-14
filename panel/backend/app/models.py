@@ -1118,6 +1118,16 @@ class WildcardCertificate(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class ServerWildcardCertificate(Base):
+    """Какие wildcard-сертификаты раскатываются на сервер."""
+    __tablename__ = "server_wildcard_certificates"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    certificate_id = Column(
+        Integer, ForeignKey("wildcard_certificates.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
 # ==================== Traffic Accounting ====================
 
 class ServerTraffic(Base):

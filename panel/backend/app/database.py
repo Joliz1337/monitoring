@@ -1968,6 +1968,34 @@ async def _migrate_wildcard_ssl(conn):
                     logger.warning(f"Could not add servers.{col_name}: {e}")
 
 
+# Сертификат раскатывается только на закреплённые за ним серверы. Без привязок
+# уже выпущенный сертификат после обновления не доехал бы ни до одной ноды —
+# закрепляем существующие сертификаты за всеми серверами один раз.
+WILDCARD_CERT_LINKS_MARKER = "migration_wildcard_cert_links"
+
+
+async def _migrate_wildcard_cert_links(conn):
+    try:
+        done = await conn.execute(
+            text("SELECT 1 FROM panel_settings WHERE key = :key"),
+            {"key": WILDCARD_CERT_LINKS_MARKER},
+        )
+        if done.first():
+            return
+        await conn.execute(text("""
+            INSERT INTO server_wildcard_certificates (server_id, certificate_id)
+            SELECT s.id, c.id FROM servers s CROSS JOIN wildcard_certificates c
+            ON CONFLICT DO NOTHING
+        """))
+        await conn.execute(
+            text("INSERT INTO panel_settings (key, value) VALUES (:key, '1')"),
+            {"key": WILDCARD_CERT_LINKS_MARKER},
+        )
+        logger.info("Linked existing wildcard certificates to all servers")
+    except Exception as e:
+        logger.warning(f"Could not link wildcard certificates to servers: {e}")
+
+
 async def _migrate_aggregated_metrics_unique(conn):
     """Дедуп aggregated_metrics + UNIQUE(server_id, period_type, timestamp).
 
@@ -2301,6 +2329,7 @@ async def init_db():
         await _migrate_cloud_billing(conn)
         await _migrate_vk_cloud_personal_balance(conn)
         await _migrate_wildcard_ssl(conn)
+        await _migrate_wildcard_cert_links(conn)
         await _migrate_aggregated_metrics_unique(conn)
         await _migrate_bigint_pk_ids(conn)
         await _migrate_drop_redundant_indexes(conn)
