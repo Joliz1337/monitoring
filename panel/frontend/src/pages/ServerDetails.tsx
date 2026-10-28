@@ -312,10 +312,23 @@ export default function ServerDetails() {
   const points = history?.data ?? EMPTY_POINTS
   const historyGaps = history?.gaps ?? NO_GAPS
 
-  const cpuHistory = useMemo(() =>
-    points.map(h => ({ timestamp: h.timestamp, value: h.cpu_usage, peak: h.max_cpu })),
-    [points]
-  )
+  // Steal — отдельной линией, только когда нода его считает: иначе в легенде
+  // висел бы пустой ряд
+  const cpuSeries = useMemo(() => {
+    const series = [{
+      name: t('server_details.cpu_series'),
+      data: points.map(h => ({ timestamp: h.timestamp, value: h.cpu_usage, peak: h.max_cpu })),
+      color: METRIC_COLORS.cpu,
+    }]
+    if (points.some(h => h.cpu_steal !== null)) {
+      series.push({
+        name: t('server_details.steal_series'),
+        data: points.map(h => ({ timestamp: h.timestamp, value: h.cpu_steal, peak: null })),
+        color: METRIC_COLORS.steal,
+      })
+    }
+    return series
+  }, [points, t])
 
   const memoryHistory = useMemo(() =>
     points.map(h => ({ timestamp: h.timestamp, value: memoryPercentOf(h), peak: h.max_memory_percent })),
@@ -671,12 +684,12 @@ export default function ServerDetails() {
                   title={t('server_details.cpu_usage')}
                   isLoading={isHistoryLoading}
                 >
-                  <MetricChart
-                    data={cpuHistory}
-                    color={METRIC_COLORS.cpu}
+                  <MultiLineChart
+                    series={cpuSeries}
+                    height={200}
                     unit="%"
-                    min={0}
-                    max={100}
+                    yMin={0}
+                    yMax={100}
                     period={period}
                     gaps={historyGaps}
                     display={cpuDisplay}

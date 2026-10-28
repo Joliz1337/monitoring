@@ -38,6 +38,7 @@ export function seriesColor(index: number): string {
 
 export const METRIC_COLORS = {
   cpu: '#22d3ee',
+  steal: '#ef4444',
   memory: '#10b981',
   load: '#f59e0b',
 }

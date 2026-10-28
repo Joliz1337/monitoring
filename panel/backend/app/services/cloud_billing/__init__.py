@@ -15,6 +15,7 @@ from app.services.cloud_billing.base import (
     compute_days_left,
 )
 from app.services.cloud_billing.cloud_ru import CloudRuProvider
+from app.services.cloud_billing.onecloud import OneCloudProvider
 from app.services.cloud_billing.selectel import SelectelProvider
 from app.services.cloud_billing.timeweb import TimewebProvider
 from app.services.cloud_billing.vk_cloud import VkCloudProvider
@@ -31,6 +32,7 @@ PROVIDERS: dict[str, CloudProvider] = {
         TimewebProvider(),
         VkCloudProvider(),
         CloudRuProvider(),
+        OneCloudProvider(),
     )
 }
 

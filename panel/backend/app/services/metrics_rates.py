@@ -50,6 +50,8 @@ class SnapshotRates:
     cpu_usage_max: Optional[float]
     net_rx_max: Optional[float]
     net_tx_max: Optional[float]
+    # None — нода steal не считает (агент до 10.34.0)
+    cpu_steal: Optional[float]
 
 
 def poll_window_seconds(elapsed: Optional[float], interval: int) -> int:
@@ -99,6 +101,19 @@ def node_window_rates(metrics: dict) -> Optional[NodeWindow]:
     )
 
 
+def node_steal_percent(metrics: dict) -> Optional[float]:
+    """Steal хоста: среднее за окно опроса, иначе секундная проба.
+
+    Окно без измеренного CPU (`per_cpu_avg` пуст) отдаёт нули — тогда честнее
+    секундная проба, как и у самого CPU. None — нода steal не присылает.
+    """
+    window = metrics.get("window") or {}
+    if window.get("per_cpu_avg") and window.get("steal_avg") is not None:
+        return float(window["steal_avg"])
+    steal = (metrics.get("cpu") or {}).get("steal_percent")
+    return None if steal is None else float(steal)
+
+
 def snapshot_rates(metrics: dict, fallback: NodeRates) -> SnapshotRates:
     """Источник цифр для снапшота: окно ноды → её секундные скорости → дельты панели.
 
@@ -121,6 +136,7 @@ def snapshot_rates(metrics: dict, fallback: NodeRates) -> SnapshotRates:
             cpu_usage_max=window.cpu_max if cpu_measured else None,
             net_rx_max=window.net_rx_max,
             net_tx_max=window.net_tx_max,
+            cpu_steal=node_steal_percent(metrics),
         )
 
     rates = node_live_rates(metrics) or fallback
@@ -134,6 +150,7 @@ def snapshot_rates(metrics: dict, fallback: NodeRates) -> SnapshotRates:
         cpu_usage_max=None,
         net_rx_max=None,
         net_tx_max=None,
+        cpu_steal=node_steal_percent(metrics),
     )
 
 

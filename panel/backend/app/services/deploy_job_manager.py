@@ -84,6 +84,7 @@ class DeployJob:
     host: str
     server_url: str
     proxy_url: Optional[str] = None  # SOCKS5 панель→нода, наследуется созданным сервером
+    folder: Optional[str] = None
     ssh_port: Optional[int] = None  # порт, по которому шёл деплой — сохраняется в креды сервера
     status: str = "running"  # running | success | error
     log: list[str] = field(default_factory=list)
@@ -155,6 +156,7 @@ class DeployJobManager:
         name: str,
         server_url: str,
         post_opts: PostDeployOptions,
+        folder: Optional[str] = None,
         wait_for_manual_install: bool = False,
     ) -> str:
         self._cleanup_finished()
@@ -165,6 +167,7 @@ class DeployJobManager:
             host=params.host,
             server_url=server_url,
             proxy_url=params.socks5_proxy,
+            folder=folder,
             ssh_port=None if wait_for_manual_install else params.ssh_port,
         )
         self._jobs[job_id] = job
@@ -237,6 +240,7 @@ class DeployJobManager:
         try:
             server_id = await self._create_server(
                 job.name, job.server_url, job.proxy_url, job.ssh_port,
+                folder=job.folder,
                 dedicated_cert=post_opts.dedicated_cert,
             )
         except Exception as exc:  # noqa: BLE001 — финальная граница создания сервера
@@ -380,6 +384,7 @@ class DeployJobManager:
         url: str,
         proxy_url: Optional[str],
         ssh_port: Optional[int] = None,
+        folder: Optional[str] = None,
         dedicated_cert: bool = False,
     ) -> int:
         """Создаёт запись ноды после успешной установки (mTLS: shared cert или
@@ -392,6 +397,7 @@ class DeployJobManager:
                 url=url.rstrip("/"),
                 api_key=None,
                 proxy_url=proxy_url,
+                folder=folder,
                 pki_enabled=True,
                 uses_shared_cert=not dedicated_cert,
                 dedicated_cert=dedicated_cert,

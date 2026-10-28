@@ -5,7 +5,7 @@ import {
   Bell, Bot, Send, CheckCircle2, XCircle, Loader2,
   ChevronDown, ChevronRight, Trash2, Server, ShieldOff,
   Cpu, MemoryStick, Network, Cable, Power, Activity, Layers,
-  RefreshCw, Clock, X, Radar,
+  RefreshCw, Clock, X, Radar, ServerCrash,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { alertsApi, serversApi, AlertSettingsData, AlertHistoryItem, AlertStatus, Server as ServerType } from '../api/client'
@@ -14,7 +14,7 @@ import { Tooltip } from '../components/ui/Tooltip'
 import { SecretInput } from '../components/ui/SecretInput'
 import { FAQIcon, type FAQScreen } from '../components/FAQ'
 
-type TriggerSection = 'offline' | 'cpu' | 'ram' | 'network' | 'load_avg' | 'conntrack' | 'packet_loss' | 'tcp'
+type TriggerSection = 'offline' | 'cpu' | 'steal' | 'ram' | 'network' | 'load_avg' | 'conntrack' | 'packet_loss' | 'tcp'
 
 export default function Alerts() {
   const { t } = useTranslation()
@@ -154,6 +154,8 @@ export default function Alerts() {
       recovery: t('alerts.type_recovery'),
       cpu_critical: t('alerts.type_cpu_critical'),
       cpu_spike: t('alerts.type_cpu_spike'),
+      steal_high: t('alerts.type_steal_high'),
+      steal_recovered: t('alerts.type_steal_recovered'),
       ram_critical: t('alerts.type_ram_critical'),
       ram_spike: t('alerts.type_ram_spike'),
       network_spike: t('alerts.type_network_spike'),
@@ -363,6 +365,26 @@ export default function Alerts() {
             ids={settings.cpu_excluded_server_ids}
             allServers={allServers}
             onSave={ids => save({ cpu_excluded_server_ids: ids })}
+            t={t}
+          />
+        </TriggerBlock>
+
+        {/* Steal */}
+        <TriggerBlock
+          title={t('alerts.trigger_steal')}
+          icon={<ServerCrash className="w-4 h-4" />}
+          enabled={settings.steal_enabled}
+          onToggle={v => save({ steal_enabled: v })}
+          expanded={expanded.has('steal')}
+          onExpand={() => toggle('steal')}
+        >
+          <p className="text-xs text-dark-500">{t('alerts.steal_hint')}</p>
+          <SliderRow label={t('alerts.steal_threshold')} value={settings.steal_threshold} min={5} max={90} step={5} format={v => `${v}%`} onSave={v => save({ steal_threshold: v })} />
+          <SliderRow label={t('alerts.sustained')} value={settings.steal_sustained_seconds} min={60} max={1800} step={60} format={v => `${v / 60} ${t('alerts.minutes_short')}`} onSave={v => save({ steal_sustained_seconds: v })} />
+          <TriggerIgnoreList
+            ids={settings.steal_excluded_server_ids}
+            allServers={allServers}
+            onSave={ids => save({ steal_excluded_server_ids: ids })}
             t={t}
           />
         </TriggerBlock>
@@ -596,6 +618,8 @@ export default function Alerts() {
               <option value="recovery">{t('alerts.type_recovery')}</option>
               <option value="cpu_critical">{t('alerts.type_cpu_critical')}</option>
               <option value="cpu_spike">{t('alerts.type_cpu_spike')}</option>
+              <option value="steal_high">{t('alerts.type_steal_high')}</option>
+              <option value="steal_recovered">{t('alerts.type_steal_recovered')}</option>
               <option value="ram_critical">{t('alerts.type_ram_critical')}</option>
               <option value="ram_spike">{t('alerts.type_ram_spike')}</option>
               <option value="network_spike">{t('alerts.type_network_spike')}</option>

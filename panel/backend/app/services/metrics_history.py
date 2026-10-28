@@ -65,7 +65,7 @@ DEFAULT_COLLECT_INTERVAL_SEC = 10
 EPOCH = datetime(1970, 1, 1)
 
 POINT_METRIC_KEYS = (
-    "cpu_usage", "max_cpu",
+    "cpu_usage", "max_cpu", "cpu_steal",
     "memory_percent", "max_memory_percent", "memory_used", "memory_available",
     "load_avg_1", "max_load",
     "net_rx_bytes_per_sec", "max_net_rx_bytes_per_sec",
@@ -77,7 +77,7 @@ POINT_METRIC_KEYS = (
 )
 
 RAW_POINTS_SQL = text("""
-    SELECT m.timestamp, m.cpu_usage, m.cpu_usage_max,
+    SELECT m.timestamp, m.cpu_usage, m.cpu_usage_max, m.cpu_steal,
            m.memory_percent, m.memory_used, m.memory_available,
            m.load_avg_1,
            m.net_rx_bytes_per_sec, m.net_rx_bytes_per_sec_max,
@@ -99,6 +99,7 @@ RAW_BUCKETS_SQL = text("""
            COUNT(*) AS data_points,
            AVG(m.cpu_usage) AS cpu_usage,
            MAX(COALESCE(m.cpu_usage_max, m.cpu_usage)) AS max_cpu,
+           AVG(m.cpu_steal) AS cpu_steal,
            AVG(m.memory_percent) AS memory_percent,
            MAX(m.memory_percent) AS max_memory_percent,
            AVG(m.memory_used)::float8 AS memory_used,
@@ -130,7 +131,7 @@ RAW_BUCKETS_SQL = text("""
 # полоса пиков тогда нулевой высоты, а не дыра в ряду.
 AGGREGATED_SQL = text("""
     SELECT a.timestamp AS bucket, a.data_points,
-           a.avg_cpu AS cpu_usage, a.max_cpu,
+           a.avg_cpu AS cpu_usage, a.max_cpu, a.avg_cpu_steal AS cpu_steal,
            a.avg_memory_percent AS memory_percent, a.max_memory_percent,
            a.avg_load AS load_avg_1, COALESCE(a.max_load, a.avg_load) AS max_load,
            a.avg_rx_speed AS net_rx_bytes_per_sec,
@@ -260,6 +261,7 @@ def raw_point(row: Mapping[str, Any]) -> dict[str, Any]:
         "data_points": 1,
         "cpu_usage": row["cpu_usage"],
         "max_cpu": _peak(row["cpu_usage_max"], row["cpu_usage"]),
+        "cpu_steal": row["cpu_steal"],
         "memory_percent": row["memory_percent"],
         "memory_used": row["memory_used"],
         "memory_available": row["memory_available"],
