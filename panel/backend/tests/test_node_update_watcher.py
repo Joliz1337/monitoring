@@ -26,6 +26,7 @@ try:
         failure_message,
         reported_step,
         summarize_error,
+        updater_stuck,
     )
 except ImportError as e:  # рантайм панели (sqlalchemy, asyncpg, aiogram) не установлен
     raise unittest.SkipTest(f"node_update_watcher requires the panel runtime: {e}")
@@ -122,6 +123,43 @@ class LegacyAgentTest(unittest.TestCase):
         # Файл состояния на ноде пропал — судим по версии, как у старого агента
         status = {"attempt_id": None, "in_progress": False, "last_result": None}
         self.assertIs(decide(make_attempt(), status, "10.31.0", SOON).verdict, Verdict.SUCCESS)
+
+
+class StuckUpdaterTest(unittest.TestCase):
+    """Старый агент не убирает зависший апдейтер, которого перестал ждать, и
+    отказывает каждому следующему обновлению — панель следит за нодой без
+    идентификатора попытки и сразу уводит её на SSH."""
+
+    STUCK = {
+        "attempt_id": "e80c", "in_progress": True, "stage": "download",
+        "last_result": "failed", "started_at": "2026-10-05T08:00:25+00:00",
+    }
+
+    def test_signature(self):
+        self.assertTrue(updater_stuck(self.STUCK))
+
+    def test_running_attempt_is_not_stuck(self):
+        self.assertFalse(updater_stuck({**self.STUCK, "last_result": None}))
+
+    def test_idle_node_is_not_stuck(self):
+        self.assertFalse(updater_stuck({**self.STUCK, "in_progress": False}))
+
+    def test_legacy_agent_without_attempts_is_not_stuck(self):
+        # У агента без файла состояния итог прошлого обновления соседствует с идущим
+        self.assertFalse(updater_stuck({"in_progress": True, "last_result": "failed"}))
+
+    def test_silent_node(self):
+        self.assertFalse(updater_stuck(None))
+
+    def test_refused_update_fails_over_at_once(self):
+        decision = decide(make_attempt(attempt_id=None, target_ref="dev"), self.STUCK, "10.33.0", SOON)
+        self.assertIs(decision.verdict, Verdict.FAILED)
+        self.assertIs(decision.reason, FailureReason.UPDATER_STUCK)
+        self.assertEqual(decision.detail, "2026-10-05")
+
+    def test_own_attempt_keeps_agent_report(self):
+        status = {**self.STUCK, "attempt_id": "a1", "last_error": "[ERROR] boom"}
+        self.assertIs(decide(make_attempt(), status, None, SOON).reason, FailureReason.REPORTED)
 
 
 class SilentNodeTest(unittest.TestCase):

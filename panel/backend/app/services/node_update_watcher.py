@@ -78,6 +78,7 @@ class FailureReason(str, Enum):
     SILENT = "silent"
     TIMEOUT = "timeout"
     VERSION_UNCHANGED = "version_unchanged"
+    UPDATER_STUCK = "updater_stuck"
 
 
 class FallbackProblem(str, Enum):
@@ -148,6 +149,19 @@ def _judge_legacy(
     return Decision(Verdict.FAILED, FailureReason.VERSION_UNCHANGED, node_version)
 
 
+def updater_stuck(status: Optional[dict]) -> bool:
+    """На ноде висит апдейтер, которого агент перестал ждать. Агент с файлом
+    состояния записывает попытку до старта апдейтера, поэтому у идущего обновления
+    итога нет; итог при живом апдейтере значит, что тот завис. Старый агент такой
+    апдейтер не убирает и отказывает каждому следующему обновлению."""
+    return bool(
+        status
+        and status.get("in_progress")
+        and status.get("attempt_id")
+        and status.get("last_result") is not None
+    )
+
+
 def decide(
     attempt: NodeUpdateAttempt, status: Optional[dict], node_version: Optional[str], now: datetime,
 ) -> Decision:
@@ -166,6 +180,8 @@ def decide(
         if node_attempt:
             # После нашего запуска обновление запустили снова — итог у той попытки
             return Decision(Verdict.SUPERSEDED)
+    if updater_stuck(status):
+        return Decision(Verdict.FAILED, FailureReason.UPDATER_STUCK, (status.get("started_at") or "")[:10] or None)
     return _judge_legacy(attempt, status, node_version, now)
 
 
@@ -186,6 +202,10 @@ def _reason_text(lang: str, reason: FailureReason, detail: Optional[str]) -> str
             FailureReason.SILENT: f"нода не отвечает больше {detail} мин после запуска обновления",
             FailureReason.TIMEOUT: f"обновление не завершилось за {deadline_min} мин",
             FailureReason.VERSION_UNCHANGED: f"версия агента осталась {detail}",
+            FailureReason.UPDATER_STUCK: (
+                f"на ноде с {detail} висит прошлое обновление и не даёт начать новое" if detail
+                else "на ноде висит прошлое обновление и не даёт начать новое"
+            ),
         }
     else:
         texts = {
@@ -194,6 +214,10 @@ def _reason_text(lang: str, reason: FailureReason, detail: Optional[str]) -> str
             FailureReason.SILENT: f"the node has not responded for over {detail} min since the update started",
             FailureReason.TIMEOUT: f"the update did not finish within {deadline_min} min",
             FailureReason.VERSION_UNCHANGED: f"the agent version is still {detail}",
+            FailureReason.UPDATER_STUCK: (
+                f"a previous update has been hanging on the node since {detail} and blocks new ones" if detail
+                else "a previous update is hanging on the node and blocks new ones"
+            ),
         }
     return texts[reason]
 
@@ -271,6 +295,17 @@ async def track(db: AsyncSession, server: Server, target_ref: str, attempt_id: o
         # Обновление на ноде уже запущено — ответ оператору важнее слежки за итогом
         await db.rollback()
         logger.error(f"Failed to track node update for server {server.id}: {e}")
+
+
+async def track_stuck_updater(db: AsyncSession, server: Server, target_ref: str) -> bool:
+    """Нода отказала в обновлении. Если мешает зависший апдейтер, итог ведёт
+    панель: наблюдатель на ближайшем проходе уведёт ноду на SSH."""
+    if target_ref not in update_channel.ALLOWED_BRANCHES:
+        return False
+    if not updater_stuck(await _node_get(server, UPDATE_STATUS_PATH)):
+        return False
+    await track(db, server, target_ref, None)
+    return True
 
 
 async def _node_get(server: Server, path: str) -> Optional[dict]:

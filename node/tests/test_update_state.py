@@ -21,6 +21,8 @@ from app.services.update_state import (  # noqa: E402
     UpdateStateStore,
     UpdaterContainer,
     current_stage,
+    finish,
+    is_abandoned,
     new_attempt,
     outcome_from_exit,
     resolve_orphaned,
@@ -84,6 +86,36 @@ class ResolveOrphanedTest(unittest.TestCase):
     def test_finished_attempt_is_left_alone(self):
         finished = resolve_orphaned(self.attempt, self._container(exit_code=0))
         self.assertIs(resolve_orphaned(finished, None), finished)
+
+
+class AbandonedUpdaterTest(unittest.TestCase):
+    """Апдейтер завис (apk без сети), агент перестал его ждать и записал провал,
+    а контейнер живёт неделями — он не должен запирать следующие обновления."""
+
+    def setUp(self):
+        self.attempt = new_attempt("dev", "10.32.0")
+
+    def _container(self, running=True, attempt_id=None):
+        return UpdaterContainer(running=running, exit_code=None, attempt_id=attempt_id or self.attempt.attempt_id)
+
+    def test_running_updater_of_finished_attempt_is_abandoned(self):
+        given_up = finish(self.attempt, UpdateOutcome(UpdateResult.FAILED, error="Read timed out"))
+        self.assertTrue(is_abandoned(self._container(), given_up))
+
+    def test_updater_of_running_attempt_is_live(self):
+        self.assertFalse(is_abandoned(self._container(), self.attempt))
+
+    def test_exited_updater_is_not_abandoned(self):
+        given_up = finish(self.attempt, UpdateOutcome(UpdateResult.FAILED))
+        self.assertFalse(is_abandoned(self._container(running=False), given_up))
+
+    def test_updater_of_other_attempt_is_not_abandoned(self):
+        # Без метки попытки (апдейтер старого агента) о нём ничего не известно
+        given_up = finish(self.attempt, UpdateOutcome(UpdateResult.FAILED))
+        self.assertFalse(is_abandoned(self._container(attempt_id="other"), given_up))
+
+    def test_no_attempt_on_disk(self):
+        self.assertFalse(is_abandoned(self._container(), None))
 
 
 class StoreTest(unittest.TestCase):
