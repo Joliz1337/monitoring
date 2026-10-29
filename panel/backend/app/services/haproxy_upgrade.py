@@ -8,7 +8,8 @@
 обновление — install.sh с MON_INSTALL_HAPROXY=1 на хосте через агента ноды,
 фоновой задачей с логом: переключение reload'ом без обрыва соединений и откат
 при ошибке. Серверу за ТСПУ, которому репозиторий сборщика недоступен, тот же
-install.sh запускается по SSH, а пакеты он качает через прокси панели в туннеле.
+install.sh запускается по SSH, а пакеты он качает через прокси панели в туннеле —
+по выбору оператора сразу или сам, если через агента сервер обновление не скачал.
 """
 from __future__ import annotations
 
@@ -23,10 +24,14 @@ from typing import AsyncIterator, Optional
 import httpx
 
 from app.models import Server
-from app.services.deploy_service import build_haproxy_upgrade_command, install_via_panel
+from app.services.deploy_service import (
+    INSTALLER_DOWNLOAD_FAILED_EXIT,
+    build_haproxy_upgrade_command,
+    install_via_panel,
+)
 from app.services.http_client import get_external_client
 from app.services.remnawave_node_install import HostInstallJobManager, run_install_on_node
-from app.services.ssh_target import SSHTarget
+from app.services.ssh_target import SSHTarget, SSHTargetError, resolve_ssh_target
 
 logger = logging.getLogger(__name__)
 
@@ -181,10 +186,50 @@ async def _queued(events: AsyncIterator[dict]) -> AsyncIterator[dict]:
             yield event
 
 
-def start_upgrade(server: Server, ssh_target: Optional[SSHTarget] = None) -> str:
-    """Запустить обновление: через агента ноды или, с ssh_target, по SSH с загрузкой через панель."""
+def _retry_over_ssh(event: dict) -> bool:
+    """Итог через агента, который лечится SSH с загрузкой через панель: сервер не
+    скачал install.sh или пакеты, либо команда до хоста не дошла. Непринятый
+    конфиг или незапустившийся HAProxy уже откачены — по SSH вышло бы то же самое."""
+    if event.get("type") == "done":
+        return event.get("exit_code") == INSTALLER_DOWNLOAD_FAILED_EXIT
+    return event.get("type") == "error" and bool(event.get("undelivered"))
+
+
+async def _agent_then_ssh(
+    server: Server, ssh_target: Optional[SSHTarget], ssh_problem: Optional[str],
+) -> AsyncIterator[dict]:
+    failure: Optional[dict] = None
+    async for event in run_install_on_node(server, build_haproxy_upgrade_command()):
+        # Такие события у агента последние — поток на них заканчивается сам
+        if _retry_over_ssh(event):
+            failure = event
+        else:
+            yield event
+    if failure is None:
+        return
+    if failure["type"] == "error":
+        yield {"type": "log", "line": f"[panel] {failure['message']}"}
     if ssh_target is None:
-        events = run_install_on_node(server, build_haproxy_upgrade_command())
-    else:
+        yield {"type": "log", "line": f"[panel] Повторить по SSH через панель не получится: {ssh_problem}"}
+        yield failure
+        return
+    yield {"type": "log", "line": "[panel] Через агента обновление не скачалось — повторяю по SSH, пакеты через панель"}
+    async for event in install_via_panel(ssh_target, server.proxy_url, build_haproxy_upgrade_command):
+        yield event
+
+
+def _saved_ssh_target(server: Server) -> tuple[Optional[SSHTarget], Optional[str]]:
+    try:
+        return resolve_ssh_target(server), None
+    except SSHTargetError as exc:
+        return None, str(exc)
+
+
+def start_upgrade(server: Server, ssh_target: Optional[SSHTarget] = None) -> str:
+    """Запустить обновление по SSH с загрузкой через панель (ssh_target) или через
+    агента ноды — с повтором по сохранённому SSH-доступу, если сервер не скачал обновление."""
+    if ssh_target is not None:
         events = install_via_panel(ssh_target, server.proxy_url, build_haproxy_upgrade_command)
+    else:
+        events = _agent_then_ssh(server, *_saved_ssh_target(server))
     return _manager.start(server, _queued(events))

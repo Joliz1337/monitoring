@@ -34,6 +34,9 @@ from app.services.ssh_target import SSHTarget, ssh_connect_kwargs
 from app.services import update_channel
 
 REMOTE_SCRIPT = "/tmp/mon-install.sh"
+# Сервер не смог скачать нужное для установки: сам install.sh или пакеты.
+# Тот же код — EXIT_DOWNLOAD_FAILED в install.sh, менять вместе
+INSTALLER_DOWNLOAD_FAILED_EXIT = 21
 
 TUNNEL_DENIED_MESSAGE = (
     "sshd на сервере запрещает проброс портов (AllowTcpForwarding) — установка через "
@@ -150,7 +153,7 @@ def _render_unattended_command(env: dict[str, str], download_proxy: str | None =
     proxy_flag = f"--proxy {shlex.quote(download_proxy)} " if download_proxy else ""
     return (
         f"curl -fsSL {proxy_flag}{shlex.quote(update_channel.installer_url())} "
-        f"-o {shlex.quote(REMOTE_SCRIPT)} && "
+        f"-o {shlex.quote(REMOTE_SCRIPT)} || exit {INSTALLER_DOWNLOAD_FAILED_EXIT}; "
         f"{assignments} bash {shlex.quote(REMOTE_SCRIPT)} --unattended"
     )
 

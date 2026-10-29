@@ -59,7 +59,12 @@ def parse_sse_event(event_name: str, data: str) -> Optional[dict]:
 
 
 async def run_install_on_node(server: Server, command: str) -> AsyncIterator[dict]:
-    """Выполнить команду установки на хосте ноды, стримя события {type: log|error|done}."""
+    """Выполнить команду установки на хосте ноды, стримя события {type: log|error|done}.
+
+    Ошибка с undelivered=True значит, что команда до хоста точно не дошла (агент
+    недоступен или упал) и её безопасно повторить другим путём. Отказ по правам
+    ноды так не помечен: обходить запрет владельца нельзя.
+    """
     url = f"{server.url}/api/system/execute-stream"
     body = {"command": command, "timeout": EXEC_TIMEOUT, "shell": "bash"}
     # per-request таймаут: у клиента ноды дефолтный read слишком короткий для
@@ -78,7 +83,11 @@ async def run_install_on_node(server: Server, command: str) -> AsyncIterator[dic
                 except json.JSONDecodeError:
                     detail = raw
                 await learn_from_denial(server.id, response.status_code, detail)
-                yield {"type": "error", "message": f"Нода ответила HTTP {response.status_code}: {raw[:300]}"}
+                yield {
+                    "type": "error",
+                    "message": f"Нода ответила HTTP {response.status_code}: {raw[:300]}",
+                    "undelivered": response.status_code >= 500,
+                }
                 return
 
             event_name = ""
@@ -103,10 +112,16 @@ async def run_install_on_node(server: Server, command: str) -> AsyncIterator[dic
                 yield {"type": "error", "message": "Стрим ноды оборвался без результата"}
                 return
             yield {"type": "done", "exit_code": exit_code}
-    except httpx.TimeoutException:
-        yield {"type": "error", "message": "Таймаут соединения с нодой"}
+    except httpx.TimeoutException as exc:
+        yield {"type": "error", "message": "Таймаут соединения с нодой", "undelivered": _never_connected(exc)}
     except httpx.RequestError as exc:
-        yield {"type": "error", "message": f"Ошибка соединения с нодой: {exc}"}
+        yield {"type": "error", "message": f"Ошибка соединения с нодой: {exc}", "undelivered": _never_connected(exc)}
+
+
+def _never_connected(exc: httpx.RequestError) -> bool:
+    # Эти ошибки бывают только до отправки запроса; обрыв чтения посреди
+    # стрима — нет, там команда могла уже идти на хосте
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
 
 
 @dataclass

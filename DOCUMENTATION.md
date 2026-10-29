@@ -164,7 +164,7 @@ bash install.sh --unattended
 | `MON_INSTALL_NODE=1` | Установить ноду мониторинга |
 | `MON_INSTALL_WARP=1` | Установить Cloudflare WARP |
 | `MON_INSTALL_REMNAWAVE=1` | Установить ноду Remnawave |
-| `MON_INSTALL_HAPROXY=1` | Обновить HAProxy до новейшей официальной LTS-сборки под релиз сервера (`upgrade_haproxy()`, его запускает кнопка на странице «Обновления» панели) |
+| `MON_INSTALL_HAPROXY=1` | Обновить HAProxy до новейшей официальной LTS-сборки под релиз сервера (`upgrade_haproxy()`, его запускает кнопка на странице «Обновления» панели). Сервер не смог скачать обновление (репозиторий, ключ, пакеты) — выход с кодом `EXIT_DOWNLOAD_FAILED` (21), работающий HAProxy не тронут; по этому коду панель повторяет обновление по SSH через себя |
 | `MON_INSTALL_OPTIMIZATIONS=1` | Установить системные оптимизации |
 | `MON_OPT_PROFILE` | Профиль sysctl-оптимизаций: `vpn` (по умолчанию) или `panel` |
 | `MON_NIC_MODE` | NIC-режим оптимизаций: `auto` (по умолчанию, автоопределение через `auto_detect_nic_mode()`), `multiqueue`, `hybrid`, `rps`; если задан и не равен `auto`, режим применяется без автодетекта |

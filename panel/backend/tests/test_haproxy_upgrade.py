@@ -12,6 +12,7 @@ import gzip
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -19,7 +20,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import httpx  # noqa: E402
 
 from app.services import haproxy_upgrade, update_channel  # noqa: E402
-from app.services.deploy_service import build_haproxy_upgrade_command  # noqa: E402
+from app.services.deploy_service import INSTALLER_DOWNLOAD_FAILED_EXIT, build_haproxy_upgrade_command  # noqa: E402
+from app.services.ssh_target import SSHTarget  # noqa: E402
 
 PPA_INDEX = """Package: haproxy
 Architecture: amd64
@@ -215,6 +217,84 @@ class UpgradeCommandTests(unittest.TestCase):
         command = build_haproxy_upgrade_command()
         self.assertIn("MON_BRANCH=dev", command)
         self.assertIn("/dev/install.sh", command)
+
+    def test_installer_not_downloaded_has_own_exit_code(self):
+        # Не скачался сам install.sh — тот же код, что у install.sh без пакетов
+        command = build_haproxy_upgrade_command()
+        self.assertIn(f"|| exit {INSTALLER_DOWNLOAD_FAILED_EXIT};", command)
+        self.assertTrue(command.startswith("curl -fsSL"))
+
+
+class SshFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """Сервер за ТСПУ не скачал обновление через агента — та же задача
+    продолжается по SSH с загрузкой через панель. Откат после непринятого
+    конфига по SSH не повторяется: там вышло бы то же самое."""
+
+    SERVER = SimpleNamespace(proxy_url=None)
+    TARGET = SSHTarget(host="10.0.0.1", port=22, password="pw")
+
+    async def run_upgrade(self, agent_events, target=TARGET, problem=None):
+        ssh_calls = []
+
+        async def agent(server, command):
+            for event in agent_events:
+                yield event
+
+        async def ssh(target, socks5_proxy, command_for):
+            ssh_calls.append(target)
+            yield {"type": "log", "line": "ssh: HAProxy 2.8 → 3.2"}
+            yield {"type": "done", "exit_code": 0}
+
+        with mock.patch.object(haproxy_upgrade, "run_install_on_node", agent), \
+                mock.patch.object(haproxy_upgrade, "install_via_panel", ssh):
+            events = [e async for e in haproxy_upgrade._agent_then_ssh(self.SERVER, target, problem)]
+        return events, ssh_calls
+
+    async def test_download_failure_continues_over_ssh(self):
+        events, ssh_calls = await self.run_upgrade([
+            {"type": "log", "line": "[WARN] The HAProxy repository did not answer from this server"},
+            {"type": "done", "exit_code": INSTALLER_DOWNLOAD_FAILED_EXIT},
+        ])
+        self.assertEqual(ssh_calls, [self.TARGET])
+        self.assertEqual(events[0]["line"], "[WARN] The HAProxy repository did not answer from this server")
+        self.assertTrue(any("по SSH" in e.get("line", "") for e in events))
+        self.assertEqual(events[-1], {"type": "done", "exit_code": 0})
+        self.assertNotIn({"type": "done", "exit_code": INSTALLER_DOWNLOAD_FAILED_EXIT}, events)
+
+    async def test_undelivered_command_continues_over_ssh(self):
+        events, ssh_calls = await self.run_upgrade([
+            {"type": "error", "message": "Ошибка соединения с нодой: refused", "undelivered": True},
+        ])
+        self.assertEqual(ssh_calls, [self.TARGET])
+        self.assertTrue(any("refused" in e.get("line", "") for e in events))
+        self.assertEqual(events[-1], {"type": "done", "exit_code": 0})
+
+    async def test_rejected_config_is_not_retried(self):
+        events, ssh_calls = await self.run_upgrade([
+            {"type": "log", "line": "[ERROR] The new HAProxy rejected the current config"},
+            {"type": "done", "exit_code": 1},
+        ])
+        self.assertEqual(ssh_calls, [])
+        self.assertEqual(events[-1], {"type": "done", "exit_code": 1})
+
+    async def test_broken_stream_is_not_retried(self):
+        # Команда могла уже идти на хосте — второй запуск по SSH столкнулся бы с ней
+        failure = {"type": "error", "message": "Стрим ноды оборвался без результата"}
+        events, ssh_calls = await self.run_upgrade([failure])
+        self.assertEqual(ssh_calls, [])
+        self.assertEqual(events, [failure])
+
+    async def test_success_is_left_alone(self):
+        events, ssh_calls = await self.run_upgrade([{"type": "done", "exit_code": 0}])
+        self.assertEqual(ssh_calls, [])
+        self.assertEqual(events, [{"type": "done", "exit_code": 0}])
+
+    async def test_without_saved_ssh_the_log_says_why(self):
+        failure = {"type": "done", "exit_code": INSTALLER_DOWNLOAD_FAILED_EXIT}
+        events, ssh_calls = await self.run_upgrade([failure], target=None, problem="Нет SSH-кредов")
+        self.assertEqual(ssh_calls, [])
+        self.assertIn("Нет SSH-кредов", events[-2]["line"])
+        self.assertEqual(events[-1], failure)
 
 
 class QueueTests(unittest.IsolatedAsyncioTestCase):
