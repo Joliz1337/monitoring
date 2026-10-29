@@ -890,7 +890,7 @@ export const serversApi = {
     api.get<{ count: number; servers: ServerWithMetrics[] }>('/servers', {
       params: includeMetrics ? { include_metrics: true } : undefined
     }),
-  create: (data: { name: string; url: string; proxy_url?: string | null }) =>
+  create: (data: { name: string; url: string; proxy_url?: string | null; folder?: string | null }) =>
     api.post<{
       success: boolean
       server: Server
@@ -1003,6 +1003,8 @@ export interface HistoryPoint {
   data_points: number
   cpu_usage: number | null
   max_cpu: number | null
+  // Часть cpu_usage, которую забрал гипервизор хостера; null — нода steal не считает
+  cpu_steal: number | null
   memory_percent: number | null
   max_memory_percent: number | null
   memory_used: number | null
@@ -1965,6 +1967,9 @@ export interface AlertSettingsData {
   load_avg_sustained_checks: number
   conntrack_enabled: boolean
   conntrack_threshold: number
+  steal_enabled: boolean
+  steal_threshold: number
+  steal_sustained_seconds: number
   packet_loss_enabled: boolean
   packet_loss_threshold: number
   packet_loss_sustained_seconds: number
@@ -1979,6 +1984,7 @@ export interface AlertSettingsData {
   load_avg_excluded_server_ids: number[]
   conntrack_excluded_server_ids: number[]
   packet_loss_excluded_server_ids: number[]
+  steal_excluded_server_ids: number[]
 }
 
 export interface AlertHistoryItem {

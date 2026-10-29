@@ -17,6 +17,7 @@ from typing import Optional
 from app.auth import verify_auth
 from app.database import async_session_maker, get_db
 from app.models import RemnawaveCertProfile, RemnawaveNginxProfile
+from app.routers.servers import clean_folder_name
 from app.services.deploy_job_manager import PostDeployOptions, get_deploy_job_manager
 from app.services.deploy_service import DeployParams, InstallerLanguage, build_install_command
 from app.services.http_client import validate_proxy_input
@@ -126,6 +127,8 @@ async def delete_remnawave_cert(
 class DeployRequest(BaseModel):
     name: str
     host: str
+    # Папка, в которую ляжет сервер после установки
+    folder: Optional[str] = Field(None, max_length=200)
     monitoring_port: int = Field(9100, ge=1, le=65535)
     ssh_port: int = 22
     ssh_user: str = "root"
@@ -358,7 +361,9 @@ async def deploy_server(
     )
 
     job_id = get_deploy_job_manager().start(
-        params, req.name, server_url, post_opts, wait_for_manual_install=req.manual,
+        params, req.name, server_url, post_opts,
+        folder=clean_folder_name(req.folder),
+        wait_for_manual_install=req.manual,
     )
     return {"job_id": job_id}
 

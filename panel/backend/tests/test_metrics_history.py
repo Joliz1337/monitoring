@@ -42,7 +42,7 @@ def iso(dt: datetime) -> str:
 
 RAW_ROW = {
     "timestamp": at(12, 0, 10),
-    "cpu_usage": 12.5, "cpu_usage_max": 41.0,
+    "cpu_usage": 12.5, "cpu_usage_max": 41.0, "cpu_steal": 3.0,
     "memory_percent": 55.0, "memory_used": 4_000, "memory_available": 3_000,
     "load_avg_1": 0.8,
     "net_rx_bytes_per_sec": 1_000.0, "net_rx_bytes_per_sec_max": 9_000.0,
@@ -55,7 +55,7 @@ RAW_ROW = {
 
 HOURLY_ROW = {
     "bucket": at(12), "data_points": 360,
-    "cpu_usage": 10.0, "max_cpu": 50.0,
+    "cpu_usage": 10.0, "max_cpu": 50.0, "cpu_steal": 2.0,
     "memory_percent": 50.0, "max_memory_percent": 52.0,
     "load_avg_1": 0.5, "max_load": 1.5,
     "net_rx_bytes_per_sec": 100.0, "max_net_rx_bytes_per_sec": 900.0,

@@ -8,7 +8,7 @@ from sqlalchemy import select, update, bindparam, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import re
 from urllib.parse import urlparse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 import httpx
 import json
@@ -194,6 +194,7 @@ class ServerCreate(BaseModel):
     name: str
     url: str
     proxy_url: Optional[str] = None
+    folder: Optional[str] = Field(None, max_length=200)
 
     @field_validator('url')
     @classmethod
@@ -225,6 +226,10 @@ class ServerUpdate(BaseModel):
     @classmethod
     def validate_proxy(cls, v: str | None) -> str | None:
         return validate_proxy_input(v)
+
+
+def clean_folder_name(folder: Optional[str]) -> Optional[str]:
+    return (folder or "").strip() or None
 
 
 class ServerReorder(BaseModel):
@@ -424,6 +429,7 @@ async def create_server(
         url=server.url.rstrip("/"),
         api_key=None,
         proxy_url=server.proxy_url,
+        folder=clean_folder_name(server.folder),
         pki_enabled=True,
         uses_shared_cert=True,
         position=next_position,
@@ -461,7 +467,7 @@ async def move_servers_to_folder(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    folder_value = data.folder.strip() if data.folder and data.folder.strip() else None
+    folder_value = clean_folder_name(data.folder)
     result = await db.execute(select(Server).where(Server.id.in_(data.server_ids)))
     servers = result.scalars().all()
     for s in servers:

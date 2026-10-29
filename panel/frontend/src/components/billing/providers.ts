@@ -4,7 +4,7 @@
  * Карточка, формы и калькулятор читают провайдера отсюда — новый провайдер
  * добавляется записью в PROVIDERS, а не ветками по всему разделу.
  */
-export type CloudProviderId = 'yandex_cloud' | 'selectel' | 'timeweb' | 'vk_cloud' | 'cloud_ru'
+export type CloudProviderId = 'yandex_cloud' | 'selectel' | 'timeweb' | 'vk_cloud' | 'cloud_ru' | 'onecloud'
 
 export interface CloudCredentialField {
   /** Поле модели, куда уходит значение */
@@ -96,6 +96,19 @@ const CLOUD_RU_ACCENT = {
   ghostButton: 'hover:text-emerald-400 hover:border-emerald-500/40',
   quickActive: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30',
   hintBox: 'text-emerald-400/80 bg-emerald-500/10',
+}
+
+const ONECLOUD_ACCENT = {
+  iconBg: 'bg-rose-500/20',
+  icon: 'text-rose-400',
+  badge: 'bg-rose-500/15 text-rose-400',
+  primaryButton:
+    'bg-gradient-to-r from-rose-500/20 to-pink-500/20 text-rose-400 ' +
+    'hover:from-rose-500/30 hover:to-pink-500/30 border border-rose-500/20 ' +
+    'hover:border-rose-500/40 shadow-sm shadow-rose-500/5',
+  ghostButton: 'hover:text-rose-400 hover:border-rose-500/40',
+  quickActive: 'bg-rose-500/20 text-rose-400 border border-rose-500/30',
+  hintBox: 'text-rose-400/80 bg-rose-500/10',
 }
 
 export const PROVIDERS: Record<CloudProviderId, CloudProviderMeta> = {
@@ -220,6 +233,22 @@ export const PROVIDERS: Record<CloudProviderId, CloudProviderMeta> = {
         hintKey: 'billing.cloudru_agreement_id_hint',
         placeholder: '3f2b8c1e-5a7d-4e9f-8b6a-1c2d3e4f5a6b',
         link: { url: 'https://console.cloud.ru/', label: 'console.cloud.ru' },
+      },
+    ],
+  },
+  onecloud: {
+    id: 'onecloud',
+    nameKey: 'billing.provider_onecloud',
+    defaultCurrency: 'RUB',
+    accent: ONECLOUD_ACCENT,
+    fields: [
+      {
+        key: 'cloud_credential',
+        labelKey: 'billing.onecloud_key',
+        hintKey: 'billing.onecloud_key_hint',
+        placeholder: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4...',
+        secret: true,
+        link: { url: 'https://panel.1cloud.ru/', label: 'panel.1cloud.ru' },
       },
     ],
   },

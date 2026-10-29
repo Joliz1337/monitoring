@@ -403,6 +403,20 @@ async def run_migrations(conn):
                 except Exception:
                     pass
 
+        steal_columns = [
+            ("steal_enabled", "BOOLEAN DEFAULT TRUE"),
+            ("steal_threshold", "FLOAT DEFAULT 20.0"),
+            ("steal_sustained_seconds", "INTEGER DEFAULT 300"),
+            ("steal_excluded_server_ids", "TEXT"),
+        ]
+        for col_name, col_type in steal_columns:
+            if col_name not in alert_columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE alert_settings ADD COLUMN "{col_name}" {col_type}'))
+                    logger.info(f"Added column: alert_settings.{col_name}")
+                except Exception:
+                    pass
+
         packet_loss_columns = [
             ("packet_loss_enabled", "BOOLEAN DEFAULT TRUE"),
             ("packet_loss_threshold", "FLOAT DEFAULT 20.0"),
@@ -2199,17 +2213,18 @@ async def _migrate_node_capabilities(conn):
         raise
 
 
-# Пики за окно опроса: (таблица, колонки). NULL — пика нет (старая нода, строка до миграции)
-_WINDOW_PEAK_COLUMNS = (
-    ("metrics_snapshots", ("cpu_usage_max", "net_rx_bytes_per_sec_max", "net_tx_bytes_per_sec_max")),
-    ("aggregated_metrics", ("max_load", "max_rx_speed", "max_tx_speed")),
+# Пики и steal за окно опроса: (таблица, колонки). NULL — значения нет
+# (старая нода, строка до миграции)
+_WINDOW_COLUMNS = (
+    ("metrics_snapshots", ("cpu_usage_max", "net_rx_bytes_per_sec_max", "net_tx_bytes_per_sec_max", "cpu_steal")),
+    ("aggregated_metrics", ("max_load", "max_rx_speed", "max_tx_speed", "avg_cpu_steal")),
 )
 
 
-async def _migrate_metrics_window_peaks(conn):
+async def _migrate_metrics_window_columns(conn):
     """ADD COLUMN FLOAT без DEFAULT в PG16 правит только каталог — горячая
     таблица снапшотов не переписывается, старт не задерживается."""
-    for table, peak_columns in _WINDOW_PEAK_COLUMNS:
+    for table, window_columns in _WINDOW_COLUMNS:
         result = await conn.execute(text(f"""
             SELECT column_name FROM information_schema.columns
             WHERE table_name = '{table}'
@@ -2217,7 +2232,7 @@ async def _migrate_metrics_window_peaks(conn):
         columns = {row[0] for row in result.fetchall()}
         if not columns:
             continue
-        for col_name in peak_columns:
+        for col_name in window_columns:
             if col_name in columns:
                 continue
             try:
@@ -2336,7 +2351,7 @@ async def init_db():
         await _migrate_db_optimizations(conn)
         await _migrate_traffic_v2(conn)
         await _migrate_node_capabilities(conn)
-        await _migrate_metrics_window_peaks(conn)
+        await _migrate_metrics_window_columns(conn)
         await _migrate_haproxy_profile_options(conn)
         await _migrate_source_pool_manual(conn)
         await _migrate_node_update_step(conn)

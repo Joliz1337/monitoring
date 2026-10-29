@@ -26,6 +26,8 @@ class CPUInfo(BaseModel):
     model: str
     usage_percent: float
     per_cpu_percent: list[float]
+    # Доля времени ядер, отнятая гипервизором; входит и в usage_percent
+    steal_percent: float = 0.0
     load_avg_1: float
     load_avg_5: float
     load_avg_15: float
@@ -299,6 +301,7 @@ class WindowRates(BaseModel):
     cpu_avg: float
     cpu_max: float
     per_cpu_avg: list[float]
+    steal_avg: float
     net_rx_avg: float
     net_tx_avg: float
     net_rx_max: float

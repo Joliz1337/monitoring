@@ -27,7 +27,7 @@ interface ServersState {
   
   fetchServers: () => Promise<void>
   fetchServersWithMetrics: () => Promise<void>
-  addServer: (data: { name: string; url: string; proxy_url?: string | null }) => Promise<{ success: boolean; error?: string }>
+  addServer: (data: { name: string; url: string; proxy_url?: string | null; folder?: string | null }) => Promise<{ success: boolean; error?: string }>
   updateServer: (id: number, data: Partial<Server>) => Promise<void>
   toggleServer: (id: number, isActive: boolean) => Promise<void>
   deleteServer: (id: number) => Promise<void>

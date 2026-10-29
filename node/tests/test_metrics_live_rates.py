@@ -34,6 +34,7 @@ SAMPLE = RateSample(
     sampled_at=1_700_000_000.0,
     window_sec=1.0,
     per_cpu_percent=[12.5, 37.5],
+    steal_percent=7.5,
     net={"eth0": (1_000.0, 2_000.0), "veth1": (1_000.0, 2_000.0)},
     disk={"sda": (300.0, 400.0), "sda1": (300.0, 400.0)},
     disk_total=(300.0, 400.0),
@@ -196,7 +197,7 @@ MINIMAL_PAYLOAD = {
 
 WINDOW_BLOCK = {
     "window_sec": 10.2, "samples": 10,
-    "cpu_avg": 12.3, "cpu_max": 41.0, "per_cpu_avg": [10.0, 14.6],
+    "cpu_avg": 12.3, "cpu_max": 41.0, "per_cpu_avg": [10.0, 14.6], "steal_avg": 4.2,
     "net_rx_avg": 1234.5, "net_tx_avg": 234.5, "net_rx_max": 9876.0, "net_tx_max": 876.0,
     "disk_read_avg": 0.0, "disk_write_avg": 0.0,
 }
@@ -212,8 +213,11 @@ class FakeSampler:
         return self.samples
 
 
-def window_sample(cpu, net, disk_total=(0.0, 0.0), window=1.0) -> RateSample:
-    return RateSample(sampled_at=0.0, window_sec=window, per_cpu_percent=cpu, net=net, disk_total=disk_total)
+def window_sample(cpu, net, disk_total=(0.0, 0.0), window=1.0, steal=0.0) -> RateSample:
+    return RateSample(
+        sampled_at=0.0, window_sec=window, per_cpu_percent=cpu, steal_percent=steal,
+        net=net, disk_total=disk_total,
+    )
 
 
 class WindowStatsTests(unittest.TestCase):
@@ -239,9 +243,9 @@ class WindowStatsTests(unittest.TestCase):
 
         samples = (
             window_sample([40.0, 20.0], {"eth0": (300.0, 30.0), "veth1": (999.0, 999.0)},
-                          disk_total=(400.0, 40.0), window=2.0),
+                          disk_total=(400.0, 40.0), window=2.0, steal=15.0),
             window_sample([10.0, 30.0], {"eth0": (100.0, 10.0), "veth1": (999.0, 999.0)},
-                          disk_total=(100.0, 10.0)),
+                          disk_total=(100.0, 10.0), steal=0.0),
         )
         collector, fake = self.collector_with(samples)
 
@@ -254,6 +258,7 @@ class WindowStatsTests(unittest.TestCase):
         self.assertEqual(block["samples"], 2)
         self.assertEqual((block["cpu_avg"], block["cpu_max"]), (26.7, 30.0))
         self.assertEqual(block["per_cpu_avg"], [30.0, 23.3])
+        self.assertEqual(block["steal_avg"], 10.0)
         # veth1 mirrors eth0 and must not inflate the sums
         self.assertEqual((block["net_rx_avg"], block["net_rx_max"]), (233.3, 300.0))
         self.assertEqual((block["net_tx_avg"], block["net_tx_max"]), (23.3, 30.0))
@@ -277,6 +282,7 @@ class CpuRatesTests(unittest.TestCase):
 
         self.assertEqual(cpu["per_cpu_percent"], [12.5, 37.5])
         self.assertEqual(cpu["usage_percent"], 25.0)
+        self.assertEqual(cpu["steal_percent"], 7.5)
 
     def test_without_sample_cpu_is_zero(self):
         with mock.patch.object(MetricsCollector, "_read_host_file", return_value=""):
@@ -284,6 +290,7 @@ class CpuRatesTests(unittest.TestCase):
 
         self.assertEqual(cpu["per_cpu_percent"], [])
         self.assertEqual(cpu["usage_percent"], 0)
+        self.assertEqual(cpu["steal_percent"], 0.0)
 
 
 if __name__ == "__main__":

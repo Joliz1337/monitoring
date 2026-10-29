@@ -23,6 +23,7 @@ from app.services.cloud_billing import (  # noqa: E402
 )
 from app.services.cloud_billing.base import MOSCOW_TZ, CloudSnapshot, compute_days_left  # noqa: E402
 from app.services.cloud_billing.cloud_ru import CloudRuProvider  # noqa: E402
+from app.services.cloud_billing.onecloud import OneCloudProvider, _forecast_days  # noqa: E402
 from app.services.cloud_billing import (  # noqa: E402
     HISTORY_WINDOW_DAYS,
     _balance_history_daily_cost,
@@ -593,6 +594,103 @@ class CloudRuProviderTests(unittest.TestCase):
             self._fetch(FakeVkClient({}), account_id=None)
 
 
+ONECLOUD_PROJECT = ("GET", "/project")
+
+
+def onecloud_project(till=None, real=500.5, bonus=1000, test=0):
+    """Форма ответа GET /project из документации 1cloud."""
+    return FakeResponse(200, {
+        "ID": 12345,
+        "Name": "DemoProject",
+        "Balance": real + bonus + test,
+        "Balances": {"Real": real, "Bonus": bonus, "Test": test},
+        "BalanceTillDateUtc": till,
+    })
+
+
+class OneCloudProviderTests(unittest.TestCase):
+    NOW = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
+
+    def _fetch(self, response):
+        client = FakeVkClient({ONECLOUD_PROJECT: response})
+        return client, asyncio.run(OneCloudProvider().fetch(client, "api-key", None))
+
+    def test_balance_sums_project_funds_and_forecast_becomes_days(self):
+        till = datetime.now(timezone.utc) + timedelta(days=30)
+        client, snapshot = self._fetch(
+            onecloud_project(till.isoformat(), real=500.5, bonus=1000, test=20)
+        )
+
+        self.assertEqual(snapshot.balance, 1520.5)
+        self.assertEqual(snapshot.currency, "RUB")
+        self.assertEqual(snapshot.days_left, 30.0)
+        self.assertIsNone(snapshot.daily_cost)
+        self.assertIsNone(snapshot.warning)
+        self.assertEqual(client.calls[0]["headers"]["Authorization"], "Bearer api-key")
+
+    def test_live_response_counts_real_once(self):
+        # Ответ живого аккаунта: Real уже включает Corporate и Individual
+        _, snapshot = self._fetch(FakeResponse(200, {
+            "ID": 383134,
+            "Name": "Личный проект",
+            "Balance": 3595.4151184462,
+            "Balances": {
+                "Real": 3595.4151184462, "Corporate": 0.0, "Individual": 3595.4151184462,
+                "Bonus": 0.0, "Test": 0.0,
+            },
+            "BalanceTillDateUtc": "2026-11-04",
+        }))
+
+        self.assertEqual(snapshot.balance, 3595.42)
+        self.assertIsNone(snapshot.warning)
+
+    def test_forecast_turns_into_term_and_daily_cost(self):
+        now = datetime.now(timezone.utc)
+        server = billing_server(cloud_provider="onecloud")
+        client = FakeVkClient({
+            ONECLOUD_PROJECT: onecloud_project((now + timedelta(days=30)).isoformat(), real=1500, bonus=0),
+        })
+
+        with patch("app.services.cloud_billing.get_external_client", return_value=client):
+            asyncio.run(sync_cloud_balance(server, now))
+
+        # Срок в панели — дата 1cloud, расход в день выведен из неё
+        self.assertEqual(server.paid_until, now + timedelta(days=30))
+        self.assertEqual(server.cloud_daily_cost, 50.0)
+
+    def test_forecast_dates_in_net_formats(self):
+        # Живой аккаунт отдаёт дату без времени — это полночь UTC; на случай
+        # полного DateTime: без зоны — UTC по имени поля, у .NET до 7 знаков дробной части
+        self.assertEqual(_forecast_days("2026-11-07", self.NOW), (9.5, None))
+        self.assertEqual(_forecast_days("2026-11-07T12:00:00", self.NOW), (10.0, None))
+        self.assertEqual(_forecast_days("2026-11-07T12:00:00.1234567Z", self.NOW), (10.0, None))
+
+    def test_empty_or_far_forecast_means_unknown_term(self):
+        self.assertEqual(_forecast_days(None, self.NOW), (None, None))
+        self.assertEqual(_forecast_days("9999-12-31T23:59:59.9999999", self.NOW), (None, None))
+
+    def test_unreadable_forecast_keeps_balance(self):
+        _, snapshot = self._fetch(onecloud_project("next tuesday"))
+
+        self.assertEqual(snapshot.balance, 1500.5)
+        self.assertIsNone(snapshot.days_left)
+        self.assertIn("Forecast unavailable", snapshot.warning)
+
+    def test_deprecated_balance_backs_up_missing_balances(self):
+        _, snapshot = self._fetch(FakeResponse(200, {"ID": 1, "Balance": 13520.65}))
+
+        self.assertEqual(snapshot.balance, 13520.65)
+        self.assertIsNone(snapshot.days_left)
+
+    def test_response_without_balance_is_an_error(self):
+        with self.assertRaises(CloudBillingError):
+            self._fetch(FakeResponse(200, {"ID": 1}))
+
+    def test_bad_key_raises_auth_error(self):
+        with self.assertRaises(CloudAuthError):
+            self._fetch(FakeResponse(401, None, "unauthorized"))
+
+
 class BalanceHistoryTests(unittest.TestCase):
     """Расход по снимкам баланса — для провайдеров без текущего расхода в API."""
 
@@ -806,6 +904,9 @@ class SyncCloudBalanceTests(unittest.TestCase):
         cloud_ru = get_provider("cloud_ru")
         self.assertTrue(cloud_ru.requires_login and cloud_ru.requires_account_id)
         self.assertTrue(cloud_ru.uses_balance_history)
+        onecloud = get_provider("onecloud")
+        self.assertFalse(onecloud.requires_login or onecloud.requires_account_id)
+        self.assertFalse(onecloud.uses_balance_history)
 
     def test_vk_cloud_requires_login(self):
         server = billing_server(cloud_provider="vk_cloud", cloud_account_id="b5b7ffd4ef05")

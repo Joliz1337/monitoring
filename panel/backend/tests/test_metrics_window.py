@@ -18,6 +18,7 @@ from app.services.metrics_rates import (  # noqa: E402
     MAX_WINDOW_SEC,
     NodeRates,
     NodeWindow,
+    node_steal_percent,
     node_window_rates,
     poll_window_seconds,
     snapshot_rates,
@@ -112,6 +113,34 @@ class SnapshotRatesTests(unittest.TestCase):
         self.assertEqual(rates.per_cpu_percent, [70.0, 84.0])
         self.assertIsNone(rates.cpu_usage_max)
         self.assertEqual((rates.net_rx, rates.net_rx_max), (1234.5, 9876.0))
+
+
+class NodeStealPercentTests(unittest.TestCase):
+    """Steal — часть CPU, которую забрал гипервизор; по нему шлётся алерт и рисуется линия."""
+
+    def test_window_average_wins_over_instant_probe(self):
+        metrics = node_metrics(window=True)
+        metrics["window"]["steal_avg"] = 45.9
+        metrics["cpu"]["steal_percent"] = 10.0
+
+        self.assertEqual(node_steal_percent(metrics), 45.9)
+
+    def test_window_without_measured_cpu_falls_back_to_instant_probe(self):
+        metrics = node_metrics(window=True)
+        metrics["window"].update({"per_cpu_avg": [], "steal_avg": 0.0})
+        metrics["cpu"]["steal_percent"] = 12.0
+
+        self.assertEqual(node_steal_percent(metrics), 12.0)
+
+    def test_node_without_steal_gives_none(self):
+        self.assertIsNone(node_steal_percent(node_metrics(window=True)))
+
+    def test_snapshot_carries_steal_or_none(self):
+        metrics = node_metrics(window=True)
+        metrics["window"]["steal_avg"] = 30.0
+
+        self.assertEqual(snapshot_rates(metrics, PANEL_DELTAS).cpu_steal, 30.0)
+        self.assertIsNone(snapshot_rates(node_metrics(), PANEL_DELTAS).cpu_steal)
 
 
 class PollWindowSecondsTests(unittest.TestCase):

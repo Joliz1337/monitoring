@@ -44,6 +44,10 @@ TIMEOUT_CREDENTIALS_SCREEN=7200 # keep panel login details on screen until Enter
 MAX_RETRIES=3
 RETRY_DELAY=5
 
+# Сервер не смог скачать нужное: панель повторит такую установку по SSH с
+# загрузкой через себя. Тот же код — INSTALLER_DOWNLOAD_FAILED_EXIT в панели
+EXIT_DOWNLOAD_FAILED=21
+
 # ==================== Trap and Cleanup ====================
 
 acquire_lock() {
@@ -1989,7 +1993,8 @@ haproxy_install_key() {
 }
 
 # Подключает репозиторий новейшей LTS-ветки под этот релиз и кладёт её в
-# HAPROXY_BRANCH. Код 1 — сборки нет или репозиторий не ответил, причина в логе
+# HAPROXY_BRANCH. Код 1 — сборки нет; 2 — репозиторий или ключ не скачались.
+# Причина в логе
 haproxy_setup_repo() {
     local os_id codename branch rc
     os_id=$(. /etc/os-release 2>/dev/null && echo "${ID:-}")
@@ -2007,7 +2012,7 @@ haproxy_setup_repo() {
         # Ветки лежат на одном хосте: не ответил один — не ответят и остальные
         if [ $rc -eq 2 ]; then
             log_warn "$(msg haproxy_repo_unreachable): ${HAPROXY_REPO_ERROR}"
-            return 1
+            return 2
         fi
     done
     if [ -z "$HAPROXY_REPO" ]; then
@@ -2015,7 +2020,7 @@ haproxy_setup_repo() {
         return 1
     fi
 
-    haproxy_install_key "$os_id" || return 1
+    haproxy_install_key "$os_id" || return 2
     echo "deb [signed-by=${HAPROXY_KEYRING}] ${HAPROXY_REPO} main" > "$HAPROXY_SOURCES"
     HAPROXY_BRANCH="$branch"
     log_info "$(msg haproxy_branch_selected): ${HAPROXY_BRANCH}"
@@ -2144,21 +2149,24 @@ install_haproxy() {
 }
 
 # Кнопка «Обновить HAProxy» в панели (MON_INSTALL_HAPROXY=1): новейшая LTS-ветка
-# под этот релиз или свежий патч текущей; при любой ошибке — откат на прежнюю версию
+# под этот релиз или свежий патч текущей; при любой ошибке — откат на прежнюю версию.
+# Код 2 — сервер не скачал обновление, работающий HAProxy не тронут
 upgrade_haproxy() {
     command -v haproxy &>/dev/null || { install_haproxy; return; }
 
-    local old_version sources_backup=""
+    local old_version sources_backup="" rc
     old_version=$(haproxy_package_version)
     if [ -f "$HAPROXY_SOURCES" ]; then
         sources_backup=$(mktemp)
         cp -f "$HAPROXY_SOURCES" "$sources_backup"
     fi
 
-    if ! haproxy_setup_repo; then
+    haproxy_setup_repo
+    rc=$?
+    if [ $rc -ne 0 ]; then
         log_error "$(msg haproxy_left_as_is)"
         haproxy_restore_sources "$sources_backup"
-        return 1
+        return $rc
     fi
     if dpkg --compare-versions "$(haproxy_branch_of "$old_version")" gt "$HAPROXY_BRANCH"; then
         log_success "$(msg haproxy_up_to_date): ${old_version}"
@@ -2170,7 +2178,7 @@ upgrade_haproxy() {
     if ! { haproxy_update_lists && apt_install_safe "haproxy=${HAPROXY_BRANCH}.*"; }; then
         log_error "$(msg haproxy_install_failed)"
         haproxy_restore_sources "$sources_backup"
-        return 1
+        return 2
     fi
 
     local new_version
@@ -3435,7 +3443,12 @@ PROXYEOF
     fi
 
     if [ "${MON_INSTALL_HAPROXY:-0}" = "1" ]; then
-        upgrade_haproxy || { log_error "HAProxy upgrade failed"; exit 1; }
+        upgrade_haproxy || {
+            local rc=$?
+            log_error "HAProxy upgrade failed"
+            [ $rc -eq 2 ] && exit "$EXIT_DOWNLOAD_FAILED"
+            exit 1
+        }
     fi
 
     log_success "Unattended installation complete"

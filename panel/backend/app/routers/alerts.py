@@ -81,6 +81,10 @@ class AlertSettingsUpdate(BaseModel):
     conntrack_enabled: Optional[bool] = None
     conntrack_threshold: Optional[float] = None
 
+    steal_enabled: Optional[bool] = None
+    steal_threshold: Optional[float] = Field(None, ge=1, le=100)
+    steal_sustained_seconds: Optional[int] = Field(None, ge=60, le=3600)
+
     packet_loss_enabled: Optional[bool] = None
     packet_loss_threshold: Optional[float] = Field(None, ge=1, le=100)
     packet_loss_sustained_seconds: Optional[int] = Field(None, ge=60, le=3600)
@@ -97,6 +101,7 @@ class AlertSettingsUpdate(BaseModel):
     load_avg_excluded_server_ids: Optional[list[int]] = None
     conntrack_excluded_server_ids: Optional[list[int]] = None
     packet_loss_excluded_server_ids: Optional[list[int]] = None
+    steal_excluded_server_ids: Optional[list[int]] = None
 
 
 class TelegramTestRequest(BaseModel):
@@ -158,6 +163,9 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "load_avg_sustained_checks": s.load_avg_sustained_checks,
         "conntrack_enabled": s.conntrack_enabled,
         "conntrack_threshold": s.conntrack_threshold,
+        "steal_enabled": s.steal_enabled,
+        "steal_threshold": s.steal_threshold,
+        "steal_sustained_seconds": s.steal_sustained_seconds,
         "packet_loss_enabled": s.packet_loss_enabled,
         "packet_loss_threshold": s.packet_loss_threshold,
         "packet_loss_sustained_seconds": s.packet_loss_sustained_seconds,
@@ -172,6 +180,7 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "load_avg_excluded_server_ids": json.loads(s.load_avg_excluded_server_ids) if s.load_avg_excluded_server_ids else [],
         "conntrack_excluded_server_ids": json.loads(s.conntrack_excluded_server_ids) if s.conntrack_excluded_server_ids else [],
         "packet_loss_excluded_server_ids": json.loads(s.packet_loss_excluded_server_ids) if s.packet_loss_excluded_server_ids else [],
+        "steal_excluded_server_ids": json.loads(s.steal_excluded_server_ids) if s.steal_excluded_server_ids else [],
     }
 
 
@@ -204,7 +213,7 @@ async def update_alert_settings(
         "cpu_excluded_server_ids", "ram_excluded_server_ids",
         "network_excluded_server_ids", "tcp_excluded_server_ids",
         "load_avg_excluded_server_ids", "conntrack_excluded_server_ids",
-        "packet_loss_excluded_server_ids",
+        "packet_loss_excluded_server_ids", "steal_excluded_server_ids",
     }
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():

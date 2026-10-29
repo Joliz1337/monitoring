@@ -24,7 +24,9 @@ from app.services.loss_alerts import (
     total_only_targets,
 )
 from app.services.loss_registry import get_loss_registry
+from app.services.metrics_rates import node_steal_percent
 from app.services.socks_probe import ProxyFault, find_proxy_fault
+from app.services.steal_alerts import StealEvent, StealPolicy, StealWatch
 from app.services.traffic_ingest import get_traffic_ingest
 
 ALERT_HISTORY_RETENTION_DAYS = 30
@@ -51,6 +53,18 @@ PROXY_FAULT_REASONS = {
 }
 
 logger = logging.getLogger(__name__)
+
+# Ниже этого steal в CPU-алерте не упоминается: пара процентов — фон любой ВМ
+STEAL_NOTE_MIN_PERCENT = 5.0
+
+# Пары «проблема → снята»: если последней по серверу в истории была проблема,
+# после рестарта она ещё открыта — «снята» должно прийти при восстановлении
+PAIRED_ALERT_OPENER = {
+    "offline": "offline",
+    "recovery": "offline",
+    "steal_high": "steal_high",
+    "steal_recovered": "steal_high",
+}
 
 EMA_WINDOW = 30
 EMA_ALPHA = 2.0 / (EMA_WINDOW + 1)
@@ -82,6 +96,7 @@ class ServerAlertState:
         self.ema_tcp_finwait: float = 0.0
 
         self.load_avg_fail_count: int = 0
+        self.steal = StealWatch()
 
         self.alert_start: dict[str, float] = {}
         self.last_alert: dict[str, float] = {}
@@ -169,7 +184,7 @@ class ServerAlerter:
 
             now_ts = time.time()
             now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-            last_offline_event: dict[int, tuple[datetime, str]] = {}
+            last_paired_event: dict[tuple[int, str], tuple[datetime, str]] = {}
 
             for server_id, alert_type, created_at in rows:
                 if created_at is None:
@@ -180,16 +195,22 @@ class ServerAlerter:
                 state = self._states.setdefault(server_id, ServerAlertState())
                 state.last_alert[alert_type] = now_ts - (now_utc - created_at).total_seconds()
 
-                if alert_type in ("offline", "recovery"):
-                    prev = last_offline_event.get(server_id)
+                opener = PAIRED_ALERT_OPENER.get(alert_type)
+                if opener:
+                    prev = last_paired_event.get((server_id, opener))
                     if prev is None or created_at > prev[0]:
-                        last_offline_event[server_id] = (created_at, alert_type)
+                        last_paired_event[(server_id, opener)] = (created_at, alert_type)
 
             # Сервер, по которому offline свежее recovery, всё ещё считается лежащим —
-            # повторный offline-алерт не уйдёт, а recovery при оживании сработает
-            for server_id, (_, alert_type) in last_offline_event.items():
-                if alert_type == "offline":
+            # повторный offline-алерт не уйдёт, а recovery при оживании сработает.
+            # Так же steal: «в норме» придёт, когда steal уйдёт
+            for (server_id, opener), (_, alert_type) in last_paired_event.items():
+                if alert_type != opener:
+                    continue
+                if opener == "offline":
                     self._states[server_id].was_offline = True
+                else:
+                    self._states[server_id].steal.alerted = True
 
             if rows:
                 logger.info(f"Alert state restored from history: {len(rows)} entries")
@@ -278,6 +299,7 @@ class ServerAlerter:
             "load_avg": self._parse_id_list(settings.load_avg_excluded_server_ids),
             "conntrack": self._parse_id_list(settings.conntrack_excluded_server_ids),
             "packet_loss": self._parse_id_list(settings.packet_loss_excluded_server_ids),
+            "steal": self._parse_id_list(settings.steal_excluded_server_ids),
         }
 
         async with async_session() as db:
@@ -335,8 +357,12 @@ class ServerAlerter:
         await self._check_antiddos(srv, state, settings, now, metrics)
 
         cpu_val = self._extract_cpu(metrics)
+        steal_val = node_steal_percent(metrics)
         ram_val = self._extract_ram(metrics)
         tcp = self._extract_tcp(metrics)
+
+        # --- Steal (порог, а не скачок — EMA не нужна) ---
+        await self._check_steal(srv, state, settings, now, steal_val, cpu_val)
 
         # Скорость сети берём у учёта трафика: он единственный владелец дельт по
         # счётчикам интерфейсов. Своя вторая формула расходилась с историей после
@@ -378,6 +404,7 @@ class ServerAlerter:
                 label="CPU",
                 unit="%",
                 min_value=settings.cpu_min_value or 0,
+                note=self._steal_note(settings, steal_val),
             )
 
         # --- RAM ---
@@ -551,6 +578,35 @@ class ServerAlerter:
         if self._lang(settings) == "ru":
             return f"Падение {label} на {srv.name}: {current_str} (базовое {ema_str}, -{pct:.0f}%)"
         return f"{label} drop on {srv.name}: {current_str} (baseline {ema_str}, -{pct:.0f}%)"
+
+    def _msg_steal_high(
+        self, srv: Server, settings: AlertSettings, steal: float, threshold: float, minutes: int, own: float,
+    ) -> str:
+        if self._lang(settings) == "ru":
+            return (
+                f"Хостер забирает процессор у {srv.name}: steal {steal:.0f}% уже {minutes} мин "
+                f"(порог {threshold:.0f}%). Своя нагрузка сервера — {own:.0f}%. "
+                f"Физический сервер хостера перегружен — попросите перенести ВМ на другой хост"
+            )
+        return (
+            f"The hoster is taking CPU from {srv.name}: steal {steal:.0f}% for {minutes} min "
+            f"(threshold {threshold:.0f}%). The server's own load is {own:.0f}%. "
+            f"The hoster's physical machine is overloaded — ask them to move the VM to another host"
+        )
+
+    def _msg_steal_recovered(self, srv: Server, settings: AlertSettings, steal: float, threshold: float) -> str:
+        if self._lang(settings) == "ru":
+            return f"Steal на {srv.name} в норме: {steal:.0f}% (порог {threshold:.0f}%)"
+        return f"Steal on {srv.name} is back to normal: {steal:.0f}% (threshold {threshold:.0f}%)"
+
+    def _steal_note(self, settings: AlertSettings, steal: Optional[float]) -> str:
+        """Приписка к CPU-алерту: steal входит в CPU, и без неё нагрузку хостера
+        легко принять за свою."""
+        if steal is None or steal < STEAL_NOTE_MIN_PERCENT:
+            return ""
+        if self._lang(settings) == "ru":
+            return f" — из них steal {steal:.0f}%, его забирает хостер"
+        return f" — {steal:.0f}% of it is steal taken by the hoster"
 
     def _msg_header(self, settings: AlertSettings) -> str:
         if self._lang(settings) == "ru":
@@ -780,6 +836,49 @@ class ServerAlerter:
             logger.error(f"Failed to save packet loss episodes: {e}")
 
     # ------------------------------------------------------------------
+    # Steal
+    # ------------------------------------------------------------------
+    async def _check_steal(
+        self,
+        srv: Server,
+        state: ServerAlertState,
+        settings: AlertSettings,
+        now: float,
+        steal: Optional[float],
+        cpu: float,
+    ):
+        watch = state.steal
+        if not settings.steal_enabled or srv.id in self._trigger_excluded["steal"]:
+            watch.reset()
+            return
+        # Нода до 10.34.0 steal не присылает — эпизод ждёт данных, а не закрывается
+        if steal is None:
+            return
+
+        threshold = settings.steal_threshold or 20.0
+        policy = StealPolicy(threshold=threshold, sustained_sec=settings.steal_sustained_seconds or 300)
+        event = watch.evaluate(steal, now, policy)
+        details = {"steal": round(steal, 1), "cpu": round(cpu, 1), "threshold": threshold}
+
+        if event is StealEvent.HIGH:
+            if not self._cooldown_ok(state, event.value, now, settings.alert_cooldown or 1800):
+                return
+            state.last_alert[event.value] = now
+            watch.alerted = True
+            minutes = max(1, round(watch.high_for(now) / 60))
+            await self._send_and_save(
+                srv, settings, event.value, "warning",
+                self._msg_steal_high(srv, settings, steal, threshold, minutes, max(cpu - steal, 0.0)),
+                details,
+            )
+        elif event is StealEvent.RECOVERED:
+            await self._send_and_save(
+                srv, settings, event.value, "info",
+                self._msg_steal_recovered(srv, settings, steal, threshold),
+                details,
+            )
+
+    # ------------------------------------------------------------------
     # Load Average
     # ------------------------------------------------------------------
     async def _check_load_avg(
@@ -887,6 +986,7 @@ class ServerAlerter:
         label: str,
         unit: str = "%",
         min_value: float = 0,
+        note: str = "",
     ):
         if current >= critical_threshold:
             self._track_condition(state, critical_type, now)
@@ -895,7 +995,7 @@ class ServerAlerter:
                     state.last_alert[critical_type] = now
                     await self._send_and_save(
                         srv, settings, critical_type, "critical",
-                        self._msg_critical(srv, settings, label, current, critical_threshold, unit),
+                        self._msg_critical(srv, settings, label, current, critical_threshold, unit) + note,
                         {"current": round(current, 1), "threshold": critical_threshold, "ema": round(ema, 1)},
                     )
         else:
@@ -917,7 +1017,7 @@ class ServerAlerter:
                     state.last_alert[spike_type] = now
                     await self._send_and_save(
                         srv, settings, spike_type, "warning",
-                        self._msg_spike(srv, settings, label, f"{current:.1f}{unit}", f"{ema:.1f}{unit}", deviation_pct),
+                        self._msg_spike(srv, settings, label, f"{current:.1f}{unit}", f"{ema:.1f}{unit}", deviation_pct) + note,
                         {"current": round(current, 1), "ema": round(ema, 1), "deviation_pct": round(deviation_pct, 1)},
                     )
         else:

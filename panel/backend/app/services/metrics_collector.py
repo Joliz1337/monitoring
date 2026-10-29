@@ -745,6 +745,7 @@ class MetricsCollector:
             "timestamp": now_utc,
             "cpu_usage": rates.cpu_usage,
             "cpu_usage_max": rates.cpu_usage_max,
+            "cpu_steal": rates.cpu_steal,
             "load_avg_1": cpu.get("load_avg_1", 0),
             "load_avg_5": cpu.get("load_avg_5", 0),
             "load_avg_15": cpu.get("load_avg_15", 0),
@@ -1151,7 +1152,7 @@ class MetricsCollector:
         await db.execute(text("""
             INSERT INTO aggregated_metrics (
                 server_id, timestamp, period_type,
-                avg_cpu, max_cpu, avg_load, max_load,
+                avg_cpu, max_cpu, avg_cpu_steal, avg_load, max_load,
                 avg_memory_percent, max_memory_percent, avg_disk_percent,
                 total_rx_bytes, total_tx_bytes,
                 avg_rx_speed, avg_tx_speed, max_rx_speed, max_tx_speed,
@@ -1162,7 +1163,7 @@ class MetricsCollector:
             )
             SELECT
                 m.server_id, :hour_start, 'hour',
-                AVG(m.cpu_usage), MAX(COALESCE(m.cpu_usage_max, m.cpu_usage)),
+                AVG(m.cpu_usage), MAX(COALESCE(m.cpu_usage_max, m.cpu_usage)), AVG(m.cpu_steal),
                 AVG(m.load_avg_1), MAX(m.load_avg_1),
                 AVG(m.memory_percent), MAX(m.memory_percent), AVG(m.disk_percent),
                 COALESCE(MAX(t.rx_bytes), 0), COALESCE(MAX(t.tx_bytes), 0),
@@ -1199,7 +1200,7 @@ class MetricsCollector:
         await db.execute(text("""
             INSERT INTO aggregated_metrics (
                 server_id, timestamp, period_type,
-                avg_cpu, max_cpu, avg_load, max_load,
+                avg_cpu, max_cpu, avg_cpu_steal, avg_load, max_load,
                 avg_memory_percent, max_memory_percent, avg_disk_percent,
                 total_rx_bytes, total_tx_bytes,
                 avg_rx_speed, avg_tx_speed, max_rx_speed, max_tx_speed,
@@ -1210,7 +1211,7 @@ class MetricsCollector:
             )
             SELECT
                 server_id, :day_start, 'day',
-                AVG(avg_cpu), MAX(max_cpu), AVG(avg_load), MAX(COALESCE(max_load, avg_load)),
+                AVG(avg_cpu), MAX(max_cpu), AVG(avg_cpu_steal), AVG(avg_load), MAX(COALESCE(max_load, avg_load)),
                 AVG(avg_memory_percent), MAX(max_memory_percent), AVG(avg_disk_percent),
                 COALESCE(SUM(total_rx_bytes), 0), COALESCE(SUM(total_tx_bytes), 0),
                 AVG(avg_rx_speed), AVG(avg_tx_speed),

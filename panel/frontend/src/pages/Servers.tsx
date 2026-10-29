@@ -29,6 +29,7 @@ import {
   Lock,
   Activity,
   FolderPlus,
+  Folder,
   GripVertical,
 } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -68,6 +69,7 @@ import ManualInstallBlock from '../components/servers/ManualInstallBlock'
 import { FolderStatusCounts } from '../components/Dashboard/FolderStats'
 import { SortableFolder, UnfolderDropZone, FolderDragPreview } from '../components/folders/SortableFolder'
 import { FolderDialogs } from '../components/folders/FolderDialogs'
+import { FolderChips, type FolderOption } from '../components/folders/FolderChips'
 import { useFolderBoard, FOLDER_SORTABLE_PREFIX } from '../hooks/useFolderBoard'
 import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import { writeStorage } from '../utils/storage'
@@ -81,9 +83,12 @@ interface ServerFormData {
   host: string
   port: string
   proxy: string
+  folder: string | null
 }
 
-const makeExtraTarget = (seed: DeployFormData): ExtraTarget => ({
+const EMPTY_SERVER_FORM: ServerFormData = { name: '', host: '', port: '9100', proxy: '', folder: null }
+
+const makeExtraTarget = (seed: DeployFormData, folder: string | null): ExtraTarget => ({
   id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
     : `t-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -91,6 +96,7 @@ const makeExtraTarget = (seed: DeployFormData): ExtraTarget => ({
   host: '',
   port: '9100',
   proxy: '',
+  folder,
   deploy: { ...seed, enabled: true },
   status: 'idle',
   log: [],
@@ -207,7 +213,7 @@ export default function Servers() {
 
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
-  const [formData, setFormData] = useState<ServerFormData>({ name: '', host: '', port: '9100', proxy: '' })
+  const [formData, setFormData] = useState<ServerFormData>(EMPTY_SERVER_FORM)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [testResults, setTestResults] = useState<Record<number, { status: string; message?: string }>>({})
@@ -250,12 +256,12 @@ export default function Servers() {
 
   const removeExtra = (id: string) => setExtras(prev => prev.filter(t => t.id !== id))
 
-  const addExtra = () => setExtras(prev => [...prev, makeExtraTarget(deploy)])
+  const addExtra = () => setExtras(prev => [...prev, makeExtraTarget(deploy, formData.folder)])
 
   const resetForm = useCallback(() => {
     setShowForm(false)
     setEditingId(null)
-    setFormData({ name: '', host: '', port: '9100', proxy: '' })
+    setFormData(EMPTY_SERVER_FORM)
     setDeploy(DEPLOY_DEFAULTS)
     setDeployLog([])
     setPrimaryStatus('idle')
@@ -302,6 +308,12 @@ export default function Servers() {
     activeByFolder: groupByFolder(displayedServers.filter(s => s.is_active)),
     disabledByFolder: groupByFolder(displayedServers.filter(s => !s.is_active)),
   }), [displayedServers])
+
+  const folderOptions = useMemo<FolderOption[]>(() => {
+    const byFolder = groupByFolder(servers)
+    return collectFolders(servers, board.emptyFolders, board.folderOrder)
+      .map(name => ({ name, serverCount: byFolder.get(name)?.length ?? 0 }))
+  }, [servers, board.emptyFolders, board.folderOrder])
 
   const activeServer = board.activeServerId === null
     ? undefined
@@ -393,7 +405,7 @@ export default function Servers() {
         await updateServer(editingId, updateData)
         toast.success(t('servers.server_updated'))
         setEditingId(null)
-        setFormData({ name: '', host: '', port: '9100', proxy: '' })
+        setFormData(EMPTY_SERVER_FORM)
         setShowForm(false)
       } catch {
         toast.error(t('servers.failed_update'))
@@ -408,12 +420,13 @@ export default function Servers() {
         name: formData.name,
         url: buildServerUrl(formData.host, formData.port),
         proxy_url: proxyTrim || null,
+        folder: formData.folder,
       }
       const result = await addServer(serverData)
       if (result.success) {
         toast.success(t('servers.server_added'))
         setShowForm(false)
-        setFormData({ name: '', host: '', port: '9100', proxy: '' })
+        setFormData(EMPTY_SERVER_FORM)
       } else {
         toast.error(result.error || t('servers.failed_add'))
         setError(result.error || t('servers.failed_add'))
@@ -454,11 +467,12 @@ export default function Servers() {
     return null
   }
 
-  const buildDeployBody = (name: string, host: string, port: string, d: DeployFormData, proxy: string) => ({
-    name,
-    host,
-    socks5_proxy: proxy.trim() || null,
-    monitoring_port: parseInt(port || '9100', 10),
+  const buildDeployBody = (target: ServerFormData, d: DeployFormData) => ({
+    name: target.name,
+    host: target.host,
+    folder: target.folder,
+    socks5_proxy: target.proxy.trim() || null,
+    monitoring_port: parseInt(target.port || '9100', 10),
     ssh_port: parseInt(d.sshPort || '22', 10),
     ssh_user: d.sshUser.trim() || 'root',
     ssh_password: d.sshAuth === 'password' ? d.sshPassword : null,
@@ -570,7 +584,7 @@ export default function Servers() {
   }
 
   const deployPrimary = async (manual = false): Promise<boolean> => {
-    const body = { ...buildDeployBody(formData.name, formData.host, formData.port, deploy, formData.proxy), manual }
+    const body = { ...buildDeployBody(formData, deploy), manual }
     let jobId: string
     try {
       const res = await serversApi.startDeploy(body)
@@ -587,7 +601,7 @@ export default function Servers() {
   const deployExtra = async (id: string): Promise<boolean> => {
     const target = extras.find(t => t.id === id)
     if (!target) return false
-    const body = buildDeployBody(target.name, target.host, target.port, target.deploy, target.proxy)
+    const body = buildDeployBody(target, target.deploy)
     let jobId: string
     try {
       const res = await serversApi.startDeploy(body)
@@ -626,7 +640,7 @@ export default function Servers() {
 
     for (const s of alive) {
       if (s.kind === 'primary') {
-        setFormData({ name: s.name, host: s.host, port: s.port, proxy: '' })
+        setFormData({ ...EMPTY_SERVER_FORM, name: s.name, host: s.host, port: s.port })
         setPrimaryStatus('running')
         setDeployLog([])
         void followPrimaryJob(s.jobId)
@@ -638,6 +652,7 @@ export default function Servers() {
           host: s.host,
           port: s.port,
           proxy: '',
+          folder: null,
           deploy: { ...DEPLOY_DEFAULTS, enabled: true },
           status: 'running',
           log: [],
@@ -732,7 +747,7 @@ export default function Servers() {
   // Команда для ручного запуска собирается на бэке из тех же опций, что и автоустановка
   useEffect(() => {
     if (!showForm || !deploy.enabled || !manualOpen) return
-    const body = buildDeployBody(formData.name, formData.host, formData.port, deploy, formData.proxy)
+    const body = buildDeployBody(formData, deploy)
     let cancelled = false
     setManualCommandLoading(true)
     const timer = setTimeout(() => {
@@ -825,6 +840,7 @@ export default function Servers() {
       host,
       port,
       proxy: server.proxy_url ?? '',
+      folder: server.folder ?? null,
     })
     setError('')
   }
@@ -1533,6 +1549,19 @@ export default function Servers() {
                 </p>
               </div>
 
+              <div>
+                <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+                  <Folder className="w-4 h-4" />
+                  {t('servers.folder_label')}
+                </label>
+                <FolderChips
+                  folders={folderOptions}
+                  value={formData.folder}
+                  onChange={(folder) => setFormData(d => ({ ...d, folder }))}
+                  disabled={primaryStatus === 'running'}
+                />
+              </div>
+
               {/* Авторазвёртывание по SSH */}
               <div className="rounded-xl border border-dark-700/50 bg-dark-800/30 overflow-hidden">
                 <label className="flex items-center gap-3 p-4 cursor-pointer">
@@ -1621,6 +1650,7 @@ export default function Servers() {
                         onRemove={() => removeExtra(target.id)}
                         onRetry={() => retryExtra(target.id)}
                         onAddAnother={addExtra}
+                        folders={folderOptions}
                         remnaCertProfiles={remnaCertProfiles}
                         haproxyProfiles={haproxyProfiles}
                         firewallProfiles={firewallProfiles}

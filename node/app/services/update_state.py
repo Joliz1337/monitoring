@@ -126,6 +126,18 @@ def resolve_orphaned(attempt: UpdateAttempt, container: Optional[UpdaterContaine
     ))
 
 
+def is_abandoned(container: UpdaterContainer, attempt: Optional[UpdateAttempt]) -> bool:
+    """Апдейтер, которого агент перестал ждать: итог его попытки уже записан, а
+    контейнер всё ещё работает — значит, он завис. Обновлением он не считается,
+    иначе каждое следующее получало бы «уже идёт» и нода не обновилась бы никогда."""
+    return (
+        container.running
+        and attempt is not None
+        and not attempt.running
+        and container.attempt_id == attempt.attempt_id
+    )
+
+
 def current_stage(logs: str) -> Optional[str]:
     """Последний пройденный этап по меткам в логе апдейтера."""
     stages = [stage for stage in _STAGE_MARKER.findall(logs) if stage in UPDATE_STAGES]

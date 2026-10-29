@@ -51,6 +51,7 @@ from app.services.update_state import (
     UpdateStateStore,
     UpdaterContainer,
     current_stage,
+    is_abandoned,
     new_attempt,
     outcome_from_exit,
     resolve_orphaned,
@@ -69,6 +70,8 @@ UPDATER_CONTAINER_NAME = "monitoring-updater"
 # apply-update.sh качает образы ДО рестарта контейнеров: на медленной сети pull
 # занимает десятки минут (наблюдалось 755с на слой) — ждём до 2 часов
 UPDATER_WAIT_TIMEOUT = 7200
+# apk ждёт подвисшее зеркало Alpine бесконечно: апдейтер так висел неделями
+UPDATER_DEPS_TIMEOUT = 300
 
 # Оба значения подставляются в текст shell-скрипта, который апдейтер исполняет на
 # хосте через nsenter — то есть это прямой путь к произвольной команде от root.
@@ -273,7 +276,10 @@ async def _current_update_state() -> tuple[Optional[UpdateAttempt], bool, Option
             logger.warning(f"Failed to check updater container state: {e}")
             return attempt, running_here or (attempt is not None and attempt.running), None
 
-        in_progress = running_here or (container is not None and container.running)
+        updater_running = (
+            container is not None and container.running and not is_abandoned(container, attempt)
+        )
+        in_progress = running_here or updater_running
         if attempt is not None and attempt.running and not in_progress:
             # Попытку начал прежний процесс агента: при успехе apply-update.sh
             # пересоздал контейнер, и итог остался только в контейнере апдейтера
@@ -346,8 +352,11 @@ set -e
 
 echo "[STAGE] download"
 echo "[INFO] Installing dependencies..."
-apk add --no-cache git curl rsync bash >/dev/null 2>&1
-command -v nsenter >/dev/null 2>&1 || apk add --no-cache util-linux-misc >/dev/null 2>&1 || apk add --no-cache util-linux >/dev/null 2>&1
+if ! timeout {UPDATER_DEPS_TIMEOUT} apk add --no-cache git curl rsync bash >/dev/null 2>&1; then
+    echo "[ERROR] Failed to install updater dependencies: Alpine package mirror unreachable"
+    exit 1
+fi
+command -v nsenter >/dev/null 2>&1 || timeout {UPDATER_DEPS_TIMEOUT} apk add --no-cache util-linux-misc >/dev/null 2>&1 || timeout {UPDATER_DEPS_TIMEOUT} apk add --no-cache util-linux >/dev/null 2>&1
 
 echo "[INFO] Docker Compose version:"
 docker compose version
@@ -546,7 +555,10 @@ async def trigger_update(data: UpdateRequest = None):
         except (DockerException, RequestException) as e:
             raise HTTPException(status_code=500, detail=f"Docker error: {e}") from e
         if updater is not None and updater.running:
-            raise HTTPException(status_code=409, detail="Update already in progress")
+            if not is_abandoned(updater, await asyncio.to_thread(_update_state.load)):
+                raise HTTPException(status_code=409, detail="Update already in progress")
+            # Зависший апдейтер уберёт run_update_in_container перед стартом нового
+            logger.warning(f"Replacing hung updater of attempt {updater.attempt_id}")
 
         attempt = new_attempt(target_ref or "main", get_current_version())
         await asyncio.to_thread(_update_state.save, attempt)

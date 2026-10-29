@@ -8,18 +8,21 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import asyncssh  # noqa: E402
+import httpx  # noqa: E402
 
-from app.services import update_channel  # noqa: E402
+from app.services import remnawave_node_install, update_channel  # noqa: E402
 from app.services.deploy_service import (  # noqa: E402
     TUNNEL_DENIED_MESSAGE,
     build_remnawave_install_command,
     install_via_panel,
 )
-from app.services.remnawave_node_install import parse_sse_event  # noqa: E402
+from app.services.remnawave_node_install import parse_sse_event, run_install_on_node  # noqa: E402
 from app.services.ssh_target import SSHTarget  # noqa: E402
 
 CERT = "SSL_CERT=eyJub2RlQ2VydFBlbSI6IJERTIFIRSTLINE\neySECONDLINEOFCERT"
@@ -99,6 +102,45 @@ class ParseSseEventTests(unittest.TestCase):
     def test_unknown_event_and_broken_json(self):
         self.assertIsNone(parse_sse_event("ping", "{}"))
         self.assertEqual(parse_sse_event("stdout", "not-json"), {"type": "log", "line": ""})
+
+
+class RunInstallOnNodeTests(unittest.IsolatedAsyncioTestCase):
+    """Отказ, при котором команда точно не дошла до хоста, помечен undelivered —
+    по нему обновление HAProxy повторяется по SSH. Оборванный посреди стрим так
+    не помечен: команда могла уже идти на хосте."""
+
+    async def collect(self, handler) -> list[dict]:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        self.addAsyncCleanup(client.aclose)
+        server = SimpleNamespace(id=1, url="https://node:9100")
+        with mock.patch.object(remnawave_node_install, "get_node_client", return_value=client), \
+                mock.patch.object(remnawave_node_install, "node_auth_headers", return_value={}), \
+                mock.patch.object(remnawave_node_install, "learn_from_denial", new=mock.AsyncMock()):
+            return [event async for event in run_install_on_node(server, "true")]
+
+    async def test_unreachable_agent(self):
+        def refuse(request):
+            raise httpx.ConnectError("connection refused", request=request)
+
+        events = await self.collect(refuse)
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertTrue(events[-1]["undelivered"])
+
+    async def test_agent_behind_nginx_is_down(self):
+        events = await self.collect(lambda request: httpx.Response(502, text="Bad Gateway"))
+        self.assertTrue(events[-1]["undelivered"])
+
+    async def test_capability_denial_is_not_retried(self):
+        # Владелец ноды закрыл исполнение команд — обходить его по SSH нельзя
+        events = await self.collect(lambda request: httpx.Response(403, json={"detail": "closed"}))
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertFalse(events[-1].get("undelivered"))
+
+    async def test_stream_broken_midway(self):
+        events = await self.collect(
+            lambda request: httpx.Response(200, text='event: stdout\ndata: {"line": "apt"}\n\n')
+        )
+        self.assertEqual(events[-1], {"type": "error", "message": "Стрим ноды оборвался без результата"})
 
 
 class _PasswordSshServer(asyncssh.SSHServer):

@@ -289,6 +289,8 @@ class MetricsSnapshot(Base):
     # горячее ядро. NULL в *_max = «пика нет»: старая нода или строка до миграции.
     cpu_usage = Column(Float)
     cpu_usage_max = Column(Float, nullable=True)
+    # Steal — часть cpu_usage, которую забрал гипервизор; NULL — нода его не считает
+    cpu_steal = Column(Float, nullable=True)
     load_avg_1 = Column(Float)
     load_avg_5 = Column(Float)
     load_avg_15 = Column(Float)
@@ -351,6 +353,7 @@ class AggregatedMetrics(Base):
     # CPU; NULL в max_* — агрегат до появления пиков
     avg_cpu = Column(Float)
     max_cpu = Column(Float)
+    avg_cpu_steal = Column(Float, nullable=True)
     avg_load = Column(Float)
     max_load = Column(Float, nullable=True)
 
@@ -740,6 +743,11 @@ class AlertSettings(Base):
     conntrack_enabled = Column(Boolean, default=True)
     conntrack_threshold = Column(Float, default=80.0)
 
+    # Steal — процессор, который забирает гипервизор хостера (% времени всех ядер)
+    steal_enabled = Column(Boolean, default=True)
+    steal_threshold = Column(Float, default=20.0)
+    steal_sustained_seconds = Column(Integer, default=300)
+
     # Потери с релея до его адресов назначения (проверка на ноде, % неответов)
     packet_loss_enabled = Column(Boolean, default=True)
     packet_loss_threshold = Column(Float, default=20.0)
@@ -761,6 +769,7 @@ class AlertSettings(Base):
     load_avg_excluded_server_ids = Column(Text, nullable=True)
     conntrack_excluded_server_ids = Column(Text, nullable=True)
     packet_loss_excluded_server_ids = Column(Text, nullable=True)
+    steal_excluded_server_ids = Column(Text, nullable=True)
 
 
 class PacketLossEpisode(Base):
@@ -836,7 +845,7 @@ class BillingServer(Base):
     
     last_notified_days = Column(Text, nullable=True)  # JSON: which day-thresholds already sent
 
-    # Облачный провайдер (billing_type='cloud'): Yandex Cloud, Selectel, Timeweb, VK Cloud, Cloud.ru
+    # Облачный провайдер (billing_type='cloud'): Yandex Cloud, Selectel, Timeweb, VK Cloud, Cloud.ru, 1cloud
     cloud_provider = Column(String(30), nullable=True)
     cloud_credential = Column(EncryptedString, nullable=True)
     cloud_account_id = Column(String(100), nullable=True)

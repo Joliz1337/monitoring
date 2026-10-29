@@ -947,8 +947,20 @@ async def trigger_node_update(
     data = data or {}
     if not data.get("target_version"):
         data["target_version"] = update_channel.current_branch()
-    result = await proxy_request(server, "/api/system/update", method="POST", json_data=data)
-    await node_update_watcher.track(db, server, data["target_version"], result.get("attempt_id"))
+    target_ref = data["target_version"]
+    try:
+        result = await proxy_request(server, "/api/system/update", method="POST", json_data=data)
+    except HTTPException as exc:
+        # Старый агент отвечает «уже идёт», пока на ноде висит апдейтер, которого
+        # он перестал ждать, — тогда ноду обновит по SSH наблюдатель
+        if exc.status_code != 409 or not await node_update_watcher.track_stuck_updater(db, server, target_ref):
+            raise
+        return {
+            "success": True,
+            "message": "Previous update is stuck on the node — updating over SSH",
+            "target": target_ref,
+        }
+    await node_update_watcher.track(db, server, target_ref, result.get("attempt_id"))
     return result
 
 

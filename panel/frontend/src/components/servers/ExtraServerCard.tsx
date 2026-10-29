@@ -4,6 +4,7 @@ import {
   Server as ServerIcon,
   Link as LinkIcon,
   Globe,
+  Folder,
   Trash2,
   CheckCircle2,
   XCircle,
@@ -16,6 +17,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import DeployTargetFields, { type DeployFormData } from './DeployTargetFields'
+import { FolderChips, type FolderOption } from '../folders/FolderChips'
 import type {
   RemnawaveCertProfile,
   HAProxyConfigProfile,
@@ -34,6 +36,7 @@ export interface ExtraTarget {
   host: string
   port: string
   proxy: string
+  folder: string | null
   deploy: DeployFormData
   status: DeployStatus
   log: string[]
@@ -50,6 +53,7 @@ interface Props {
   onRemove: () => void
   onRetry: () => void
   onAddAnother: () => void
+  folders: FolderOption[]
   remnaCertProfiles: RemnawaveCertProfile[]
   haproxyProfiles: HAProxyConfigProfile[]
   firewallProfiles: FirewallProfile[]
@@ -74,6 +78,7 @@ export default function ExtraServerCard({
   onRemove,
   onRetry,
   onAddAnother,
+  folders,
   remnaCertProfiles,
   haproxyProfiles,
   firewallProfiles,
@@ -205,6 +210,19 @@ export default function ExtraServerCard({
             disabled={status === 'running'}
           />
           <p className="text-xs text-dark-500 mt-1.5">{t('servers.proxy_hint')}</p>
+        </div>
+
+        <div>
+          <label className="block text-sm text-dark-300 mb-2 flex items-center gap-2">
+            <Folder className="w-4 h-4" />
+            {t('servers.folder_label')}
+          </label>
+          <FolderChips
+            folders={folders}
+            value={target.folder}
+            onChange={(folder) => onChange({ folder })}
+            disabled={status === 'running'}
+          />
         </div>
 
         <div className="border-t border-dark-700/50 pt-4">

@@ -25,6 +25,7 @@ from app.services.rate_sampler import (  # noqa: E402
     RateSample,
     RateSampler,
     RawCounters,
+    host_steal_percent,
     per_cpu_percent,
     summarize_window,
     weighted_mean,
@@ -37,8 +38,8 @@ CpuTimes = namedtuple(
 )
 
 
-def times(user=0.0, system=0.0, idle=0.0, softirq=0.0) -> CpuTimes:
-    return CpuTimes(user, 0.0, system, idle, 0.0, 0.0, softirq, 0.0, 0.0, 0.0)
+def times(user=0.0, system=0.0, idle=0.0, softirq=0.0, steal=0.0) -> CpuTimes:
+    return CpuTimes(user, 0.0, system, idle, 0.0, 0.0, softirq, steal, 0.0, 0.0)
 
 
 def raw(taken_at: float, cpu=None, net=None, disk=None) -> RawCounters:
@@ -95,6 +96,23 @@ class PerCpuPercentTests(unittest.TestCase):
         after = [times(user=6.0, system=4.0)]
 
         self.assertEqual(per_cpu_percent(before, after), [100.0])
+
+
+class HostStealPercentTests(unittest.TestCase):
+
+    def test_steal_is_a_share_of_all_cores_time(self):
+        # 4.5 of 10 core-seconds went to other VMs — the case from a VK Cloud node
+        before = [times(), times()]
+        after = [times(user=1.0, steal=4.0, idle=0.0), times(user=1.0, steal=0.5, idle=3.5)]
+
+        self.assertEqual(host_steal_percent(before, after), 45.0)
+
+    def test_no_steal_gives_zero(self):
+        self.assertEqual(host_steal_percent([times()], [times(user=1.0, idle=1.0)]), 0.0)
+
+    def test_steal_counted_as_busy_in_per_core_percent(self):
+        # Панель считает CPU как «всё, кроме простоя» — steal остаётся внутри
+        self.assertEqual(per_cpu_percent([times()], [times(steal=1.0, idle=1.0)]), [50.0])
 
 
 class AdvanceTests(unittest.TestCase):
@@ -180,6 +198,30 @@ class AdvanceTests(unittest.TestCase):
         s.advance(raw(11.0, cpu=[times(user=0.5, idle=0.5)]))
 
         self.assertTrue(s.snapshot().cpu_measured)
+
+    def test_steal_comes_from_the_tick_window(self):
+        s = sampler()
+        s.advance(raw(10.0, cpu=[times(), times()]))
+        s.advance(raw(11.0, cpu=[times(steal=0.4, idle=0.6), times(idle=1.0)]))
+
+        self.assertEqual(s.snapshot().steal_percent, 20.0)
+
+    def test_inherited_sample_keeps_the_last_steal(self):
+        s = sampler()
+        s.advance(raw(10.0, cpu=[times()]))
+        s.advance(raw(11.0, cpu=[times(steal=0.5, idle=0.5)]))
+        s.advance(raw(12.0, cpu=[times(steal=0.52, idle=0.5)]))
+
+        self.assertEqual(s.snapshot().steal_percent, 50.0)
+        self.assertFalse(s.snapshot().cpu_measured)
+
+    def test_core_count_change_resets_steal(self):
+        s = sampler()
+        s.advance(raw(10.0, cpu=[times()]))
+        s.advance(raw(11.0, cpu=[times(steal=0.5, idle=0.5)]))
+        s.advance(raw(12.0, cpu=[times(steal=1.0), times(idle=1.0)]))
+
+        self.assertEqual(s.snapshot().steal_percent, 0.0)
 
     def test_inherited_cpu_percent_is_flagged_unmeasured(self):
         # A full second passed by the clock, but the kernel counters barely
@@ -282,11 +324,12 @@ class WindowTests(unittest.TestCase):
         self.assertIsNone(sampler().window(10))
 
 
-def sample(cpu, net=None, disk_total=(0.0, 0.0), window=1.0, measured=True, at=0.0) -> RateSample:
+def sample(cpu, net=None, disk_total=(0.0, 0.0), window=1.0, measured=True, at=0.0, steal=0.0) -> RateSample:
     return RateSample(
         sampled_at=at,
         window_sec=window,
         per_cpu_percent=cpu,
+        steal_percent=steal,
         cpu_measured=measured,
         net=net or {},
         disk_total=disk_total,
@@ -349,11 +392,21 @@ class SummarizeWindowTests(unittest.TestCase):
         self.assertEqual(summary.per_cpu_avg, [10.0, 20.0, 30.0])
         self.assertEqual(summary.cpu_avg, 20.0)
 
+    def test_steal_average_is_weighted_and_skips_inherited_samples(self):
+        samples = [
+            sample([90.0], steal=60.0, window=2.0),
+            sample([90.0], steal=99.0, measured=False),
+            sample([30.0], steal=0.0),
+        ]
+
+        self.assertEqual(summarize_window(samples, PHYSICAL).steal_avg, 40.0)
+
     def test_window_without_a_single_measured_cpu_sample_has_no_cpu(self):
         summary = summarize_window([sample([50.0], measured=False)], PHYSICAL)
 
         self.assertEqual(summary.cpu_avg, 0.0)
         self.assertEqual(summary.cpu_max, 0.0)
+        self.assertEqual(summary.steal_avg, 0.0)
         self.assertEqual(summary.per_cpu_avg, [])
 
     def test_network_is_summed_over_physical_interfaces_inside_each_sample(self):
