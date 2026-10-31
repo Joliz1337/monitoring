@@ -88,6 +88,7 @@ async def run_migrations(conn):
             ("has_xray_node", "BOOLEAN DEFAULT FALSE"),
             ("proxy_url", "VARCHAR(255)"),
             ("reserved_ports", "TEXT"),
+            ("note", "VARCHAR(40)"),
         ]
         
         for col_name, col_type in migrations:

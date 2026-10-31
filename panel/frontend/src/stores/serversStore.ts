@@ -29,6 +29,7 @@ interface ServersState {
   fetchServersWithMetrics: () => Promise<void>
   addServer: (data: { name: string; url: string; proxy_url?: string | null; folder?: string | null }) => Promise<{ success: boolean; error?: string }>
   updateServer: (id: number, data: Partial<Server>) => Promise<void>
+  updateServerNote: (id: number, note: string | null) => Promise<void>
   toggleServer: (id: number, isActive: boolean) => Promise<void>
   deleteServer: (id: number) => Promise<void>
   applyServerArrangement: (orderedIds: number[], movedId: number, folder: string | null) => Promise<void>
@@ -112,7 +113,20 @@ export const useServersStore = create<ServersState>((set, get) => ({
     await serversApi.update(id, data)
     await get().fetchServers()
   },
-  
+
+  updateServerNote: async (id, note) => {
+    const previous = get().servers.find(s => s.id === id)?.note ?? null
+    const setNote = (value: string | null) =>
+      set({ servers: get().servers.map(s => (s.id === id ? { ...s, note: value } : s)) })
+    setNote(note)
+    try {
+      await serversApi.update(id, { note })
+    } catch (e) {
+      setNote(previous)
+      throw e
+    }
+  },
+
   toggleServer: async (id, isActive) => {
     set({
       servers: get().servers.map(s => 

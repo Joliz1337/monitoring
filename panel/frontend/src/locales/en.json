@@ -667,7 +667,11 @@
     "cert_days_domain": "{{domain}} — {{days}}d",
     "no_certs": "No SSL",
     "traffic_period": "Traffic ({{days}}d)",
-    "load_avg_tooltip": "Load Average (1 / 5 / 15 min)\nAvg processes in CPU queue.\n{{cores}} cores: norm up to {{cores}}.0\n0-70% normal · 70-100% high · >100% overloaded"
+    "load_avg_tooltip": "Load Average (1 / 5 / 15 min)\nAvg processes in CPU queue.\n{{cores}} cores: norm up to {{cores}}.0\n0-70% normal · 70-100% high · >100% overloaded",
+    "note_add": "Add a note",
+    "note_edit": "Edit note",
+    "note_placeholder": "Server note",
+    "note_save_failed": "Failed to save the note"
   },
   "process_table": {
     "search_placeholder": "Search...",

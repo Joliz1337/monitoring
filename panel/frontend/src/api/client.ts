@@ -123,6 +123,7 @@ export interface Server {
   position: number
   is_active: boolean
   folder?: string | null
+  note?: string | null
   last_seen?: string | null
   last_error?: string | null
   error_code?: number | null

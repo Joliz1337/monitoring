@@ -671,7 +671,11 @@
     "cert_days_domain": "{{domain}} — {{days}}д",
     "no_certs": "Нет SSL",
     "traffic_period": "Трафик ({{days}}д)",
-    "load_avg_tooltip": "Load Average (1 / 5 / 15 мин)\nСреднее кол-во процессов в очереди CPU.\n{{cores}} ядер: норма до {{cores}}.0\n0-70% норма · 70-100% высокая · >100% перегрузка"
+    "load_avg_tooltip": "Load Average (1 / 5 / 15 мин)\nСреднее кол-во процессов в очереди CPU.\n{{cores}} ядер: норма до {{cores}}.0\n0-70% норма · 70-100% высокая · >100% перегрузка",
+    "note_add": "Добавить заметку",
+    "note_edit": "Изменить заметку",
+    "note_placeholder": "Заметка к серверу",
+    "note_save_failed": "Не удалось сохранить заметку"
   },
   "process_table": {
     "search_placeholder": "Поиск...",

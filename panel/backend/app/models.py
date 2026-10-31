@@ -3,6 +3,8 @@ from sqlalchemy.sql import func
 from app.database import Base
 from app.crypto import EncryptedString
 
+SERVER_NOTE_MAX_LENGTH = 40
+
 
 class PKIKeygen(Base):
     """Singleton: CA, клиентский сертификат панели и общий серверный cert для всех нод."""
@@ -78,9 +80,11 @@ class Server(Base):
     position = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
     folder = Column(String(200), nullable=True)
+    # Короткая подпись оператора рядом с IP на дашборде
+    note = Column(String(SERVER_NOTE_MAX_LENGTH), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    
+
     # Error tracking
     last_seen = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(String(500), nullable=True)

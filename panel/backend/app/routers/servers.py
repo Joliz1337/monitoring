@@ -20,7 +20,7 @@ from app.services.node_capabilities import (
 )
 
 from app.database import get_db
-from app.models import Server, MetricsSnapshot, ServerTraffic
+from app.models import SERVER_NOTE_MAX_LENGTH, Server, MetricsSnapshot, ServerTraffic
 from app.auth import verify_auth
 from app.services import ping_block
 from app.services.blocklist_manager import get_blocklist_manager
@@ -214,6 +214,7 @@ class ServerUpdate(BaseModel):
     is_active: Optional[bool] = None
     folder: Optional[str] = None
     proxy_url: Optional[str] = None
+    note: Optional[str] = None
 
     @field_validator('url')
     @classmethod
@@ -226,6 +227,18 @@ class ServerUpdate(BaseModel):
     @classmethod
     def validate_proxy(cls, v: str | None) -> str | None:
         return validate_proxy_input(v)
+
+    @field_validator('note')
+    @classmethod
+    def validate_note(cls, v: str | None) -> str | None:
+        return clean_server_note(v)
+
+
+def clean_server_note(note: Optional[str]) -> Optional[str]:
+    note = (note or "").strip()
+    if len(note) > SERVER_NOTE_MAX_LENGTH:
+        raise ValueError(f"Note is longer than {SERVER_NOTE_MAX_LENGTH} characters")
+    return note or None
 
 
 def clean_folder_name(folder: Optional[str]) -> Optional[str]:
@@ -329,6 +342,7 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
             "position": s.position,
             "is_active": s.is_active,
             "folder": s.folder,
+            "note": s.note,
             "last_seen": to_iso_utc(s.last_seen),
             "last_error": s.last_error,
             "error_code": s.error_code,
