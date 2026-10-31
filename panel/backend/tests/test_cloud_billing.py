@@ -95,7 +95,7 @@ def balances_response(final_sum: float, debt_sum: float = 0, currency: str = "RU
 
 
 def prediction_response(**groups):
-    """Форма ответа /v2/billing/prediction: дни по группам балансов."""
+    """Форма ответа /v2/billing/prediction: часы по группам балансов."""
     return FakeResponse(200, {"status": "success", "data": groups})
 
 
@@ -154,16 +154,16 @@ class SelectelParsingTests(unittest.TestCase):
 
     def test_prediction_picks_nearest_non_zero_group(self):
         self.assertEqual(
-            _pick_prediction_days({"primary": 240, "storage": 0, "vpc": 96}), 96
+            _pick_prediction_days({"primary": 240, "storage": 0, "vpc": 96}), 4
         )
 
-    def test_prediction_ignores_empty_groups(self):
-        # Реальный ответ аккаунта: считаются только заполненные группы
+    def test_prediction_hours_become_days(self):
+        # Реальный ответ аккаунта: считаются только заполненные группы, 170 часов
         self.assertEqual(
             _pick_prediction_days(
-                {"primary": 46, "storage": None, "vmware": None, "vpc": None}
+                {"primary": 170, "storage": None, "vmware": None, "vpc": None}
             ),
-            46,
+            170 / 24,
         )
 
     def test_prediction_all_zero_means_no_forecast(self):
@@ -175,19 +175,19 @@ class SelectelProviderTests(unittest.TestCase):
         return asyncio.run(SelectelProvider().fetch(client, "static-token", None))
 
     def test_balance_and_forecast_come_from_selectel(self):
-        # Форма реального ответа аккаунта: остаток 17 824,41 ₽, хватит на 46 дней
+        # Форма реального ответа аккаунта: остаток 5 455,86 ₽, хватит на 170 часов
         client = FakeClient({
-            "/v3/balances": balances_response(1782441),
+            "/v3/balances": balances_response(545586),
             "/v2/billing/prediction": prediction_response(
-                primary=46, storage=None, vmware=None, vpc=None
+                primary=170, storage=None, vmware=None, vpc=None
             ),
         })
 
         snapshot = self._fetch(client)
 
-        self.assertEqual(snapshot.balance, 17824.41)
+        self.assertEqual(snapshot.balance, 5455.86)
         self.assertEqual(snapshot.currency, "RUB")
-        self.assertEqual(snapshot.days_left, 46)
+        self.assertEqual(snapshot.days_left, 170 / 24)
         # Расход панель не считает — он выводится из прогноза в _apply_snapshot
         self.assertIsNone(snapshot.daily_cost)
         self.assertIsNone(snapshot.warning)
@@ -200,16 +200,20 @@ class SelectelProviderTests(unittest.TestCase):
         server = billing_server()
         now = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
         client = FakeClient({
-            "/v3/balances": balances_response(1782441),
-            "/v2/billing/prediction": prediction_response(primary=46),
+            "/v3/balances": balances_response(29779),
+            "/v2/billing/prediction": prediction_response(primary=32),
         })
 
         with patch("app.services.cloud_billing.get_external_client", return_value=client):
             asyncio.run(sync_cloud_balance(server, now))
 
-        # Срок в панели — ровно прогноз Selectel, расход в день выведен из него
-        self.assertEqual(server.paid_until, now + timedelta(days=46))
-        self.assertEqual(server.cloud_daily_cost, round(17824.41 / 46, 4))
+        # 297,79 ₽ на 32 часа: срок — прогноз Selectel с точностью до шага
+        # compute_days_left (0,1 суток), расход ~223 ₽/сутки — на этом аккаунте
+        # фактические списания за три дня давали ~200 ₽/сутки
+        self.assertAlmostEqual(
+            (server.paid_until - now).total_seconds() / 3600, 32, delta=2.4
+        )
+        self.assertEqual(server.cloud_daily_cost, round(297.79 / (32 / 24), 4))
 
     def test_debt_is_reported_as_warning(self):
         client = FakeClient({

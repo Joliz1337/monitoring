@@ -13,6 +13,15 @@ from app.services.cloud_billing import CloudBillingError, sync_cloud_balance
 
 logger = logging.getLogger(__name__)
 
+# Облачный баланс пополняют у провайдера, мимо панели, поэтому отправленный порог
+# снова взводится, когда остаток поднялся над ним. Запас в четверть порога гасит
+# дрожание оценки расхода у границы — иначе уведомление повторялось бы
+REARM_FACTOR = 1.25
+
+
+def _rearm_thresholds(notified: list[int], days_left: float) -> list[int]:
+    return [t for t in notified if days_left <= t * REARM_FACTOR]
+
 
 class BillingChecker:
     def __init__(self):
@@ -127,16 +136,19 @@ class BillingChecker:
                 days_left = (paid_until - now).total_seconds() / 86400
 
                 try:
-                    already_notified = json.loads(srv.last_notified_days) if srv.last_notified_days else []
+                    stored = json.loads(srv.last_notified_days) if srv.last_notified_days else []
                 except (json.JSONDecodeError, TypeError):
-                    already_notified = []
+                    stored = []
+                already_notified = _rearm_thresholds(stored, days_left)
 
                 for threshold in notify_days:
                     if days_left <= threshold and threshold not in already_notified:
                         sent = await self._send_notification(bot_token, chat_id, srv, days_left, threshold, tz_name)
                         if sent:
                             already_notified.append(threshold)
-                            srv.last_notified_days = json.dumps(already_notified)
+
+                if already_notified != stored:
+                    srv.last_notified_days = json.dumps(already_notified)
 
             await db.commit()
 
