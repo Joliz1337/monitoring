@@ -22,7 +22,8 @@ import httpx
 from sqlalchemy import select
 
 from app.database import async_session
-from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory, AntiDdosWhitelistSource
+from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory, AntiDdosWhitelistSource, GreNode
+from app.services.gre.render import whitelist_entries as gre_whitelist_entries
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_node_apply_client, get_external_client, node_auth_headers
 from app.services.node_capabilities import Capability, denied_message, server_allows
@@ -91,7 +92,8 @@ class AntiDdosManager:
     # ── whitelist assembly ─────────────────────────────────────────────────
 
     async def build_whitelist(self, db) -> list[str]:
-        """Auto (all node addresses + panel IP) + manual (user CIDRs) + auto-source lists."""
+        """Auto (all node addresses + panel IP + DDoS-Guard GRE endpoints and health
+        networks) + manual (user CIDRs) + auto-source lists."""
         servers = (await db.execute(
             select(Server.url, Server.last_metrics).where(Server.is_active == True)  # noqa: E712
         )).all()
@@ -100,6 +102,8 @@ class AntiDdosManager:
         panel_ip = await resolve_panel_ip()
         if panel_ip:
             ips.add(panel_ip)
+
+        ips.update(gre_whitelist_entries((await db.execute(select(GreNode))).scalars().all()))
 
         settings = await self.get_or_create_settings(db)
         if settings.user_cidrs:

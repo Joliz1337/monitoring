@@ -173,6 +173,8 @@ export default function Alerts() {
       packet_loss: t('alerts.type_packet_loss'),
       packet_loss_recovery: t('alerts.type_packet_loss_recovery'),
       node_update_failed: t('alerts.type_node_update_failed'),
+      gre_silent: t('alerts.type_gre_silent'),
+      gre_recovered: t('alerts.type_gre_recovered'),
     }
     return map[t_] || t_
   }

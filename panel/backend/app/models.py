@@ -1387,3 +1387,23 @@ class SourcePoolNode(Base):
     sync_error = Column(Text, nullable=True)
     last_sync_at = Column(DateTime(timezone=True), nullable=True)
     last_state_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# ==================== GRE-туннели DDoS-Guard ====================
+
+class GreNode(Base):
+    """GRE-туннели DDoS-Guard сервера: список туннелей, последнее состояние с ноды
+    и наблюдение за входящими пакетами (по ним видно, жив ли туннель со стороны
+    DDoS-Guard). Строка остаётся и с пустым списком — так ноде доезжает снятие."""
+    __tablename__ = "gre_nodes"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    tunnels = Column(Text, nullable=True)      # JSON list {slot, local, remote, pe, ce, health_net}
+    notify = Column(Boolean, default=True)     # Telegram, когда туннель замолчал и когда ожил
+    activity = Column(Text, nullable=True)     # JSON {интерфейс: {rx_packets, changed_at, first_seen_at, silent}}
+    node_state = Column(Text, nullable=True)   # JSON — последний ответ /state ноды
+    config_hash = Column(String(64), nullable=True)
+    sync_status = Column(String(20), default="pending")  # pending | synced | failed | denied | unsupported
+    sync_error = Column(Text, nullable=True)
+    last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    last_state_at = Column(DateTime(timezone=True), nullable=True)

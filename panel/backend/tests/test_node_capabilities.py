@@ -252,6 +252,7 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/exit_proxy/node_client.py",
         # тот же гейт ensure_node_ready(SYSTEM, write) на каждый запрос
         "services/source_pool/node_client.py",
+        "services/gre/node_client.py",
         "services/firewall_profile_sync.py",
         "services/haproxy_profile_sync.py",
         "services/loss_overview.py",

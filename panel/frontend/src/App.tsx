@@ -54,6 +54,7 @@ const DnatProfiles = lazyRetry(() => import('./pages/DnatProfiles'))
 const Loss = lazyRetry(() => import('./pages/Loss'))
 const Dnat = lazyRetry(() => import('./pages/Dnat'))
 const SourcePool = lazyRetry(() => import('./pages/SourcePool'))
+const GreTunnels = lazyRetry(() => import('./pages/GreTunnels'))
 
 const ExtPageLazy = isExtEnabled 
   ? lazyRetry(() => import('./pages/_internal/ExtPage'))
@@ -215,6 +216,7 @@ export default function App() {
           <Route path="server/:serverId/traffic" element={<SuspenseWithBoundary><Traffic /></SuspenseWithBoundary>} />
           <Route path="server/:serverId/dnat" element={<SuspenseWithBoundary><Dnat /></SuspenseWithBoundary>} />
           <Route path="server/:serverId/source-pool" element={<SuspenseWithBoundary><SourcePool /></SuspenseWithBoundary>} />
+          <Route path="server/:serverId/gre" element={<SuspenseWithBoundary><GreTunnels /></SuspenseWithBoundary>} />
           <Route path="haproxy-configs" element={<ModuleGuard id="haproxy-configs"><SuspenseWithBoundary><HAProxyConfigs /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="firewall-profiles" element={<ModuleGuard id="firewall-profiles"><SuspenseWithBoundary><FirewallProfiles /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="dnat-profiles" element={<ModuleGuard id="dnat-profiles"><SuspenseWithBoundary><DnatProfiles /></SuspenseWithBoundary></ModuleGuard>} />

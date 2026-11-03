@@ -3831,4 +3831,84 @@ export const sourcePoolApi = {
   getSnippet: () => api.get<SourcePoolSnippet>('/source-pool/snippet'),
 }
 
+// ── GRE-туннели DDoS-Guard ──
+
+export type GreInstallStatus = 'off' | 'pending' | 'active' | 'drift' | 'failed' | 'denied' | 'unsupported'
+
+/** ok — поднят как задан; drift — расходится, нода вернёт сама; no_local — GRE SRC нет на интерфейсах;
+ * conflict — на сервере уже есть чужой туннель с теми же адресами */
+export type GreLinkState = 'ok' | 'drift' | 'missing' | 'no_local' | 'conflict'
+
+/** alive — пакеты идут; waiting — туннель только появился; silent — пакетов нет дольше порога */
+export type GreActivity = 'alive' | 'waiting' | 'silent'
+
+export interface GreTunnelInput {
+  slot?: number | null
+  local: string
+  remote: string
+  pe?: string | null
+  ce: string
+  health_net: string
+}
+
+export interface GreTunnelView {
+  slot: number
+  name: string
+  local: string
+  remote: string
+  pe: string
+  ce: string
+  health_net: string
+  link: GreLinkState | null
+  mtu: number | null
+  conflict_with: string | null
+  rx_bytes: number
+  tx_bytes: number
+  rx_packets: number
+  tx_packets: number
+  activity: GreActivity
+  last_rx_at: string | null
+}
+
+export interface GreNodeView {
+  server_id: number
+  name: string
+  online: boolean
+  node_version: string | null
+  min_node_version: string
+  supported_by_node: boolean
+  install_status: GreInstallStatus
+  sync_error: string | null
+  node_error: string | null
+  notify: boolean
+  tunnels: GreTunnelView[]
+  max_tunnels: number
+  default_remote: string
+  default_health_net: string
+  silent_after_seconds: number
+  last_state_at: string | null
+}
+
+export interface GreCheckResult {
+  slot: number
+  ping_sent: number
+  ping_received: number
+  rtt_ms: number | null
+  https_ok: boolean
+  external_ip: string | null
+  https_error: string | null
+}
+
+const GRE_NODE_TIMEOUT_MS = 40000
+
+export const greApi = {
+  getNode: (serverId: number) => api.get<GreNodeView>(`/gre/nodes/${serverId}`),
+  updateNode: (serverId: number, patch: { tunnels?: GreTunnelInput[]; notify?: boolean }) =>
+    api.put<GreNodeView>(`/gre/nodes/${serverId}`, patch, { timeout: GRE_NODE_TIMEOUT_MS }),
+  refreshNode: (serverId: number) =>
+    api.post<GreNodeView>(`/gre/nodes/${serverId}/refresh`, undefined, { timeout: GRE_NODE_TIMEOUT_MS }),
+  checkTunnel: (serverId: number, slot: number) =>
+    api.post<GreCheckResult>(`/gre/nodes/${serverId}/check`, { slot }, { timeout: GRE_NODE_TIMEOUT_MS }),
+}
+
 export default api
