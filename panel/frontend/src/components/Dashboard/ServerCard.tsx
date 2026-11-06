@@ -28,6 +28,8 @@ import { useTranslation } from 'react-i18next'
 import { CopyableIp } from '../ui/CopyableIp'
 import { ServerNote } from './ServerNote'
 import { Tooltip } from '../ui/Tooltip'
+import { HoverCard } from '../ui/HoverCard'
+import NetworkBreakdown from './NetworkBreakdown'
 import type { DetailLevel } from '../../stores/settingsStore'
 
 interface ServerTraffic {
@@ -424,26 +426,11 @@ function ServerCardView({
                     usedBytes={metrics.disk.partitions[0]?.used}
                     totalBytes={metrics.disk.partitions[0]?.total}
                   />
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Network className="w-4 h-4 text-accent-500" />
-                      <span className="text-sm text-dark-300">{t('common.network')}</span>
-                    </div>
-                    <div className="flex gap-2 text-xs font-mono">
-                      <span className="text-success flex items-center gap-1">
-                        ↓ {formatBitsPerSecLocalized(
-                          metrics.network.total?.rx_bytes_per_sec || 0,
-                          t
-                        )}
-                      </span>
-                      <span className="text-accent-400 flex items-center gap-1">
-                        ↑ {formatBitsPerSecLocalized(
-                          metrics.network.total?.tx_bytes_per_sec || 0,
-                          t
-                        )}
-                      </span>
-                    </div>
-                  </div>
+                  <NetworkSpeedItem
+                    serverId={server.id}
+                    rxBytesPerSec={metrics.network.total?.rx_bytes_per_sec || 0}
+                    txBytesPerSec={metrics.network.total?.tx_bytes_per_sec || 0}
+                  />
                 </div>
 
                 <div className="pt-3 border-t border-dark-700/50 flex flex-wrap items-center text-xs text-dark-400 gap-x-3 gap-y-1">
@@ -520,26 +507,11 @@ function ServerCardView({
                     usedBytes={metrics.disk.partitions[0]?.used}
                     totalBytes={metrics.disk.partitions[0]?.total}
                   />
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Network className="w-4 h-4 text-accent-500" />
-                      <span className="text-sm text-dark-300">{t('common.network')}</span>
-                    </div>
-                    <div className="flex gap-2 text-xs font-mono">
-                      <span className="text-success flex items-center gap-1">
-                        ↓ {formatBitsPerSecLocalized(
-                          metrics.network.total?.rx_bytes_per_sec || 0,
-                          t
-                        )}
-                      </span>
-                      <span className="text-accent-400 flex items-center gap-1">
-                        ↑ {formatBitsPerSecLocalized(
-                          metrics.network.total?.tx_bytes_per_sec || 0,
-                          t
-                        )}
-                      </span>
-                    </div>
-                  </div>
+                  <NetworkSpeedItem
+                    serverId={server.id}
+                    rxBytesPerSec={metrics.network.total?.rx_bytes_per_sec || 0}
+                    txBytesPerSec={metrics.network.total?.tx_bytes_per_sec || 0}
+                  />
                 </div>
 
                 {server.traffic && (server.traffic.rx_bytes > 0 || server.traffic.tx_bytes > 0) && (
@@ -750,6 +722,35 @@ function MetricItem({ icon, label, value, usedBytes, totalBytes }: MetricItemPro
         </div>
       )}
     </div>
+  )
+}
+
+interface NetworkSpeedItemProps {
+  serverId: number
+  rxBytesPerSec: number
+  txBytesPerSec: number
+}
+
+// Наведение открывает разбивку скорости по IP, интерфейсам и портам
+function NetworkSpeedItem({ serverId, rxBytesPerSec, txBytesPerSec }: NetworkSpeedItemProps) {
+  const { t } = useTranslation()
+  return (
+    <HoverCard content={() => <NetworkBreakdown serverId={serverId} />}>
+      <div className="flex items-center gap-2 mb-2">
+        <Network className="w-4 h-4 text-accent-500" />
+        <span className="text-sm text-dark-300 underline decoration-dotted decoration-dark-500 underline-offset-4">
+          {t('common.network')}
+        </span>
+      </div>
+      <div className="flex gap-2 text-xs font-mono">
+        <span className="text-success flex items-center gap-1">
+          ↓ {formatBitsPerSecLocalized(rxBytesPerSec, t)}
+        </span>
+        <span className="text-accent-400 flex items-center gap-1">
+          ↑ {formatBitsPerSecLocalized(txBytesPerSec, t)}
+        </span>
+      </div>
+    </HoverCard>
   )
 }
 

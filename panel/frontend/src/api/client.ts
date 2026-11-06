@@ -462,6 +462,12 @@ export interface TrafficSummary {
     rx_bytes: number
     tx_bytes: number
   }>
+  // Трафик соединений, открытых клиентами к адресу ноды; свои исходящие не входят
+  by_ip: Array<{
+    ip: string
+    rx_bytes: number
+    tx_bytes: number
+  }>
   tracked_ports: number[]
 }
 
@@ -477,6 +483,8 @@ export interface TrafficStatus {
   supported: boolean
   node_version: string | null
   min_version: string
+  ips_supported: boolean
+  min_ip_version: string
   import: {
     status: TrafficImportStatus
     imported_at: string | null
@@ -484,7 +492,27 @@ export interface TrafficStatus {
   first_data_at: string | null
 }
 
-export type TrafficScope = 'total' | 'iface' | 'port'
+export type TrafficScope = 'total' | 'iface' | 'port' | 'ip'
+
+// Строка окна разбивки скорости: скорость сейчас (null — нода её сейчас не отдаёт)
+// и средняя скорость по часам за сутки, последняя точка — текущий час
+export interface TrafficBreakdownRow {
+  key: string
+  rx_bytes_per_sec: number | null
+  tx_bytes_per_sec: number | null
+  sparkline: Array<number | null>
+  // ratio = во сколько раз упал против того же времени вчера; null — трафик пропал совсем
+  drop: { ratio: number | null } | null
+}
+
+export interface TrafficBreakdown {
+  ips_supported: boolean
+  node_version: string | null
+  min_ip_version: string
+  ips: TrafficBreakdownRow[]
+  interfaces: TrafficBreakdownRow[]
+  ports: TrafficBreakdownRow[]
+}
 
 // rx/tx = null означает бакет без покрытия — нода была недоступна, разрыв в ряду
 export interface TrafficSeriesPoint {
@@ -1160,6 +1188,8 @@ export const trafficApi = {
     api.get<TrafficSummary>(`/traffic/${serverId}/summary`, { params: { days } }),
   getSeries: (serverId: number, params: { period: string; scope?: TrafficScope; key?: string }) =>
     api.get<TrafficSeries>(`/traffic/${serverId}/series`, { params }),
+  getBreakdown: (serverId: number) =>
+    api.get<TrafficBreakdown>(`/traffic/${serverId}/breakdown`),
 }
 
 export interface ExecuteResponse {

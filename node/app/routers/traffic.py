@@ -19,7 +19,7 @@ from app.services.legacy_traffic_store import (
     LegacyStoreUnreadableError,
     get_legacy_traffic_store,
 )
-from app.services.port_traffic_sampler import get_port_traffic_sampler
+from app.services.traffic_counter_sampler import get_traffic_counter_sampler
 
 router = APIRouter(prefix="/api/traffic", tags=["traffic"])
 
@@ -89,7 +89,7 @@ async def get_traffic_summary(
         "total": await store.totals(days=days),
         "by_interface": await store.interface_summary(days=days),
         "by_port": await store.port_summary(days=days),
-        "tracked_ports": get_port_traffic_sampler().tracked_ports(),
+        "tracked_ports": get_traffic_counter_sampler().tracked_ports(),
     }
 
 
@@ -100,7 +100,7 @@ async def get_ports_traffic(
     ports = await get_legacy_traffic_store().port_summary(days=days)
     return {
         "days": days,
-        "tracked_ports": get_port_traffic_sampler().tracked_ports(),
+        "tracked_ports": get_traffic_counter_sampler().tracked_ports(),
         "data": ports,
         "total_rx": sum(p["rx_bytes"] for p in ports),
         "total_tx": sum(p["tx_bytes"] for p in ports),
@@ -122,18 +122,18 @@ async def get_interfaces_traffic(
 
 @router.get("/ports/tracked")
 async def get_tracked_ports():
-    return {"tracked_ports": get_port_traffic_sampler().tracked_ports()}
+    return {"tracked_ports": get_traffic_counter_sampler().tracked_ports()}
 
 
 @router.post("/ports/add")
 async def add_tracked_port(request: PortRequest):
-    success, message = await get_port_traffic_sampler().add_tracked_port(request.port)
+    success, message = await get_traffic_counter_sampler().add_tracked_port(request.port)
     return {"success": success, "message": message}
 
 
 @router.post("/ports/remove")
 async def remove_tracked_port(request: PortRequest):
-    success, message = await get_port_traffic_sampler().remove_tracked_port(request.port)
+    success, message = await get_traffic_counter_sampler().remove_tracked_port(request.port)
     return {"success": success, "message": message}
 
 

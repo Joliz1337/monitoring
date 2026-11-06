@@ -1000,7 +1000,29 @@
     "unsupported_version_unknown": "version unknown",
     "unsupported_action": "Go to updates",
     "import_in_progress": "Migrating history from the node — it will appear shortly",
-    "gaps_note": "Node unreachable periods: {{count}}. Traffic there is spread evenly, not measured"
+    "gaps_note": "Node unreachable periods: {{count}}. Traffic there is spread evenly, not measured",
+    "by_ip": "Traffic by IP ({{days}}d)",
+    "by_ip_hint": "Only connections that clients opened to the address. The server's own outgoing traffic is not counted here",
+    "no_ip_data": "No IP data",
+    "slice": "Chart slice",
+    "slice_total": "Whole server",
+    "slice_interfaces": "Interfaces",
+    "slice_ips": "IP",
+    "slice_ports": "Ports"
+  },
+  "network_breakdown": {
+    "by_ip": "By IP",
+    "by_interface": "By interface",
+    "by_port": "By port",
+    "dropped_one": "down {{count}}×",
+    "dropped_other": "down {{count}}×",
+    "gone": "no traffic",
+    "update_node": "Traffic by IP needs node {{version}} or newer — update the node",
+    "no_ips": "IP data will appear within a minute",
+    "no_ports": "No ports are tracked — add them on the traffic page",
+    "no_data": "No data",
+    "failed": "Failed to load the breakdown",
+    "footer": "Speed right now · 24 h chart · click for the traffic page"
   },
   "ephemeral": {
     "title": "Ephemeral ports",

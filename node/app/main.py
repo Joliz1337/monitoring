@@ -16,7 +16,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from app.capabilities import CapabilityMiddleware, get_policy
 from app.config import get_settings
 from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat, network, exit_proxy, source_pool, hoster_access, gre, loss_probe as loss_probe_router
-from app.services.port_traffic_sampler import get_port_traffic_sampler
+from app.services.metrics_collector import get_collector
+from app.services.traffic_counter_sampler import get_traffic_counter_sampler
 from app.services.rate_sampler import get_rate_sampler
 from app.services.ipset_manager import get_ipset_manager
 from app.services.dnat_manager import get_dnat_manager
@@ -58,13 +59,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Silent-drop RST guard restore failed, scanners may fill conntrack: {e}", exc_info=True)
 
-    port_sampler = get_port_traffic_sampler()
+    counter_sampler = get_traffic_counter_sampler()
     try:
-        await port_sampler.init()
-        await port_sampler.start()
-        logger.info("Port traffic sampler started")
+        await counter_sampler.init(address_source=get_collector().accounted_ipv4_addresses)
+        await counter_sampler.start()
     except Exception as e:
-        logger.error(f"Port traffic sampler init failed, per-port counters stay empty: {e}", exc_info=True)
+        logger.error(f"Traffic counter sampler init failed, port and IP counters stay empty: {e}", exc_info=True)
 
     ipset_manager = get_ipset_manager()
     try:
@@ -145,9 +145,9 @@ async def lifespan(app: FastAPI):
     yield
 
     try:
-        await port_sampler.stop()
+        await counter_sampler.stop()
     except Exception as e:
-        logger.error(f"Port traffic sampler stop failed: {e}", exc_info=True)
+        logger.error(f"Traffic counter sampler stop failed: {e}", exc_info=True)
     try:
         await rate_sampler.stop()
     except Exception as e:

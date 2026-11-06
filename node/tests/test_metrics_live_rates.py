@@ -6,6 +6,7 @@ nodes that had no sampler at all.
 """
 
 import os
+import socket
 import sys
 import unittest
 from types import SimpleNamespace
@@ -161,6 +162,21 @@ class ResponseModelTests(unittest.TestCase):
 
         self.assertEqual(serialized["loss_probe"], [entry])
 
+    def test_ip_counters_survive_the_response_model(self):
+        from app.models.metrics import AllMetrics
+
+        network = {
+            **MINIMAL_PAYLOAD["network"],
+            "ips": [{"ip": "203.0.113.10", "rx_bytes": 1, "tx_bytes": 2}],
+            "ips_available": True,
+            "ips_sampled_at": 1_700_000_000.0,
+        }
+        serialized = AllMetrics.model_validate({**MINIMAL_PAYLOAD, "network": network}).model_dump()
+
+        self.assertEqual(serialized["network"]["ips"], network["ips"])
+        self.assertTrue(serialized["network"]["ips_available"])
+        self.assertEqual(serialized["network"]["ips_sampled_at"], 1_700_000_000.0)
+
     def test_window_is_null_unless_requested(self):
         from app.models.metrics import AllMetrics
 
@@ -272,6 +288,29 @@ class PhysicalInterfacesTests(unittest.TestCase):
             physical = bare_collector().physical_interfaces(["eth0", "eth1", "veth0", "bond0", "wg0"])
 
         self.assertEqual(physical, ["eth0", "bond0"])
+
+
+def inet(address: str):
+    return SimpleNamespace(family=socket.AF_INET, address=address)
+
+
+class AccountedAddressesTests(unittest.TestCase):
+
+    def test_only_ipv4_of_physical_interfaces_is_accounted(self):
+        # Клиенты подключаются к адресам карты; docker-мост, WARP и loopback —
+        # шум из нулевых строк в окне разбивки
+        addresses = {
+            "eth0": [inet("203.0.113.10"), inet("203.0.113.20"), inet("169.254.1.1"),
+                     SimpleNamespace(family=socket.AF_INET6, address="2001:db8::1")],
+            "veth1": [inet("172.17.0.1")],
+            "lo": [inet("127.0.0.1")],
+        }
+        with mock.patch("app.services.metrics_collector.read_net_dev", return_value={**NET_DEV, "lo": {}}), \
+             mock.patch("app.services.metrics_collector.psutil.net_if_addrs", return_value=addresses), \
+             mock.patch.object(MetricsCollector, "_get_bond_slaves", return_value=set()):
+            accounted = bare_collector().accounted_ipv4_addresses()
+
+        self.assertEqual(accounted, ["203.0.113.10", "203.0.113.20"])
 
 
 class CpuRatesTests(unittest.TestCase):

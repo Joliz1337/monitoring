@@ -1,7 +1,7 @@
 """Учёт трафика серверов: сырые счётчики ноды → часовые и суточные бакеты в PostgreSQL.
 
 Нода отдаёт только кумулятивные значения (интерфейсы, суммарный трафик, счётчики цепочек
-iptables по портам), всю историю и арифметику ведёт панель. Арифметика собрана в чистых
+iptables по портам и по своим IP), всю историю и арифметику ведёт панель. Арифметика собрана в чистых
 функциях уровня модуля — детект сброса счётчика, раскладка дельты по бакетам и проверка
 правдоподобности скорости считаются без обращения к БД и проверяются тестами напрямую.
 
@@ -64,6 +64,7 @@ class Scope(str, Enum):
     TOTAL = "total"
     IFACE = "iface"
     PORT = "port"
+    IP = "ip"
 
 
 class Period(str, Enum):
@@ -101,8 +102,24 @@ class BucketDelta:
     covered_seconds: float = 0.0
 
 
+@dataclass(frozen=True)
+class RuleCounterFields:
+    """Где в network лежат счётчики цепочек iptables одного вида: порты или адреса."""
+    scope: Scope
+    entries: str
+    key: str
+    available: str
+    sampled_at: str
+
+
+PORT_COUNTERS = RuleCounterFields(Scope.PORT, "ports", "port", "ports_available", "ports_sampled_at")
+IP_COUNTERS = RuleCounterFields(Scope.IP, "ips", "ip", "ips_available", "ips_sampled_at")
+
+
 CounterKey = tuple[int, str, str]
 BucketKey = tuple[int, str, str, str, datetime]
+# (scope, ключ) → (момент наблюдения, скорость)
+LiveRates = dict[tuple[str, str], tuple[datetime, ObservedSpeeds]]
 
 
 def floor_hour(moment: datetime) -> datetime:
@@ -258,7 +275,8 @@ class TrafficIngest:
         self._accum: dict[BucketKey, BucketDelta] = {}
         self._dirty: set[CounterKey] = set()
         self._speeds: dict[int, tuple[float, ObservedSpeeds]] = {}
-        self._port_samples: dict[int, float] = {}
+        self._live: dict[int, LiveRates] = {}
+        self._rule_samples: dict[tuple[int, str], float] = {}
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
@@ -300,6 +318,10 @@ class TrafficIngest:
                 speed_mbps=link_speed_mbps(interfaces), credit_reset=True,
             )
 
+        # Посекундная скорость ноды точнее дельты между опросами панели — и ровно из
+        # неё нода складывает цифру «Сеть» на карточке сервера. Без маркера live_rates
+        # нода отдаёт нули вместо скорости, и остаётся дельта счётчиков.
+        node_rates_fresh = bool(metrics.get("live_rates"))
         for iface in interfaces:
             name = str(iface.get("name") or "").strip()
             if not name:
@@ -310,8 +332,15 @@ class TrafficIngest:
                 observed_at, boot_id, boot_at,
                 speed_mbps=iface.get("speed_mbps"), credit_reset=True,
             )
+            rx_rate, tx_rate = iface.get("rx_bytes_per_sec"), iface.get("tx_bytes_per_sec")
+            if node_rates_fresh and rx_rate is not None and tx_rate is not None:
+                self._remember_rate(
+                    server_id, Scope.IFACE, name, observed_at,
+                    ObservedSpeeds(float(rx_rate), float(tx_rate)),
+                )
 
-        self._observe_ports(server_id, network, observed_at, boot_id, boot_at)
+        for fields in (PORT_COUNTERS, IP_COUNTERS):
+            self._observe_rule_counters(server_id, fields, network, observed_at, boot_id, boot_at)
 
         self._speeds[server_id] = (collected_at, speeds)
         return speeds
@@ -324,6 +353,19 @@ class TrafficIngest:
         if collected_at - measured_at > SPEED_TTL_SECONDS:
             return None
         return speeds
+
+    def live_rates(self, server_id: int, now: datetime) -> dict[str, dict[str, ObservedSpeeds]]:
+        """Скорость сейчас по интерфейсам, портам и адресам: scope → ключ → скорость.
+
+        Протухшие записи не отдаются — снятый с интерфейса адрес или замолчавшая
+        нода не должны показывать последнюю скорость как текущую.
+        """
+        fresh_since = now - timedelta(seconds=SPEED_TTL_SECONDS)
+        rates: dict[str, dict[str, ObservedSpeeds]] = {}
+        for (scope, key), (measured_at, speeds) in self._live.get(server_id, {}).items():
+            if measured_at >= fresh_since:
+                rates.setdefault(scope, {})[key] = speeds
+        return rates
 
     async def flush(self) -> None:
         """Записать накопленные бакеты и счётчики одной транзакцией.
@@ -414,36 +456,45 @@ class TrafficIngest:
             except Exception as e:
                 logger.error(f"Traffic flush cycle crashed: {e}")
 
-    def _observe_ports(
+    def _observe_rule_counters(
         self,
         server_id: int,
+        fields: RuleCounterFields,
         network: dict,
         observed_at: datetime,
         boot_id: Optional[str],
         boot_at: Optional[datetime],
     ) -> None:
-        if not network.get("ports_available"):
+        if not network.get(fields.available):
             return
-        ports = network.get("ports") or []
-        if not ports:
+        entries = network.get(fields.entries) or []
+        if not entries:
             return
 
         # Семплер опрашивает iptables реже, чем панель опрашивает ноду: без этой отсечки
         # одни и те же счётчики читались бы по несколько раз и дельта ложилась бы не в своё окно.
-        sampled_at = network.get("ports_sampled_at")
+        sampled_at = network.get(fields.sampled_at)
+        rate_window = None
         if sampled_at is not None:
-            if self._port_samples.get(server_id) == sampled_at:
+            sample_key = (server_id, fields.scope.value)
+            previous = self._rule_samples.get(sample_key)
+            if previous == sampled_at:
                 return
-            self._port_samples[server_id] = sampled_at
+            self._rule_samples[sample_key] = sampled_at
+            # Скорость — по моментам снятия дампа на ноде: панель забирает его
+            # опросом на 0–10 с позже, и деление на интервал опросов давало бы
+            # скачущую на треть цифру при ровном трафике
+            if previous is not None and sampled_at > previous:
+                rate_window = sampled_at - previous
 
-        for entry in ports:
-            if not isinstance(entry, dict) or entry.get("port") is None:
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get(fields.key) is None:
                 continue
             self._apply(
-                server_id, Scope.PORT, str(entry["port"]),
+                server_id, fields.scope, str(entry[fields.key]),
                 int(entry.get("rx_bytes") or 0), int(entry.get("tx_bytes") or 0),
                 observed_at, boot_id, boot_at,
-                speed_mbps=None, credit_reset=False,
+                speed_mbps=None, credit_reset=False, rate_window=rate_window,
             )
 
     def _apply(
@@ -458,6 +509,7 @@ class TrafficIngest:
         boot_at: Optional[datetime],
         speed_mbps: Optional[int],
         credit_reset: bool,
+        rate_window: Optional[float] = None,
     ) -> ObservedSpeeds:
         key = (server_id, scope.value, scope_key)
         prev = self._counters.get(key)
@@ -490,11 +542,22 @@ class TrafficIngest:
         seconds = (observed_at - started_at).total_seconds()
         if seconds <= 0:
             return ObservedSpeeds()
-        if not self._store_delta(
+        stored = self._store_delta(
             server_id, scope, scope_key, started_at, observed_at, rx_delta, tx_delta, speed_mbps, reset
-        ):
+        )
+        # Не записана только тишина или отброшенная мусорная дельта; у тишины скорость
+        # честный ноль, у мусора скорости нет вовсе
+        if not stored and (rx_delta > 0 or tx_delta > 0):
             return ObservedSpeeds()
-        return ObservedSpeeds(rx_delta / seconds, tx_delta / seconds)
+        window = rate_window or seconds
+        speeds = ObservedSpeeds(rx_delta / window, tx_delta / window)
+        self._remember_rate(server_id, scope, scope_key, observed_at, speeds)
+        return speeds
+
+    def _remember_rate(
+        self, server_id: int, scope: Scope, scope_key: str, observed_at: datetime, speeds: ObservedSpeeds
+    ) -> None:
+        self._live.setdefault(server_id, {})[(scope.value, scope_key)] = (observed_at, speeds)
 
     def _store_delta(
         self,
@@ -630,7 +693,7 @@ class TrafficIngest:
             dropped += 1
         for key in [k for k in dirty if k[0] in gone]:
             dirty.discard(key)
-        for store in (self._counters, self._speeds):
+        for store in (self._counters, self._speeds, self._live, self._rule_samples):
             for key in [k for k in store if (k[0] if isinstance(k, tuple) else k) in gone]:
                 del store[key]
         return dropped

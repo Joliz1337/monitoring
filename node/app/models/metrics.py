@@ -139,6 +139,13 @@ class NetworkPortCounter(BaseModel):
     tx_bytes: int = 0
 
 
+class NetworkIpCounter(BaseModel):
+    """Трафик соединений, открытых клиентами к адресу ноды; свои исходящие не входят."""
+    ip: str
+    rx_bytes: int = 0
+    tx_bytes: int = 0
+
+
 class NetworkInfo(BaseModel):
     interfaces: list[NetworkInterface]
     total: NetworkTotal
@@ -146,6 +153,9 @@ class NetworkInfo(BaseModel):
     ports: list[NetworkPortCounter] = Field(default_factory=list)
     ports_available: bool = False
     ports_sampled_at: Optional[float] = None
+    ips: list[NetworkIpCounter] = Field(default_factory=list)
+    ips_available: bool = False
+    ips_sampled_at: Optional[float] = None
 
 
 class ProcessInfo(BaseModel):

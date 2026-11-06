@@ -17,17 +17,27 @@ from app.auth import verify_auth
 from app.database import get_db
 from app.models import Server, ServerDowntime, ServerTraffic, TrafficImportState
 from app.routers.proxy import to_iso_utc
+from app.services.traffic_breakdown import ServerNotFoundError, build_breakdown
 from app.services.traffic_import import (
+    MIN_NODE_VERSION_FOR_IP_TRAFFIC,
     MIN_NODE_VERSION_FOR_TRAFFIC_V2,
     ImportStatus,
+    node_supports_ip_traffic,
     node_supports_traffic_v2,
 )
-from app.services.traffic_ingest import Period, Scope, TOTAL_SCOPE_KEY, floor_day, floor_hour
+from app.services.traffic_ingest import (
+    Period,
+    Scope,
+    TOTAL_SCOPE_KEY,
+    floor_day,
+    floor_hour,
+    get_traffic_ingest,
+)
 
 router = APIRouter(prefix="/traffic", tags=["traffic"])
 
 SeriesPeriod = Literal["24h", "7d", "30d", "365d"]
-SeriesScope = Literal["total", "iface", "port"]
+SeriesScope = Literal["total", "iface", "port", "ip"]
 
 # period → тип бакета, шаг ряда, количество точек
 SERIES_PERIODS: dict[str, tuple[Period, timedelta, int]] = {
@@ -114,6 +124,8 @@ async def get_traffic_status(
         "supported": node_supports_traffic_v2(row.node_version),
         "node_version": row.node_version,
         "min_version": MIN_NODE_VERSION_FOR_TRAFFIC_V2,
+        "ips_supported": node_supports_ip_traffic(row.node_version),
+        "min_ip_version": MIN_NODE_VERSION_FOR_IP_TRAFFIC,
         "import": {
             "status": row.status or ImportStatus.PENDING.value,
             "imported_at": to_iso_utc(row.imported_at),
@@ -154,6 +166,7 @@ async def get_server_traffic_summary(
     total = {"rx_bytes": 0, "tx_bytes": 0, "days": days}
     by_interface: list[dict] = []
     by_port: list[dict] = []
+    by_ip: list[dict] = []
     for row in rows:
         rx, tx = int(row.rx_bytes or 0), int(row.tx_bytes or 0)
         if row.scope == Scope.TOTAL.value:
@@ -161,6 +174,8 @@ async def get_server_traffic_summary(
             total["tx_bytes"] = tx
         elif row.scope == Scope.IFACE.value:
             by_interface.append({"interface": row.scope_key, "rx_bytes": rx, "tx_bytes": tx})
+        elif row.scope == Scope.IP.value:
+            by_ip.append({"ip": row.scope_key, "rx_bytes": rx, "tx_bytes": tx})
         elif row.scope == Scope.PORT.value:
             port = _as_port(row.scope_key)
             if port is not None:
@@ -168,12 +183,14 @@ async def get_server_traffic_summary(
 
     by_interface.sort(key=_by_volume, reverse=True)
     by_port.sort(key=_by_volume, reverse=True)
+    by_ip.sort(key=_by_volume, reverse=True)
 
     return {
         "days": days,
         "total": total,
         "by_interface": by_interface,
         "by_port": by_port,
+        "by_ip": by_ip,
         # Список портов — из колонки servers, а не с ноды: сводка обязана открываться офлайн
         "tracked_ports": _tracked_ports(server.tracked_ports),
     }
@@ -209,6 +226,19 @@ async def get_traffic_series(
         "points": _dense_points(first_bucket, step, point_count, measured),
         "gaps": gaps,
     }
+
+
+@router.get("/{server_id}/breakdown")
+async def get_traffic_breakdown(
+    server_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    """Скорость сейчас и мини-графики за сутки по IP, интерфейсам и портам — окно на дашборде."""
+    try:
+        return await build_breakdown(db, server_id, get_traffic_ingest(), _utcnow())
+    except ServerNotFoundError:
+        raise HTTPException(status_code=404, detail="Server not found")
 
 
 async def _load_buckets(

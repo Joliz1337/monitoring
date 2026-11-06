@@ -15,10 +15,11 @@ import {
   Wifi,
   Radio,
   Gauge,
-  History
+  History,
+  Globe
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { proxyApi, trafficApi, TrafficSummary, TrafficStatus, TrafficSeries, ServerMetrics, HistoryPoint, HistoryResponse } from '../api/client'
+import { proxyApi, trafficApi, TrafficSummary, TrafficStatus, TrafficSeries, TrafficScope, ServerMetrics, HistoryPoint, HistoryResponse } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import { nodeAllows } from '../utils/nodeCapabilities'
@@ -48,6 +49,17 @@ const NO_GAPS: ChartGap[] = []
 // об этом предупреждаем баннером, но страницу не блокируем
 const IMPORT_IN_PROGRESS_STATUSES = ['pending', 'node_too_old']
 
+// Срез графика истории хранится строкой «scope|ключ» — так он живёт в value у <select>
+const SLICE_SEPARATOR = '|'
+const TOTAL_SLICE = `total${SLICE_SEPARATOR}`
+
+const sliceValue = (scope: TrafficScope, key: string | number) => `${scope}${SLICE_SEPARATOR}${key}`
+
+function parseSlice(value: string): { scope: TrafficScope; key: string } {
+  const [scope, key = ''] = value.split(SLICE_SEPARATOR)
+  return { scope: scope as TrafficScope, key }
+}
+
 export default function Traffic() {
   const { uid, serverId } = useParams()
   const navigate = useNavigate()
@@ -64,6 +76,7 @@ export default function Traffic() {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [period, setPeriod] = useRememberedState('traffic.period', '24h')
+  const [historySlice, setHistorySlice] = useState(TOTAL_SLICE)
   const [speedPeriod, setSpeedPeriod] = useRememberedState('traffic.speed-period', '1h')
   const [newPort, setNewPort] = useState('')
   const [isAddingPort, setIsAddingPort] = useState(false)
@@ -88,12 +101,13 @@ export default function Traffic() {
   const fetchSeries = useCallback(async () => {
     if (!serverId) return
     try {
-      const { data } = await trafficApi.getSeries(Number(serverId), { period, scope: 'total' })
+      const { scope, key } = parseSlice(historySlice)
+      const { data } = await trafficApi.getSeries(Number(serverId), { period, scope, key: key || undefined })
       setSeries(data)
     } catch {
       // График остаётся с последними данными — ошибку уже показывает баннер summary
     }
-  }, [serverId, period])
+  }, [serverId, period, historySlice])
 
   const fetchMetrics = useCallback(async () => {
     if (!serverId) return
@@ -130,6 +144,9 @@ export default function Traffic() {
 
     const init = async () => {
       setIsLoading(true)
+      // Страница переиспользуется при переходе к другому серверу, а его интерфейсы,
+      // адреса и порты свои — выбранный срез у него не существует
+      setHistorySlice(TOTAL_SLICE)
       try {
         const { data } = await trafficApi.getStatus(Number(serverId))
         if (cancelled) return
@@ -157,7 +174,7 @@ export default function Traffic() {
     }
     fetchSeries()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [period])
+  }, [period, historySlice])
 
   const speedPeriodMounted = useRef(false)
   useEffect(() => {
@@ -598,16 +615,47 @@ export default function Traffic() {
                 <Network className="w-4 h-4 text-accent-500" />
                 {t('traffic.history')}
               </h3>
-              <PeriodSelector
-                value={period}
-                onChange={setPeriod}
-                options={[
-                  { value: '24h', label: '24h' },
-                  { value: '7d', label: '7d' },
-                  { value: '30d', label: '30d' },
-                  { value: '365d', label: '1y' },
-                ]}
-              />
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <select
+                  className="input w-auto py-1.5 font-mono text-sm [&_option]:bg-dark-900"
+                  value={historySlice}
+                  onChange={e => setHistorySlice(e.target.value)}
+                  aria-label={t('traffic.slice')}
+                >
+                  <option value={TOTAL_SLICE}>{t('traffic.slice_total')}</option>
+                  {summary.by_interface.length > 0 && (
+                    <optgroup label={t('traffic.slice_interfaces')}>
+                      {summary.by_interface.map(iface => (
+                        <option key={iface.interface} value={sliceValue('iface', iface.interface)}>{iface.interface}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {summary.by_ip.length > 0 && (
+                    <optgroup label={t('traffic.slice_ips')}>
+                      {summary.by_ip.map(entry => (
+                        <option key={entry.ip} value={sliceValue('ip', entry.ip)}>{entry.ip}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {summary.by_port.length > 0 && (
+                    <optgroup label={t('traffic.slice_ports')}>
+                      {summary.by_port.map(entry => (
+                        <option key={entry.port} value={sliceValue('port', entry.port)}>:{entry.port}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+                <PeriodSelector
+                  value={period}
+                  onChange={setPeriod}
+                  options={[
+                    { value: '24h', label: '24h' },
+                    { value: '7d', label: '7d' },
+                    { value: '30d', label: '30d' },
+                    { value: '365d', label: '1y' },
+                  ]}
+                />
+              </div>
             </div>
             {/* Сумма байт за бакет — сглаживать нечестно, рисуется как есть */}
             <MultiLineChart
@@ -719,44 +767,68 @@ export default function Traffic() {
             )}
           </motion.div>
 
-          {/* Interface Traffic */}
-          <motion.div className="card" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-            <h3 className="font-semibold text-dark-100 mb-4 flex items-center gap-2">
-              <Network className="w-4 h-4 text-accent-500" />
-              {t('traffic.by_interface', { days: summary.days })}
-            </h3>
+          <motion.div className="grid grid-cols-1 xl:grid-cols-2 gap-4" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
+            <div className="card">
+              <h3 className="font-semibold text-dark-100 mb-4 flex items-center gap-2">
+                <Network className="w-4 h-4 text-accent-500" />
+                {t('traffic.by_interface', { days: summary.days })}
+              </h3>
 
-            {summary.by_interface.length === 0 ? (
-              <div className="text-center py-8 text-dark-500">
-                <Network className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                <p>{t('traffic.no_interface_data')}</p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {summary.by_interface.map(iface => (
-                  <div
-                    key={iface.interface}
-                    className="flex items-center justify-between p-3 bg-dark-800/50 rounded-lg"
-                  >
-                    <span className="font-mono text-dark-200">{iface.interface}</span>
-                    <div className="flex gap-6 text-sm">
-                      <span className="text-success">
-                        ↓ {formatBytes(iface.rx_bytes)}
-                      </span>
-                      <span className="text-accent-400">
-                        ↑ {formatBytes(iface.tx_bytes)}
-                      </span>
-                      <span className="text-dark-400">
-                        {t('traffic.total')}: {formatBytes(iface.rx_bytes + iface.tx_bytes)}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+              {summary.by_interface.length === 0 ? (
+                <div className="text-center py-8 text-dark-500">
+                  <Network className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                  <p>{t('traffic.no_interface_data')}</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {summary.by_interface.map(iface => (
+                    <VolumeRow key={iface.interface} label={iface.interface} rx={iface.rx_bytes} tx={iface.tx_bytes} />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="card">
+              <h3 className="font-semibold text-dark-100 mb-1 flex items-center gap-2">
+                <Globe className="w-4 h-4 text-accent-500" />
+                {t('traffic.by_ip', { days: summary.days })}
+              </h3>
+              <p className="text-xs text-dark-500 mb-4">{t('traffic.by_ip_hint')}</p>
+
+              {status && !status.ips_supported ? (
+                <p className="py-4 text-sm text-dark-400">
+                  {t('network_breakdown.update_node', { version: status.min_ip_version })}
+                </p>
+              ) : summary.by_ip.length === 0 ? (
+                <div className="text-center py-8 text-dark-500">
+                  <Globe className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                  <p>{t('traffic.no_ip_data')}</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {summary.by_ip.map(entry => (
+                    <VolumeRow key={entry.ip} label={entry.ip} rx={entry.rx_bytes} tx={entry.tx_bytes} />
+                  ))}
+                </div>
+              )}
+            </div>
           </motion.div>
         </motion.div>
       )}
     </motion.div>
+  )
+}
+
+function VolumeRow({ label, rx, tx }: { label: string; rx: number; tx: number }) {
+  const { t } = useTranslation()
+  return (
+    <div className="flex items-center justify-between gap-3 p-3 bg-dark-800/50 rounded-lg">
+      <span className="font-mono text-dark-200 truncate">{label}</span>
+      <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
+        <span className="text-success">↓ {formatBytes(rx)}</span>
+        <span className="text-accent-400">↑ {formatBytes(tx)}</span>
+        <span className="text-dark-400">{t('traffic.total')}: {formatBytes(rx + tx)}</span>
+      </div>
+    </div>
   )
 }
