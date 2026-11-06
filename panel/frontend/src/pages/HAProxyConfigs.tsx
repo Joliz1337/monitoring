@@ -1152,8 +1152,8 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
       toast.success(t('haproxy_configs.rule_deleted'))
       fetchDetail()
       onRefreshList()
-    } catch {
-      toast.error(t('haproxy_configs.rule_error'))
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || t('haproxy_configs.rule_error'))
     }
   }
 

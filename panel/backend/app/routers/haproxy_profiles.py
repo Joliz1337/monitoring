@@ -29,6 +29,7 @@ from app.services.haproxy_config import (
     HAProxyRule,
     InvalidSniError,
     ProfileOptions,
+    RuleBlockNotFoundError,
     SniMode,
     get_config_generator,
     normalize_sni_domains,
@@ -653,7 +654,7 @@ async def update_options(
     profile_id: int, data: ProfileOptionsData, bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
 ):
-    """Общий фильтр SNI вписан в frontend каждого правила — конфиг пересобирается из текущих правил."""
+    """Общий фильтр SNI вписан в frontend каждого TCP-правила — меняются только эти frontend."""
     profile = await _get_profile(profile_id, db)
     gen = get_config_generator()
 
@@ -668,15 +669,14 @@ async def update_options(
     if not ok:
         raise HTTPException(400, msg)
 
-    profile.options = json.dumps(options.to_dict())
-    # Без разобранных правил фильтру не к чему применяться, а пересборка
-    # стёрла бы написанный вручную конфиг
-    rules = gen.parse_rules_from_config(profile.config_content)
-    new_config = gen.generate_full_config(rules, options) if rules else profile.config_content
+    try:
+        new_config = gen.apply_options(profile.config_content, _profile_options(profile), options)
+    except RuleBlockNotFoundError as e:
+        raise HTTPException(409, str(e))
     config_changed = new_config != profile.config_content
     if config_changed:
-        profile.config_content = new_config
-        await mark_outdated_pending(db, profile)
+        await _store_rules_config(db, profile, new_config)
+    profile.options = json.dumps(options.to_dict())
     await db.commit()
 
     if config_changed:
@@ -817,9 +817,8 @@ async def add_rule(profile_id: int, data: RuleData, bg: BackgroundTasks, db: Asy
     if any(r.name == rule.name for r in existing_rules):
         raise HTTPException(400, f"Rule '{rule.name}' already exists")
 
+    await _store_rules_config(db, profile, gen.add_rule_to_config(profile.config_content, rule, _profile_options(profile)))
     existing_rules.append(rule)
-    profile.config_content = gen.generate_full_config(existing_rules, _profile_options(profile))
-    await mark_outdated_pending(db, profile)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -841,9 +840,13 @@ async def update_rule(profile_id: int, rule_name: str, data: RuleData, bg: Backg
     if idx is None:
         raise HTTPException(404, f"Rule '{rule_name}' not found")
 
+    options = _profile_options(profile)
+    try:
+        new_config = gen.replace_rule_in_config(profile.config_content, existing_rules[idx], rule, options, options)
+    except RuleBlockNotFoundError as e:
+        raise HTTPException(409, str(e))
+    await _store_rules_config(db, profile, new_config)
     existing_rules[idx] = rule
-    profile.config_content = gen.generate_full_config(existing_rules, _profile_options(profile))
-    await mark_outdated_pending(db, profile)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -856,12 +859,16 @@ async def delete_rule(profile_id: int, rule_name: str, bg: BackgroundTasks, db: 
     gen = get_config_generator()
 
     existing_rules = gen.parse_rules_from_config(profile.config_content)
-    new_rules = [r for r in existing_rules if r.name != rule_name]
-    if len(new_rules) == len(existing_rules):
+    removed = next((r for r in existing_rules if r.name == rule_name), None)
+    if removed is None:
         raise HTTPException(404, f"Rule '{rule_name}' not found")
 
-    profile.config_content = gen.generate_full_config(new_rules, _profile_options(profile))
-    await mark_outdated_pending(db, profile)
+    try:
+        new_config = gen.remove_rule_from_config(profile.config_content, removed)
+    except RuleBlockNotFoundError as e:
+        raise HTTPException(409, str(e))
+    await _store_rules_config(db, profile, new_config)
+    new_rules = [r for r in existing_rules if r is not removed]
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -975,6 +982,16 @@ async def _get_profile(profile_id: int, db: AsyncSession) -> HAProxyConfigProfil
     if not profile:
         raise HTTPException(404, "Profile not found")
     return profile
+
+
+async def _store_rules_config(db: AsyncSession, profile: HAProxyConfigProfile, new_config: str) -> None:
+    """Правка через форму оставляет в конфиге ручные строки, поэтому итог
+    проверяется тем же `haproxy -c`, что и сырой конфиг."""
+    valid, message = await validate_config(new_config)
+    if not valid:
+        raise HTTPException(400, f"Конфиг не прошёл проверку HAProxy: {message}")
+    profile.config_content = new_config
+    await mark_outdated_pending(db, profile)
 
 
 def _profile_options(profile: HAProxyConfigProfile) -> ProfileOptions:

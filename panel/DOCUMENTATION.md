@@ -2794,7 +2794,18 @@ Whitelist можно наполнять из внешних списков по 
 
 **Валидация конфига на стороне панели:**
 
-Перед сохранением `config_content` через `PUT /haproxy-profiles/{id}` бэкенд запускает `haproxy -c -f <tempfile>` локально (бинарь установлен в образ backend). Поскольку реальных TLS-сертификатов нод на панели нет, все пути `crt` в конфиге подменяются self-signed dummy-сертификатом (`/tmp/haproxy-validate/dummy.pem`) — проверяется синтаксис и структура, а не наличие конкретных файлов. При провале валидации возвращается `HTTP 400` с сообщением об ошибке и конфиг не сохраняется. Если бинарь haproxy недоступен (образ не пересобран) — валидация мягко пропускается (`valid=True`).
+Перед сохранением `config_content` через `PUT /haproxy-profiles/{id}`, а также после добавления, правки и удаления правила и смены фильтра SNI бэкенд запускает `haproxy -c -f <tempfile>` локально (бинарь установлен в образ backend). Поскольку реальных TLS-сертификатов нод на панели нет, все пути `crt` в конфиге подменяются self-signed dummy-сертификатом (`/tmp/haproxy-validate/dummy.pem`) — проверяется синтаксис и структура, а не наличие конкретных файлов. При провале валидации возвращается `HTTP 400` с сообщением об ошибке и конфиг не сохраняется. Если бинарь haproxy недоступен (образ не пересобран) — валидация мягко пропускается (`valid=True`).
+
+**Ручные правки и правка через форму:**
+
+Форма правила меняет только блок своего правила (`frontend <тип>_<имя>` + `backend backend_<тип>_<имя>`), остальной текст конфига — `global`, `defaults`, `resolvers`, свои секции вроде `listen`, другие правила — остаётся таким, каким его сохранили в сыром конфиге. Так можно переопределить значения из `defaults` для одного правила: дописать в его `backend` строку `no option tcp-smart-connect` или `timeout server 2h`, и она переживёт правку правила через форму.
+
+- Добавление (`add_rule_to_config`) вставляет новый блок перед `# === RULES END ===`, без маркера — в конец конфига. Удаление (`remove_rule_from_config`) вырезает обе секции правила вместе с пустой строкой перед каждой.
+- Правка (`replace_rule_in_config`) сравнивает по секциям шаблон правила в прежнем виде с шаблоном нового. Секция, у которой шаблон не изменился, остаётся байт-в-байт. Изменившаяся собирается заново, и в неё переносятся свои строки старой: те, которых шаблон не дал бы правилу в прежнем виде. Строка встаёт за той же строкой шаблона, за которой стояла (порядок `tcp-request` значим), а если такой строки больше нет — в конец секции.
+- Строки, значение которых задаёт форма (`_FORM_OWNED_LINE`: `bind`, `mode`, `default_backend`, `server`, `balance`, `hash-type`, `cookie`, `stick-table`/`stick on`, `retries`, `fullconn`, `timeout queue`, `http-check expect`, `option tcp-check|httpchk|redispatch|allbackups`, строки фильтра SNI), не переносятся: второй `bind` или `server` с тем же именем сломал бы конфиг, а старое значение перекрыло бы новое из формы. Ручные дополнения к таким строкам (например `tfo` в `bind`) теряются, когда форма пересобирает их секцию. Удалённые руками строки шаблона в пересобранной секции снова появятся.
+- Граница секции — следующая строка, начинающаяся с ключевого слова секции HAProxy (`_SECTION_KEYWORDS`), или маркер `RULES START/END`; пустые строки и комментарии без отступа в хвосте секции относятся к тому, что идёт следом, а закомментированная строка внутри блока остаётся в блоке.
+- Нет секции, которую ожидает разобранное правило (например, backend переименован руками), — `409` (`RuleBlockNotFoundError`), такое правило правится в сыром конфиге.
+- «Вставить шаблон» (`regenerate-config`) собирает весь конфиг заново из базового шаблона и разобранных правил — свои строки при этом пропадают; результат виден в редакторе до сохранения.
 
 **Отложенная синхронизация офлайн-нод:**
 
@@ -2843,7 +2854,7 @@ UI: `ProfileDetailPanel` грузит карту один раз при откр
 - Одноимённые `acl` объединяются по ИЛИ: список режется по `SNI_DOMAINS_PER_LINE = 10` имён на строку, чтобы длинный список не упирался в лимит длины строки конфига; максимум `MAX_SNI_DOMAINS = 100`. `normalize_sni_domains()` приводит к нижнему регистру, снимает точку в конце и дубли; пробел, `#` и прочее, что сломало бы ACL, — `400`.
 - Маска `*.example.com` пропускает сам `example.com` и поддомены любой глубины: домен уходит в строку точного совпадения, поддомены — в `acl sni_allowed req.ssl_sni -i -m end .example.com`. Точка в начале суффикса обязательна, иначе прошёл бы `evilexample.com`. Звёздочка допустима только первой меткой и только перед доменом с точкой (`*.com`, `a.*.com`, `*x.com` — `400`); отдельная запись `example.com` рядом с маской убирается как лишняя. При разборе своего списка правила точный домен, совпадающий с базой маски, снова сливается с маской — список и конфиг переживают пересборку без изменений.
 - Маркер `# sni-filter (<режим>)` — единственное, по чему `_parse_sni_filter()` при разборе конфига отличает свой список правила от вписанного общего; режим `off` записывается одним маркером. Без маркера правило считается `profile`. При выключенном фильтре профиля правила `profile` не получают ни строки — конфиг байт-в-байт прежний, хэши серверов не меняются.
-- `PUT /{id}/options`: нормализация → `validate_options()` (включённый фильтр без SNI — `400`) → конфиг пересобирается из разобранных правил с новыми настройками; если текст изменился — `mark_outdated_pending` и фоновая раскатка. Профиль без разобранных правил не пересобирается: фильтру не к чему применяться, а пересборка заменила бы написанный вручную конфиг шаблоном. Добавление, правка и удаление правил и «Перегенерировать конфиг» тоже собирают конфиг с настройками профиля (`_profile_options()`).
+- `PUT /{id}/options`: нормализация → `validate_options()` (включённый фильтр без SNI — `400`) → `apply_options()` пересобирает на месте только frontend тех правил, у которых меняются строки фильтра (механика — «Ручные правки и правка через форму» выше), остальной конфиг не трогается → `haproxy -c`; если текст изменился — `mark_outdated_pending` и фоновая раскатка. Добавление, правка и удаление правил и «Вставить шаблон» тоже собирают блоки с настройками профиля (`_profile_options()`).
 - Фильтр работает на ноде любой версии: её `parse_rules()` строки фильтра во frontend пропускает, `render_for_server()` их не трогает. `rst-ttl` дописывает только нода 10.31.0+.
 
 UI: кнопка «Фильтр SNI» (иконка `ShieldCheck`, зелёная при включённом фильтре) в шапке правил раскрывает `SniFilterSection` — тумблер и список (строки, пробелы или запятые). В `RuleForm` — переключатель из трёх режимов, для «Свой список» — поле списка, под ним подсказка с текущим состоянием профиля. В строке правила метка `SNI`, если фильтр на нём действует.
@@ -2859,9 +2870,9 @@ UI: кнопка «Фильтр SNI» (иконка `ShieldCheck`, зелёна�
 | POST | /haproxy-profiles/reorder | Сохранить порядок профилей: массив id в нужном порядке → `position` (один executemany, как `servers/reorder`) |
 | GET | /haproxy-profiles/{id} | Детали профиля (серверы + `options` — фильтр SNI) |
 | PUT | /haproxy-profiles/{id}/options | Фильтр SNI профиля `{sni_filter_enabled, sni_filter_domains}` + пересборка конфига и раскатка |
-| POST | /haproxy-profiles/{id}/rules | Добавить правило |
-| PUT | /haproxy-profiles/{id}/rules/{index} | Обновить правило |
-| DELETE | /haproxy-profiles/{id}/rules/{index} | Удалить правило |
+| POST | /haproxy-profiles/{id}/rules | Добавить правило (остальной конфиг не меняется, итог проверяется `haproxy -c`) |
+| PUT | /haproxy-profiles/{id}/rules/{name} | Обновить правило (пересобирается только его блок, свои строки правила сохраняются) |
+| DELETE | /haproxy-profiles/{id}/rules/{name} | Удалить правило (вырезается только его блок) |
 | POST | /haproxy-profiles/{id}/servers/{server_id} | Привязать сервер |
 | DELETE | /haproxy-profiles/{id}/servers/{server_id} | Отвязать сервер |
 | PUT | /haproxy-profiles/{id}/servers/{server_id}/addresses | Входные и выходные IP сервера `{listen_ips, source_ips}` + раскатка на этот сервер |
@@ -2905,7 +2916,7 @@ UI: кнопка «Фильтр SNI» (иконка `ShieldCheck`, зелёна�
 
 **Файлы:**
 - `panel/backend/app/routers/haproxy_profiles.py` — API роутер; `PUT /{id}` с валидацией; `POST /validate`; `PUT /{id}/options`
-- `panel/backend/app/services/haproxy_config.py` — генератор и разбор правил; `ProfileOptions`, `SniMode`, `normalize_sni_domains` (фильтр SNI); тесты — `panel/backend/tests/test_haproxy_sni_filter.py`
+- `panel/backend/app/services/haproxy_config.py` — генератор и разбор правил; `ProfileOptions`, `SniMode`, `normalize_sni_domains` (фильтр SNI); `add_rule_to_config`/`replace_rule_in_config`/`remove_rule_from_config`/`apply_options` (правка блока правила без пересборки конфига); тесты — `panel/backend/tests/test_haproxy_sni_filter.py`, `panel/backend/tests/test_haproxy_rule_splice.py`
 - `panel/backend/app/services/haproxy_validator.py` — `validate_config(config_content)`: запуск `haproxy -c -f`, замена путей `crt` на dummy-сертификат
 - `panel/backend/app/services/haproxy_profile_sync.py` — `is_server_online`, `_sync_single_server` (отдельная DB-сессия, принимает `ensure_started`), `SyncResult` (`status: success|failed|queued`), `retry_pending_haproxy_syncs` (с `ensure_started=True`), `stop_haproxy_on_server` (POST `/api/haproxy/stop`, graceful при офлайн), `render_profile_for_server`/`expected_config_hash`/`mark_outdated_pending`/`check_addresses_on_node` (адреса сервера)
 - `panel/backend/app/services/haproxy_addresses.py` — `ServerAddresses`, `render_for_server`, `normalize_ips`, `missing_on_node`; тесты — `panel/backend/tests/test_haproxy_addresses.py`

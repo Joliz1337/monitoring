@@ -30,6 +30,23 @@ _SNI_DOMAIN = re.compile(r"^(?=.{1,253}$)[a-z0-9_-]+(\.[a-z0-9_-]+)*$")
 _SNI_MARKER = re.compile(r"^\s*# sni-filter \((profile|custom|off)\)\s*$", re.MULTILINE)
 _SNI_ACL = re.compile(rf"^\s*acl\s+{SNI_FILTER_ACL}\s+req\.ssl_sni\s+-i\s+(-m\s+end\s+)?(.+)$", re.MULTILINE)
 
+_SECTION_KEYWORDS = frozenset({
+    "global", "defaults", "frontend", "backend", "listen", "resolvers", "peers",
+    "userlist", "mailers", "program", "http-errors", "ring", "log-forward",
+    "cache", "fcgi-app", "crt-store", "traces", "acme",
+})
+
+# Строки, значение которых задаёт форма правила. Из старого блока они не переносятся:
+# второй bind или server с тем же именем сломал бы конфиг, а старый retries
+# перекрыл бы новое значение из формы
+_FORM_OWNED_LINE = re.compile(
+    r"^(bind|mode|default_backend|server|balance|hash-type|cookie|stick-table|stick\s+on"
+    r"|retries|fullconn|timeout\s+queue|http-check\s+expect"
+    r"|option\s+(tcp-check|httpchk|redispatch|allbackups)"
+    rf"|acl\s+{SNI_FILTER_ACL}|tcp-request\s+content\s+silent-drop\s+unless\s+{SNI_FILTER_ACL}"
+    r"|# sni-filter)(\s|$)"
+)
+
 
 class SniMode(str, Enum):
     PROFILE = "profile"
@@ -39,6 +56,14 @@ class SniMode(str, Enum):
 
 class InvalidSniError(ValueError):
     """SNI нельзя вписать в ACL HAProxy."""
+
+
+class RuleBlockNotFoundError(Exception):
+    """В конфиге нет frontend или backend правила с именами, которые даёт генератор."""
+
+    def __init__(self, rule_name: str):
+        super().__init__(f"Rule '{rule_name}' has no matching frontend/backend section in the config")
+        self.rule_name = rule_name
 
 
 def _is_valid_sni(domain: str) -> bool:
@@ -78,6 +103,57 @@ def normalize_sni_domains(values: Iterable[str]) -> tuple[str, ...]:
     if len(result) > MAX_SNI_DOMAINS:
         raise InvalidSniError(f"Too many SNI values (max {MAX_SNI_DOMAINS})")
     return tuple(result)
+
+
+def _is_section_boundary(line: str) -> bool:
+    stripped = line.strip()
+    if stripped in (RULES_START_MARKER, RULES_END_MARKER):
+        return True
+    words = stripped.split(maxsplit=1)
+    return bool(words) and words[0] in _SECTION_KEYWORDS
+
+
+def _section_span(lines: list[str], kind: str, name: str) -> Optional[tuple[int, int]]:
+    """Строки секции от заголовка до следующей секции. Пустые строки и комментарии
+    без отступа в хвосте остаются снаружи: это разделитель или подпись того, что идёт следом."""
+    for start, line in enumerate(lines):
+        if line.split()[:2] != [kind, name]:
+            continue
+        end = start + 1
+        while end < len(lines) and not _is_section_boundary(lines[end]):
+            end += 1
+        while end > start + 1 and (not lines[end - 1].strip() or lines[end - 1].startswith("#")):
+            end -= 1
+        return start, end
+    return None
+
+
+def _rule_section_names(rule: "HAProxyRule") -> tuple[tuple[str, str], tuple[str, str]]:
+    return ("frontend", f"{rule.rule_type}_{rule.name}"), ("backend", f"backend_{rule.rule_type}_{rule.name}")
+
+
+def _position_after(lines: list[str], stripped: str) -> int:
+    return next((i + 1 for i, line in enumerate(lines) if line.strip() == stripped), len(lines))
+
+
+def _merge_own_lines(old_section: list[str], template_section: list[str], new_section: list[str]) -> list[str]:
+    """Переносит в пересобранную секцию строки, которых шаблон не дал бы правилу
+    в прежнем виде, — то, что вписали руками. Строка встаёт за той же строкой
+    шаблона, за которой стояла (порядок tcp-request значим), а если такой строки
+    в новой секции нет — в конец."""
+    template = {line.strip() for line in template_section}
+    merged = list(new_section)
+    insert_at = 1
+    for line in old_section[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped in template or _FORM_OWNED_LINE.match(stripped):
+            insert_at = _position_after(merged, stripped)
+            continue
+        merged.insert(insert_at, line)
+        insert_at += 1
+    return merged
 
 
 @dataclass(frozen=True)
@@ -460,9 +536,61 @@ backend {backend_name}
                 RULES_END_MARKER,
                 rules_content.rstrip() + '\n' + RULES_END_MARKER
             )
-        
+
         return config
-    
+
+    # Правка правил через форму меняет только блоки самих правил: global, defaults,
+    # чужие секции и остальные правила остаются такими, как их написали руками
+    def add_rule_to_config(self, config: str, rule: HAProxyRule, options: ProfileOptions) -> str:
+        block = self.generate_rule_block(rule, options).strip("\n").split("\n")
+        lines = config.split("\n")
+        end = next((i for i, line in enumerate(lines) if line.strip() == RULES_END_MARKER), None)
+        if end is None:
+            return config.rstrip("\n") + "\n\n" + "\n".join(block) + "\n"
+        lines[end:end] = [""] + block
+        return "\n".join(lines)
+
+    def replace_rule_in_config(self, config: str, old_rule: HAProxyRule, new_rule: HAProxyRule,
+                               old_options: ProfileOptions, new_options: ProfileOptions) -> str:
+        """Секция, чей шаблон не изменился, остаётся байт-в-байт; изменившаяся
+        собирается заново, и свои строки из неё (например `no option tcp-smart-connect`
+        поверх defaults) переезжают в новую."""
+        lines = config.split("\n")
+        spans = self._rule_spans(lines, old_rule)
+        templates = self._rule_sections(old_rule, old_options)
+        fresh = self._rule_sections(new_rule, new_options)
+        for (start, end), template, section in sorted(zip(spans, templates, fresh), key=lambda item: item[0], reverse=True):
+            if template != section:
+                lines[start:end] = _merge_own_lines(lines[start:end], template, section)
+        return "\n".join(lines)
+
+    def remove_rule_from_config(self, config: str, rule: HAProxyRule) -> str:
+        lines = config.split("\n")
+        for start, end in sorted(self._rule_spans(lines, rule), reverse=True):
+            if start > 0 and not lines[start - 1].strip():
+                start -= 1
+            del lines[start:end]
+        return "\n".join(lines)
+
+    def apply_options(self, config: str, old_options: ProfileOptions, new_options: ProfileOptions) -> str:
+        for rule in self.parse_rules_from_config(config):
+            config = self.replace_rule_in_config(config, rule, rule, old_options, new_options)
+        return config
+
+    def _rule_sections(self, rule: HAProxyRule, options: ProfileOptions) -> list[list[str]]:
+        lines = self.generate_rule_block(rule, options).split("\n")
+        return [lines[start:end] for start, end in self._rule_spans(lines, rule)]
+
+    @staticmethod
+    def _rule_spans(lines: list[str], rule: HAProxyRule) -> list[tuple[int, int]]:
+        spans = []
+        for kind, name in _rule_section_names(rule):
+            span = _section_span(lines, kind, name)
+            if span is None:
+                raise RuleBlockNotFoundError(rule.name)
+            spans.append(span)
+        return spans
+
     def validate_rule(self, rule: HAProxyRule) -> tuple[bool, str]:
         """Validate a rule before adding"""
         if not re.match(r'^[a-zA-Z0-9_-]+$', rule.name):
