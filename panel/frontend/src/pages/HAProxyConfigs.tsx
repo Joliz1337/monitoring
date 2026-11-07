@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, forwardRef, type ForwardedRef, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, useCallback, useRef, forwardRef, type ForwardedRef, type ReactNode } from 'react'
 import { useOpenIds } from '../hooks/useOpenIds'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
@@ -27,7 +27,11 @@ import {
   HAProxyServerStatus,
   BackendServer,
   BalancerOptions,
+  PortRange,
+  PortUsageMap,
+  portUsageApi,
 } from '../api/client'
+import { formatPortRanges, formatServerPorts, portsInterceptedOnServers, rangesCover, ServerRanges } from '../utils/portConflicts'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import FolderedServerPicker from '../components/servers/FolderedServerPicker'
@@ -186,6 +190,29 @@ function summarizeTargets(targets: BalancerTarget[]): string {
 
 function describeTarget(target: BalancerTarget): string {
   return target.roles.length > 0 ? `${target.label} — ${target.roles.join(', ')}` : target.label
+}
+
+// Серая метка — на сервере есть DNAT, красная — он перехватывает порты правил профиля
+function DnatChip({ ranges, rulePorts }: { ranges: PortRange[]; rulePorts: number[] }) {
+  const { t } = useTranslation()
+  if (ranges.length === 0) return null
+  const intercepted = rulePorts.filter(port => rangesCover(ranges, port))
+  if (intercepted.length > 0) {
+    return (
+      <Tooltip label={t('haproxy_configs.dnat_chip_conflict', { ports: intercepted.join(', ') })} maxWidth={360}>
+        <span className="shrink-0 px-1.5 py-0.5 rounded text-2xs font-mono bg-red-500/10 text-red-400 border border-red-500/30">
+          DNAT {intercepted.map(port => `:${port}`).join(' ')}
+        </span>
+      </Tooltip>
+    )
+  }
+  return (
+    <Tooltip label={t('haproxy_configs.dnat_chip', { ports: formatPortRanges(ranges) })} maxWidth={360}>
+      <span className="shrink-0 px-1.5 py-0.5 rounded text-2xs bg-dark-700/50 text-dark-400 border border-dark-600/40">
+        DNAT
+      </span>
+    </Tooltip>
+  )
 }
 
 // ==================== Toggle Component ====================
@@ -594,6 +621,7 @@ function RuleForm({
   profileOptions,
   ipOwners,
   nodes,
+  dnatServers,
 }: {
   initial: RuleFormData
   isEdit: boolean
@@ -605,12 +633,14 @@ function RuleForm({
   profileOptions: HAProxyProfileOptions
   ipOwners: HAProxyIpOwners
   nodes: HAProxyAvailableServer[]
+  dnatServers: ServerRanges[]
 }) {
   const { t } = useTranslation()
   const [form, setForm] = useState(initial)
   const [toolbox, setToolbox] = useState<ServersToolbox | null>(null)
   const addressRole = useAddressRole()
   const singleTargetLabel = ownerLabel(findOwner(ipOwners, form.target_ip), addressRole)
+  const interceptedByDnat = portsInterceptedOnServers(dnatServers, [parseInt(form.listen_port) || 0])
 
   const toggleBalancer = (enabled: boolean) => {
     if (enabled && form.servers.length === 0) {
@@ -749,6 +779,13 @@ function RuleForm({
               placeholder="443" className={inp} />
           </div>
         </div>
+
+        {interceptedByDnat.length > 0 && (
+          <div className="flex items-start gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{t('haproxy_configs.dnat_conflict_form', { servers: formatServerPorts(interceptedByDnat) })}</span>
+          </div>
+        )}
 
         {/* Balancer toggle */}
         <div className="flex items-center gap-2">
@@ -990,7 +1027,7 @@ const SortableProfileItem = forwardRef(function SortableProfileItem(
 
 // ==================== Profile Detail Panel (with rules GUI) ====================
 
-function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; onRefreshList: () => void }) {
+function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId: number; portUsage: PortUsageMap; onRefreshList: () => void }) {
   const { t } = useTranslation()
   const [detail, setDetail] = useState<HAProxyProfileDetail | null>(null)
   const [rules, setRules] = useState<HAProxyProfileRule[]>([])
@@ -1302,11 +1339,22 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const toggleLog = () => { if (!showLog) fetchLog(); setShowLog(!showLog) }
 
   const unlinkedServers = availableServers.filter(s => s.active_profile_id !== profileId)
+  const rulePorts = rules.map(r => r.listen_port)
+  const dnatServers = useMemo<ServerRanges[]>(
+    () => serversStatus
+      .map(s => ({ name: s.server_name, ranges: portUsage[s.server_id]?.dnat_ranges ?? [] }))
+      .filter(s => s.ranges.length > 0),
+    [serversStatus, portUsage],
+  )
+  const interceptedByDnat = portsInterceptedOnServers(dnatServers, rulePorts)
+  const dnatChip = (serverId: number) => (
+    <DnatChip ranges={portUsage[serverId]?.dnat_ranges ?? []} rulePorts={rulePorts} />
+  )
 
   const renderCandidate = (s: HAProxyAvailableServer) => (
     <button key={s.id} onClick={() => handleLinkServer(s.id)}
       className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm text-dark-200 hover:bg-dark-700/50 transition-colors">
-      <span className="flex items-center gap-2"><Server className="w-3.5 h-3.5 text-dark-400" />{s.name}</span>
+      <span className="flex items-center gap-2"><Server className="w-3.5 h-3.5 text-dark-400" />{s.name}{dnatChip(s.id)}</span>
       {s.active_profile_id && <span className="text-xs text-dark-500">{t('haproxy_configs.has_other_profile')}</span>}
     </button>
   )
@@ -1341,6 +1389,13 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
             </div>
           </div>
 
+          {interceptedByDnat.length > 0 && (
+            <div className="flex items-start gap-3 p-3 mb-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300">
+              <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
+              <div className="text-sm">{t('haproxy_configs.dnat_conflict_banner', { servers: formatServerPorts(interceptedByDnat) })}</div>
+            </div>
+          )}
+
           {/* Profile-wide SNI filter */}
           <AnimatePresence>
             {showSni && (
@@ -1368,6 +1423,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                   profileOptions={detail.options}
                   ipOwners={ipOwners}
                   nodes={availableServers}
+                  dnatServers={dnatServers}
                 />
               </div>
             )}
@@ -1386,6 +1442,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                 const targets = r.is_balancer ? balancerTargets(ipOwners, r.servers ?? [], addressRole) : []
                 const targetsTooltip = targets.length > BALANCER_TARGETS_SHOWN || targets.some(target => target.roles.length > 0)
                 const singleTargetLabel = r.is_balancer ? undefined : ownerLabel(findOwner(ipOwners, r.target_ip), addressRole)
+                const ruleInterceptedByDnat = portsInterceptedOnServers(dnatServers, [r.listen_port])
                 return (
                   <div key={r.name}>
                     <div
@@ -1422,6 +1479,13 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                           </>
                         )}
                         {sniActive && <span className="text-2xs text-green-400/60 hidden sm:block">SNI</span>}
+                        {ruleInterceptedByDnat.length > 0 && (
+                          <Tooltip label={t('haproxy_configs.dnat_rule_hint', { servers: formatServerPorts(ruleInterceptedByDnat) })} maxWidth={380}>
+                            <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-2xs font-medium bg-red-500/10 text-red-400 border border-red-500/30">
+                              <AlertTriangle className="w-3 h-3" /> DNAT
+                            </span>
+                          </Tooltip>
+                        )}
                       </div>
                       <div className="flex items-center gap-1 shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
                         <Tooltip label={t('haproxy_configs.clone_rule')}>
@@ -1450,6 +1514,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                               profileOptions={detail.options}
                               ipOwners={ipOwners}
                               nodes={availableServers}
+                              dnatServers={dnatServers}
                             />
                           </div>
                         </motion.div>
@@ -1468,6 +1533,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                               profileOptions={detail.options}
                               ipOwners={ipOwners}
                               nodes={availableServers}
+                              dnatServers={dnatServers}
                             />
                           </div>
                         </motion.div>
@@ -1630,6 +1696,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                           </Tooltip>
                         )}
                         <SyncStatusBadge status={s.sync_status} online={s.online} />
+                        {dnatChip(s.server_id)}
                         {hasAddresses && (
                           <span className="hidden md:inline text-xs font-mono text-dark-400 truncate">
                             {s.listen_ips.length > 0 && `${t('haproxy_configs.addresses_in')} ${s.listen_ips.join(', ')}`}
@@ -1821,6 +1888,12 @@ export default function HAProxyConfigs() {
     return () => clearInterval(id)
   }, [fetchProfiles])
 
+  // DNAT настраивается на другой странице — карты на время захода сюда достаточно
+  const [portUsage, setPortUsage] = useState<PortUsageMap>({})
+  useEffect(() => {
+    portUsageApi.get().then(res => setPortUsage(res.data)).catch(() => { /* предупреждения не критичны */ })
+  }, [])
+
   const handleDragEnd = async ({ active, over }: DragEndEvent) => {
     if (!over || active.id === over.id) return
     const oldIndex = profiles.findIndex(p => p.id === active.id)
@@ -1892,7 +1965,7 @@ export default function HAProxyConfigs() {
                       <>
                         <ProfileCard profile={p} expanded={openIds.includes(p.id)} dragHandle={dragHandle} onExpand={toggleProfile} onEdit={setModalProfile} onDelete={handleDelete} />
                         <AnimatePresence>
-                          {openIds.includes(p.id) && <ProfileDetailPanel profileId={p.id} onRefreshList={fetchProfiles} />}
+                          {openIds.includes(p.id) && <ProfileDetailPanel profileId={p.id} portUsage={portUsage} onRefreshList={fetchProfiles} />}
                         </AnimatePresence>
                       </>
                     )}

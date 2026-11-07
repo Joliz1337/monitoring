@@ -30,7 +30,7 @@ import {
   FileText,
   Code,
 } from 'lucide-react'
-import { proxyApi, HAProxyRule, HAProxyStatus, HAProxyLiveStats, HAProxyStatRow, Certificate, FirewallRule, haproxyProfilesApi } from '../api/client'
+import { proxyApi, HAProxyRule, HAProxyStatus, HAProxyLiveStats, HAProxyStatRow, Certificate, FirewallRule, haproxyProfilesApi, portUsageApi, PortRange } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import { nodeAllows } from '../utils/nodeCapabilities'
@@ -43,6 +43,7 @@ import CachedDataBanner from '../components/ui/CachedDataBanner'
 import { Tooltip } from '../components/ui/Tooltip'
 import LossProbeBadge from '../components/ui/LossProbeBadge'
 import { FAQIcon } from '../components/FAQ'
+import { formatPortRanges, rangesCover } from '../utils/portConflicts'
 
 // Статусы show stat с суффиксами вида "UP 1/3" — сравниваем по префиксу
 function statsStatusClass(status: string): string {
@@ -165,6 +166,15 @@ export default function HAProxy() {
         }).catch(() => {})
       }
     }).catch(() => {})
+  }, [serverId])
+
+  // DNAT ловит порт раньше HAProxy — правило на этом порту соединений не получит
+  const [dnatRanges, setDnatRanges] = useState<PortRange[]>([])
+  useEffect(() => {
+    if (!serverId) return
+    portUsageApi.get(Number(serverId))
+      .then(res => setDnatRanges(res.data[Number(serverId)]?.dnat_ranges ?? []))
+      .catch(() => { /* предупреждение не критично */ })
   }, [serverId])
 
   // Memoized filtered firewall rules (IPv4 only)
@@ -1284,6 +1294,16 @@ export default function HAProxy() {
                   <span className="text-sm text-dark-500">({rules.length})</span>
                 </button>
                 <div className="flex items-center gap-2">
+                  {dnatRanges.length > 0 && !rules.some(rule => rangesCover(dnatRanges, rule.listen_port)) && (
+                    <Tooltip label={t('haproxy.dnat_present', { ports: formatPortRanges(dnatRanges) })} maxWidth={360}>
+                      <Link
+                        to={`/${uid}/server/${serverId}/dnat`}
+                        className="px-2 py-1 rounded-lg text-xs bg-dark-700/50 text-dark-400 border border-dark-600/40 hover:text-dark-200 transition-colors"
+                      >
+                        DNAT
+                      </Link>
+                    </Tooltip>
+                  )}
                   <motion.button
                     onClick={handleOpenConfig}
                     className="btn btn-secondary text-sm"
@@ -1365,6 +1385,17 @@ export default function HAProxy() {
                             <span className="px-2.5 py-1 rounded-lg text-xs font-medium bg-warning/10 text-warning border border-warning/20">
                               PP
                             </span>
+                          )}
+                          {rangesCover(dnatRanges, rule.listen_port) && (
+                            <Tooltip label={t('haproxy.dnat_rule_hint', { port: rule.listen_port })} maxWidth={360}>
+                              <Link
+                                to={`/${uid}/server/${serverId}/dnat`}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-danger/10 text-danger border border-danger/30 hover:bg-danger/20 transition-colors"
+                              >
+                                <AlertTriangle className="w-3.5 h-3.5" />
+                                {t('haproxy.dnat_badge')}
+                              </Link>
+                            </Tooltip>
                           )}
                         </div>
                       </motion.div>

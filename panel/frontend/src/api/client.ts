@@ -3546,6 +3546,26 @@ export const dnatProfilesApi = {
   getAvailableServers: () => api.get<DnatAvailableServer[]>('/dnat-profiles/available-servers'),
 }
 
+// ==================== Порты HAProxy и DNAT ====================
+
+export type PortRange = [number, number]
+
+export interface ServerPortUsage {
+  // Правила на ноде при запущенном HAProxy + правила привязанного HAProxy-профиля
+  haproxy_ports: number[]
+  // Включённые правила DNAT-профиля, ловящие TCP
+  dnat_ranges: PortRange[]
+  dnat_profile_id: number | null
+}
+
+// Ключ — id сервера; серверов без HAProxy и DNAT в ответе нет
+export type PortUsageMap = Record<number, ServerPortUsage>
+
+export const portUsageApi = {
+  get: (serverId?: number) =>
+    api.get<PortUsageMap>('/port-usage', { params: serverId === undefined ? undefined : { server_id: serverId } }),
+}
+
 // ==================== Torrent Blocker ====================
 
 export interface TorrentBlockerSettings {
