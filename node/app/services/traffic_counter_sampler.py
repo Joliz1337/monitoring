@@ -14,6 +14,13 @@
 релея учитывается по его публичному адресу, хотя в FORWARD у пакета уже адрес
 бэкенда.
 
+Цепочки учёта по IP живут в mangle, а не в filter: в filter первым правилом
+INPUT и OUTPUT стоит ACCEPT белого списка (`ipset_manager` держит его наверху
+нарочно), и клиенты, пришедшие через релей из белого списка, уходили по нему мимо
+счётчика. mangle проходится раньше filter, но и раньше его DROP, поэтому
+считаются только установленные соединения: флуд и сканы, которые filter
+отбросит, соединением так и не становятся.
+
 Отсюда уходят сырые кумулятивные значения: дельты, историю и арифметику ведёт
 панель.
 """
@@ -29,8 +36,12 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+PORT_TABLE = "filter"
+IP_TABLE = "mangle"
+
 CHAIN_IN = "TRAFFIC_ACCOUNTING_IN"
 CHAIN_OUT = "TRAFFIC_ACCOUNTING_OUT"
+PORT_CHAIN_HOOKS = (("INPUT", CHAIN_IN), ("OUTPUT", CHAIN_OUT))
 TRACKED_PROTOCOLS = ("tcp", "udp")
 
 # Клиентские пакеты входящего соединения идут в INPUT (локальный сервис) или в
@@ -147,7 +158,10 @@ def _port_argument(tokens: list[str], flag: str) -> Optional[int]:
 
 
 def _ip_rule(chain: str, direction: str, address: str) -> list[str]:
-    return [chain, "-m", "conntrack", "--ctorigdst", address, "--ctdir", direction, "-j", "RETURN"]
+    return [
+        chain, "-m", "conntrack", "--ctstate", "ESTABLISHED",
+        "--ctorigdst", address, "--ctdir", direction, "-j", "RETURN",
+    ]
 
 
 def _direction_guard(chain: str, skipped_direction: str) -> list[str]:
@@ -179,6 +193,8 @@ class TrafficCounterSampler:
         self._tracked = self._load_tracked_ports()
         async with self._lock:
             await self._ensure_chains()
+            if self._available:
+                await self._remove_filter_ip_chains()
         if not self._available:
             logger.warning("iptables is not available - port and IP traffic accounting is off")
             return
@@ -302,14 +318,18 @@ class TrafficCounterSampler:
             self._sampled_at = time.time()
             return True
 
-        returncode, dump = await self._exec(["iptables-save", "-c", "-t", "filter"])
-        if returncode != 0:
-            self._available = False
-            logger.warning("iptables-save failed (rc=%s), traffic counters are stale", returncode)
-            return True
-
-        port_counters = parse_port_counters(dump)
-        ip_counters = parse_ip_counters(dump)
+        port_counters: dict[int, dict[str, int]] = {}
+        ip_counters: dict[str, dict[str, int]] = {}
+        if self._tracked:
+            dump = await self._dump(PORT_TABLE)
+            if dump is None:
+                return True
+            port_counters = parse_port_counters(dump)
+        if self._addresses:
+            dump = await self._dump(IP_TABLE)
+            if dump is None:
+                return True
+            ip_counters = parse_ip_counters(dump)
         # Отсутствие порта или адреса в дампе — это «правила снесены», а не «трафика
         # не было»: у только что добавленного правило есть и показывает честный ноль.
         # Отдать здесь ноль означало бы шаг счётчика назад — панель списала бы его
@@ -337,6 +357,14 @@ class TrafficCounterSampler:
         self._available = True
         return not missing_ports and not missing_ips
 
+    async def _dump(self, table: str) -> Optional[str]:
+        returncode, dump = await self._exec(["iptables-save", "-c", "-t", table])
+        if returncode != 0:
+            self._available = False
+            logger.warning("iptables-save -t %s failed (rc=%s), traffic counters are stale", table, returncode)
+            return None
+        return dump
+
     async def _ensure_chains(self) -> None:
         """Поднять цепочки учёта и врезать их во встроенные. Вызывать под self._lock.
 
@@ -347,21 +375,37 @@ class TrafficCounterSampler:
         if not self._available:
             return
 
-        hooks = (("INPUT", CHAIN_IN), ("OUTPUT", CHAIN_OUT), *IP_CHAIN_HOOKS)
-        for chain in dict.fromkeys(chain for _, chain in hooks):
-            await self._run_iptables(["-N", chain])
-        for builtin, chain in hooks:
-            if not await self._run_iptables(["-C", builtin, "-j", chain]):
-                await self._run_iptables(["-I", builtin, "-j", chain])
+        await self._ensure_hooks(PORT_TABLE, PORT_CHAIN_HOOKS)
+        await self._ensure_hooks(IP_TABLE, IP_CHAIN_HOOKS)
         for chain, skipped_direction in IP_DIRECTION_GUARDS:
             guard = _direction_guard(chain, skipped_direction)
-            if not await self._run_iptables(["-C", *guard]):
-                await self._run_iptables(["-I", chain, "1", *guard[1:]])
+            if not await self._run_iptables(["-C", *guard], IP_TABLE):
+                await self._run_iptables(["-I", chain, "1", *guard[1:]], IP_TABLE)
 
         for port in self._tracked:
             await self._ensure_port_rules(port)
         for address in self._addresses:
             await self._ensure_ip_rules(address)
+
+    async def _ensure_hooks(self, table: str, hooks: tuple[tuple[str, str], ...]) -> None:
+        for chain in dict.fromkeys(chain for _, chain in hooks):
+            await self._run_iptables(["-N", chain], table)
+        for builtin, chain in hooks:
+            if not await self._run_iptables(["-C", builtin, "-j", chain], table):
+                await self._run_iptables(["-I", builtin, "-j", chain], table)
+
+    async def _remove_filter_ip_chains(self) -> None:
+        """Сборки до переезда учёта по IP в mangle оставили его цепочки в filter:
+        без уборки каждый пакет проходил бы ещё и брошенные правила."""
+        if not await self._run_iptables(["-L", CHAIN_IP_IN, "-n"], PORT_TABLE):
+            return
+        for builtin, chain in IP_CHAIN_HOOKS:
+            if await self._run_iptables(["-C", builtin, "-j", chain], PORT_TABLE):
+                await self._run_iptables(["-D", builtin, "-j", chain], PORT_TABLE)
+        for chain in (CHAIN_IP_IN, CHAIN_IP_OUT):
+            await self._run_iptables(["-F", chain], PORT_TABLE)
+            await self._run_iptables(["-X", chain], PORT_TABLE)
+        logger.info("Removed IP accounting chains left in the filter table")
 
     async def _ensure_port_rules(self, port: int) -> bool:
         added = True
@@ -382,18 +426,18 @@ class TrafficCounterSampler:
     async def _ensure_ip_rules(self, address: str) -> None:
         for chain, direction in IP_RULE_DIRECTIONS:
             rule = _ip_rule(chain, direction, address)
-            if not await self._run_iptables(["-C", *rule]):
-                await self._run_iptables(["-A", *rule])
+            if not await self._run_iptables(["-C", *rule], IP_TABLE):
+                await self._run_iptables(["-A", *rule], IP_TABLE)
 
     async def _remove_ip_rules(self, address: str) -> None:
         for chain, direction in IP_RULE_DIRECTIONS:
-            await self._run_iptables(["-D", *_ip_rule(chain, direction, address)])
+            await self._run_iptables(["-D", *_ip_rule(chain, direction, address)], IP_TABLE)
 
-    async def _run_iptables(self, args: list[str]) -> bool:
+    async def _run_iptables(self, args: list[str], table: str = PORT_TABLE) -> bool:
         """Аргументы принимаются списком: сборка команды из строки со split()
         сама по себе источник ошибок, а значения сюда приходят из API."""
         returncode, _ = await self._exec(
-            ["iptables", "-w", str(XTABLES_LOCK_WAIT_SEC), *args]
+            ["iptables", "-w", str(XTABLES_LOCK_WAIT_SEC), "-t", table, *args]
         )
         return returncode == 0
 

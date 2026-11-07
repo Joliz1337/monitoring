@@ -60,7 +60,10 @@ export default function NetworkBreakdown({ serverId }: NetworkBreakdownProps) {
             ) : data.ips.length === 0 ? (
               <Hint>{t('network_breakdown.no_ips')}</Hint>
             ) : (
-              data.ips.map(row => <BreakdownRow key={row.key} row={row} label={row.key} />)
+              <>
+                {data.ips.map(row => <BreakdownRow key={row.key} row={row} label={row.key} />)}
+                <p className="py-1 text-[11px] text-dark-500">{t('network_breakdown.ips_scope')}</p>
+              </>
             )}
           </Section>
 
