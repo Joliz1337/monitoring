@@ -5,6 +5,7 @@ emitted — the panel then falls back to its own counter deltas, as it did for
 nodes that had no sampler at all.
 """
 
+import asyncio
 import os
 import socket
 import sys
@@ -15,12 +16,14 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services.metrics_collector import MetricsCollector  # noqa: E402
+from app.services.nat_addresses import NatAddressProbe  # noqa: E402
 from app.services.rate_sampler import RateSample  # noqa: E402
 
 
-def bare_collector() -> MetricsCollector:
+def bare_collector(nat_addresses: NatAddressProbe | None = None) -> MetricsCollector:
     collector = MetricsCollector.__new__(MetricsCollector)
     collector.settings = SimpleNamespace(host_proc="/host/proc", node_name="test")
+    collector._nat_addresses = nat_addresses or NatAddressProbe()
     return collector
 
 
@@ -66,6 +69,30 @@ class NetworkRatesTests(unittest.TestCase):
         self.assertEqual(network["total"]["rx_bytes_per_sec"], 0.0)
         eth0 = next(i for i in network["interfaces"] if i["name"] == "eth0")
         self.assertEqual(eth0["rx_bytes_per_sec"], 0.0)
+
+
+class NatAddressTests(unittest.TestCase):
+
+    def test_private_address_carries_its_public_address_behind_nat(self):
+        async def resolve(source: str):
+            return "89.232.163.73"
+
+        probe = NatAddressProbe(resolve=resolve)
+        asyncio.run(probe.probe_once(["192.168.0.106"]))
+        addrs = {"eth0": [
+            SimpleNamespace(family=socket.AF_INET, address="192.168.0.106", netmask="255.255.255.0"),
+            SimpleNamespace(family=socket.AF_INET, address="5.9.0.10", netmask="255.255.255.0"),
+        ]}
+        with mock.patch("app.services.metrics_collector.read_net_dev", return_value=NET_DEV), \
+                mock.patch("app.services.metrics_collector.psutil.net_if_addrs", return_value=addrs), \
+                mock.patch("app.services.metrics_collector.psutil.net_if_stats", return_value={}):
+            network = bare_collector(probe).get_network_info(None)
+
+        eth0 = next(i for i in network["interfaces"] if i["name"] == "eth0")
+        self.assertEqual(
+            [(a["address"], a["public_address"]) for a in eth0["addresses"]],
+            [("192.168.0.106", "89.232.163.73"), ("5.9.0.10", None)],
+        )
 
 
 class DiskRatesTests(unittest.TestCase):
