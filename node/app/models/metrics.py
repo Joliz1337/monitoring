@@ -102,6 +102,8 @@ class NetworkAddress(BaseModel):
     type: str
     address: str
     netmask: Optional[str] = None
+    # Под каким IP приватный адрес выходит через NAT облака (services/nat_addresses)
+    public_address: Optional[str] = None
 
 
 class NetworkInterface(BaseModel):

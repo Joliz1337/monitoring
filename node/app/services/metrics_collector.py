@@ -26,6 +26,7 @@ from app.services.ephemeral_ports import (
     scan_listening_ports,
 )
 from app.services.loss_probe import LossProbe, get_loss_probe, readable_sources
+from app.services.nat_addresses import NatAddressProbe, get_nat_address_probe
 from app.services.numa import read_numa_nodes
 from app.services.traffic_counter_sampler import get_traffic_counter_sampler
 from app.services.rate_sampler import (
@@ -52,10 +53,16 @@ def _is_accountable_ipv4(address: str) -> bool:
 class MetricsCollector:
     """Collects current system metrics from host."""
 
-    def __init__(self, rate_sampler: Optional[RateSampler] = None, loss_probe: Optional[LossProbe] = None):
+    def __init__(
+        self,
+        rate_sampler: Optional[RateSampler] = None,
+        loss_probe: Optional[LossProbe] = None,
+        nat_addresses: Optional[NatAddressProbe] = None,
+    ):
         self.settings = get_settings()
         self._rate_sampler = rate_sampler or get_rate_sampler()
         self._loss_probe = loss_probe or get_loss_probe()
+        self._nat_addresses = nat_addresses or get_nat_address_probe()
         # Process cache to avoid blocking
         self._processes_cache: list = []
         self._processes_cache_time: float = 0
@@ -340,7 +347,8 @@ class MetricsCollector:
                         iface_info["addresses"].append({
                             "type": "ipv4",
                             "address": addr.address,
-                            "netmask": addr.netmask
+                            "netmask": addr.netmask,
+                            "public_address": self._nat_addresses.public_address(addr.address),
                         })
                     elif addr.family == socket.AF_INET6:
                         iface_info["addresses"].append({

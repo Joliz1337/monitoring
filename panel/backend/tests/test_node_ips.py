@@ -46,6 +46,20 @@ class PublicInterfaceIpv4Test(unittest.TestCase):
 
         self.assertEqual(public_interface_ipv4(metrics), [])
 
+    def test_public_address_behind_nat_of_a_private_address(self):
+        metrics = metrics_with(
+            [{**ipv4("192.168.0.106"), "public_address": "89.232.163.73"}],
+            [{**ipv4("192.168.0.127"), "public_address": "87.242.95.121"}, ipv4("5.9.0.10")],
+        )
+
+        self.assertEqual(public_interface_ipv4(metrics), ["89.232.163.73", "87.242.95.121", "5.9.0.10"])
+
+    def test_non_public_or_broken_nat_address_is_skipped(self):
+        for public_address in (None, "10.0.0.1", "127.0.0.1", "garbage", 42, ["89.232.163.73"]):
+            with self.subTest(public_address=public_address):
+                metrics = metrics_with([{**ipv4("192.168.0.106"), "public_address": public_address}])
+                self.assertEqual(public_interface_ipv4(metrics), [])
+
     def test_broken_metrics_give_nothing(self):
         for raw in (None, "", "{not json", json.dumps(["x"]), json.dumps({"network": None}),
                     json.dumps({"network": {"interfaces": ["eth0", {"addresses": ["5.9.0.10"]}]}})):

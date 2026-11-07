@@ -28,6 +28,7 @@ from app.services.gre_tunnels import get_gre_manager
 from app.services.exit_proxy.manager import get_exit_proxy_manager
 from app.services.source_pool import get_source_pool_manager
 from app.services.loss_probe import get_loss_probe
+from app.services.nat_addresses import get_nat_address_probe
 
 logging.basicConfig(
     level=logging.INFO,
@@ -120,6 +121,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Loss probe start failed, backend loss is not measured: {e}", exc_info=True)
 
+    nat_address_probe = get_nat_address_probe()
+    try:
+        await nat_address_probe.start(address_source=get_collector().accounted_ipv4_addresses)
+    except Exception as e:
+        logger.error(f"NAT address probe start failed, public addresses behind NAT stay unknown: {e}", exc_info=True)
+
     from app.services import cpu_affinity
     from app.services.host_executor import get_host_executor
     affinity_sync = cpu_affinity.ContainerAffinitySync(
@@ -176,6 +183,10 @@ async def lifespan(app: FastAPI):
         await loss_probe.stop()
     except Exception as e:
         logger.error(f"Loss probe stop failed: {e}", exc_info=True)
+    try:
+        await nat_address_probe.stop()
+    except Exception as e:
+        logger.error(f"NAT address probe stop failed: {e}", exc_info=True)
     try:
         await extra_ip_manager.stop()
     except Exception as e:
