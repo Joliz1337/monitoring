@@ -64,7 +64,11 @@ class Scope(str, Enum):
     TOTAL = "total"
     IFACE = "iface"
     PORT = "port"
+    # Соединения, открытые клиентами к адресу
     IP = "ip"
+    # Соединения, открытые сервером с адреса; вместе с IP — весь трафик адреса.
+    # Колонка scope — VARCHAR(6), длиннее не влезет
+    IP_OWN = "ip_own"
 
 
 class Period(str, Enum):
@@ -103,6 +107,14 @@ class BucketDelta:
 
 
 @dataclass(frozen=True)
+class CounterSeries:
+    """Один счётчик в записи порта или адреса: куда пишется и из каких полей берётся."""
+    scope: Scope
+    rx_field: str
+    tx_field: str
+
+
+@dataclass(frozen=True)
 class RuleCounterFields:
     """Где в network лежат счётчики цепочек iptables одного вида: порты или адреса."""
     scope: Scope
@@ -110,10 +122,20 @@ class RuleCounterFields:
     key: str
     available: str
     sampled_at: str
+    series: tuple[CounterSeries, ...]
 
 
-PORT_COUNTERS = RuleCounterFields(Scope.PORT, "ports", "port", "ports_available", "ports_sampled_at")
-IP_COUNTERS = RuleCounterFields(Scope.IP, "ips", "ip", "ips_available", "ips_sampled_at")
+PORT_COUNTERS = RuleCounterFields(
+    Scope.PORT, "ports", "port", "ports_available", "ports_sampled_at",
+    (CounterSeries(Scope.PORT, "rx_bytes", "tx_bytes"),),
+)
+IP_COUNTERS = RuleCounterFields(
+    Scope.IP, "ips", "ip", "ips_available", "ips_sampled_at",
+    (
+        CounterSeries(Scope.IP, "rx_bytes", "tx_bytes"),
+        CounterSeries(Scope.IP_OWN, "own_rx_bytes", "own_tx_bytes"),
+    ),
+)
 
 
 CounterKey = tuple[int, str, str]
@@ -490,12 +512,16 @@ class TrafficIngest:
         for entry in entries:
             if not isinstance(entry, dict) or entry.get(fields.key) is None:
                 continue
-            self._apply(
-                server_id, fields.scope, str(entry[fields.key]),
-                int(entry.get("rx_bytes") or 0), int(entry.get("tx_bytes") or 0),
-                observed_at, boot_id, boot_at,
-                speed_mbps=None, credit_reset=False, rate_window=rate_window,
-            )
+            for series in fields.series:
+                # Нода прежней сборки своих соединений адреса не считает
+                if series.rx_field not in entry:
+                    continue
+                self._apply(
+                    server_id, series.scope, str(entry[fields.key]),
+                    int(entry.get(series.rx_field) or 0), int(entry.get(series.tx_field) or 0),
+                    observed_at, boot_id, boot_at,
+                    speed_mbps=None, credit_reset=False, rate_window=rate_window,
+                )
 
     def _apply(
         self,

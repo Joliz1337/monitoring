@@ -494,22 +494,33 @@ export interface TrafficStatus {
 
 export type TrafficScope = 'total' | 'iface' | 'port' | 'ip'
 
-// Строка окна разбивки скорости: скорость сейчас (null — нода её сейчас не отдаёт)
-// и средняя скорость по часам за сутки, последняя точка — текущий час
-export interface TrafficBreakdownRow {
-  key: string
+// Скорость сейчас (null — нода её сейчас не отдаёт) и средняя скорость по часам
+// за сутки, последняя точка — текущий час
+export interface TrafficSpeedView {
   rx_bytes_per_sec: number | null
   tx_bytes_per_sec: number | null
   sparkline: Array<number | null>
-  // ratio = во сколько раз упал против того же времени вчера; null — трафик пропал совсем
-  drop: { ratio: number | null } | null
+}
+
+export interface TrafficBreakdownRow extends TrafficSpeedView {
+  key: string
+}
+
+// ratio = во сколько раз упал против того же времени вчера; null — трафик пропал совсем
+export interface TrafficDrop {
+  ratio: number | null
+}
+
+// Строка адреса — весь его трафик; clients — только соединения, открытые клиентами к адресу
+export interface TrafficBreakdownIpRow extends TrafficBreakdownRow {
+  clients: TrafficSpeedView & { drop: TrafficDrop | null }
 }
 
 export interface TrafficBreakdown {
   ips_supported: boolean
   node_version: string | null
   min_ip_version: string
-  ips: TrafficBreakdownRow[]
+  ips: TrafficBreakdownIpRow[]
   interfaces: TrafficBreakdownRow[]
   ports: TrafficBreakdownRow[]
 }

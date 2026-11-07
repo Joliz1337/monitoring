@@ -142,10 +142,13 @@ class NetworkPortCounter(BaseModel):
 
 
 class NetworkIpCounter(BaseModel):
-    """Трафик соединений, открытых клиентами к адресу ноды; свои исходящие не входят."""
+    """Трафик адреса ноды: rx/tx — соединения, открытые клиентами к адресу, own_* —
+    открытые самим сервером с адреса. Сумма — весь трафик адреса."""
     ip: str
     rx_bytes: int = 0
     tx_bytes: int = 0
+    own_rx_bytes: int = 0
+    own_tx_bytes: int = 0
 
 
 class NetworkInfo(BaseModel):

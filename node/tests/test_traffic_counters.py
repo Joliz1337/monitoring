@@ -359,36 +359,56 @@ OLD_IP = "203.0.113.10"
 NEW_IP = "203.0.113.20"
 
 # iptables-save печатает conntrack-адрес то с маской /32, то без — зависит от сборки.
-# Вперемешку с ними — правило портов и чужое правило с тем же --ctorigdst.
+# Вперемешку с ними — правило портов и чужие правила с тем же адресом.
 IP_DUMP = f"""\
 *mangle
 :TRAFFIC_ACCOUNTING_IP_IN - [0:0]
 :TRAFFIC_ACCOUNTING_IP_OUT - [0:0]
-[50:5000] -A TRAFFIC_ACCOUNTING_IP_IN -m conntrack --ctdir REPLY -j RETURN
-[60:6000] -A TRAFFIC_ACCOUNTING_IP_OUT -m conntrack --ctdir ORIGINAL -j RETURN
+:TRAFFIC_ACCOUNTING_OWN_IN - [0:0]
+:TRAFFIC_ACCOUNTING_OWN_OUT - [0:0]
+[50:5000] -A TRAFFIC_ACCOUNTING_IP_IN -m conntrack --ctdir REPLY -g TRAFFIC_ACCOUNTING_OWN_IN
+[60:6000] -A TRAFFIC_ACCOUNTING_IP_OUT -m conntrack --ctdir ORIGINAL -g TRAFFIC_ACCOUNTING_OWN_OUT
 [11:1100] -A TRAFFIC_ACCOUNTING_IP_IN -m conntrack --ctstate ESTABLISHED --ctorigdst {OLD_IP}/32 --ctdir ORIGINAL -j RETURN
 [22:2200] -A TRAFFIC_ACCOUNTING_IP_OUT -m conntrack --ctstate ESTABLISHED --ctorigdst {OLD_IP}/32 --ctdir REPLY -j RETURN
 [33:3300] -A TRAFFIC_ACCOUNTING_IP_IN -m conntrack --ctstate ESTABLISHED --ctorigdst {NEW_IP} --ctdir ORIGINAL -j RETURN
 [44:4400] -A TRAFFIC_ACCOUNTING_IP_OUT -m conntrack --ctstate ESTABLISHED --ctorigdst {NEW_IP} --ctdir REPLY -j RETURN
+[55:5500] -A TRAFFIC_ACCOUNTING_OWN_IN -m conntrack --ctstate ESTABLISHED --ctrepldst {OLD_IP}/32 --ctdir REPLY -j RETURN
+[66:6600] -A TRAFFIC_ACCOUNTING_OWN_OUT -m conntrack --ctstate ESTABLISHED --ctrepldst {OLD_IP}/32 --ctdir ORIGINAL -j RETURN
+[77:7700] -A TRAFFIC_ACCOUNTING_OWN_IN -m conntrack --ctstate ESTABLISHED --ctrepldst {NEW_IP} --ctdir REPLY -j RETURN
+[88:8800] -A TRAFFIC_ACCOUNTING_OWN_OUT -m conntrack --ctstate ESTABLISHED --ctrepldst {NEW_IP} --ctdir ORIGINAL -j RETURN
 [10:1000] -A TRAFFIC_ACCOUNTING_IN -p tcp -m tcp --dport 80
 [9:999999] -A INPUT -m conntrack --ctorigdst {OLD_IP} -j ACCEPT
+[8:888888] -A POSTROUTING -m conntrack --ctrepldst {OLD_IP} -j ACCEPT
 COMMIT
 """
+
+OLD_IP_COUNTERS = {"rx_bytes": 1100, "tx_bytes": 2200, "own_rx_bytes": 5500, "own_tx_bytes": 6600}
+NEW_IP_COUNTERS = {"rx_bytes": 3300, "tx_bytes": 4400, "own_rx_bytes": 7700, "own_tx_bytes": 8800}
 
 
 class ParseIpCountersTests(unittest.TestCase):
     def test_mask_suffix_does_not_split_an_address(self):
         counters = parse_ip_counters(IP_DUMP)
-        self.assertEqual(counters[OLD_IP], {"rx_bytes": 1100, "tx_bytes": 2200})
-        self.assertEqual(counters[NEW_IP], {"rx_bytes": 3300, "tx_bytes": 4400})
+        self.assertEqual(counters[OLD_IP], OLD_IP_COUNTERS)
+        self.assertEqual(counters[NEW_IP], NEW_IP_COUNTERS)
 
     def test_only_ip_accounting_chains_are_billed(self):
-        # Чужое ACCEPT-правило с тем же адресом посчитало бы весь входящий трафик хоста
+        # Чужое правило с тем же адресом посчитало бы весь трафик хоста
         self.assertEqual(sorted(parse_ip_counters(IP_DUMP)), [OLD_IP, NEW_IP])
         self.assertEqual(parse_port_counters(IP_DUMP), {80: {"rx_bytes": 1000, "tx_bytes": 0}})
 
     def test_rule_without_address_is_skipped(self):
-        dump = "[1:100] -A TRAFFIC_ACCOUNTING_IP_IN -m conntrack --ctdir ORIGINAL\n"
+        dump = "[1:100] -A TRAFFIC_ACCOUNTING_IP_IN -m conntrack --ctdir REPLY -g TRAFFIC_ACCOUNTING_OWN_IN\n"
+        self.assertEqual(parse_ip_counters(dump), {})
+
+    def test_each_chain_reads_its_own_conntrack_address(self):
+        # Клиентская цепочка — по адресу назначения соединения, своя — по адресу,
+        # на который приходят ответы. Перепутанный флаг приписал бы клиентский трафик
+        # своим соединениям
+        dump = (
+            f"[1:100] -A TRAFFIC_ACCOUNTING_OWN_IN -m conntrack --ctorigdst {OLD_IP} --ctdir REPLY -j RETURN\n"
+            f"[2:200] -A TRAFFIC_ACCOUNTING_IP_IN -m conntrack --ctrepldst {OLD_IP} --ctdir ORIGINAL -j RETURN\n"
+        )
         self.assertEqual(parse_ip_counters(dump), {})
 
 
@@ -410,10 +430,7 @@ class IpAccountingTests(SamplerTestCase):
         self.assertTrue(complete)
         self.assertTrue(available)
         self.assertIsNotNone(sampled_at)
-        self.assertEqual(ips, [
-            {"ip": OLD_IP, "rx_bytes": 1100, "tx_bytes": 2200},
-            {"ip": NEW_IP, "rx_bytes": 3300, "tx_bytes": 4400},
-        ])
+        self.assertEqual(ips, [{"ip": OLD_IP, **OLD_IP_COUNTERS}, {"ip": NEW_IP, **NEW_IP_COUNTERS}])
 
     def test_address_without_rules_is_omitted_not_zeroed(self):
         # Тот же контракт, что у портов: ноль после `ufw --force reset` панель
@@ -426,7 +443,18 @@ class IpAccountingTests(SamplerTestCase):
         self.assertFalse(complete)
         self.assertEqual([entry["ip"] for entry in ips], [OLD_IP])
 
-    def test_new_address_gets_both_direction_rules(self):
+    def test_address_without_own_rules_is_omitted(self):
+        # Нода прежней сборки держит только клиентские правила: без своих сумма
+        # «весь трафик» вышла бы заниженной, поэтому адрес ждёт, пока правила поднимутся
+        client_only = "\n".join(line for line in IP_DUMP.splitlines() if "OWN" not in line)
+        sampler, _ = self.make_sampler(tracked=[], dump=client_only)
+
+        (ips, _, _), complete = self.run_cycle(sampler, [OLD_IP])
+
+        self.assertFalse(complete)
+        self.assertEqual(ips, [])
+
+    def test_new_address_gets_client_and_own_rules(self):
         # Только установленные соединения: mangle видит пакет раньше DROP в filter,
         # и флуд на адрес иначе выглядел бы живыми клиентами
         sampler, fake = self.make_sampler(tracked=[], dump=IP_DUMP, rules_exist=False)
@@ -434,16 +462,17 @@ class IpAccountingTests(SamplerTestCase):
         self.run_cycle(sampler, [NEW_IP])
 
         appended = fake.rule_calls("-A", "mangle")
-        self.assertIn(
-            ["-A", "TRAFFIC_ACCOUNTING_IP_IN", "-m", "conntrack", "--ctstate", "ESTABLISHED",
-             "--ctorigdst", NEW_IP, "--ctdir", "ORIGINAL", "-j", "RETURN"],
-            appended,
-        )
-        self.assertIn(
-            ["-A", "TRAFFIC_ACCOUNTING_IP_OUT", "-m", "conntrack", "--ctstate", "ESTABLISHED",
-             "--ctorigdst", NEW_IP, "--ctdir", "REPLY", "-j", "RETURN"],
-            appended,
-        )
+        for chain, address_flag, direction in (
+            ("TRAFFIC_ACCOUNTING_IP_IN", "--ctorigdst", "ORIGINAL"),
+            ("TRAFFIC_ACCOUNTING_IP_OUT", "--ctorigdst", "REPLY"),
+            ("TRAFFIC_ACCOUNTING_OWN_IN", "--ctrepldst", "REPLY"),
+            ("TRAFFIC_ACCOUNTING_OWN_OUT", "--ctrepldst", "ORIGINAL"),
+        ):
+            self.assertIn(
+                ["-A", chain, "-m", "conntrack", "--ctstate", "ESTABLISHED",
+                 address_flag, NEW_IP, "--ctdir", direction, "-j", "RETURN"],
+                appended,
+            )
 
     def test_vanished_address_loses_its_rules_and_its_row(self):
         sampler, fake = self.make_sampler(tracked=[], dump=IP_DUMP)
@@ -462,16 +491,10 @@ class IpAccountingTests(SamplerTestCase):
 
         self.assertEqual([entry["ip"] for entry in ips], [NEW_IP])
         deleted = fake.rule_calls("-D", "mangle")
-        self.assertIn(
-            ["-D", "TRAFFIC_ACCOUNTING_IP_IN", "-m", "conntrack", "--ctstate", "ESTABLISHED",
-             "--ctorigdst", OLD_IP, "--ctdir", "ORIGINAL", "-j", "RETURN"],
-            deleted,
-        )
-        self.assertIn(
-            ["-D", "TRAFFIC_ACCOUNTING_IP_OUT", "-m", "conntrack", "--ctstate", "ESTABLISHED",
-             "--ctorigdst", OLD_IP, "--ctdir", "REPLY", "-j", "RETURN"],
-            deleted,
-        )
+        for chain in ("TRAFFIC_ACCOUNTING_IP_IN", "TRAFFIC_ACCOUNTING_IP_OUT",
+                      "TRAFFIC_ACCOUNTING_OWN_IN", "TRAFFIC_ACCOUNTING_OWN_OUT"):
+            removed = [rule for rule in deleted if rule[1] == chain and OLD_IP in rule]
+            self.assertEqual(len(removed), 1, (chain, deleted))
 
     def test_unchanged_addresses_do_not_touch_the_firewall(self):
         sampler, fake = self.make_sampler(tracked=[], dump=IP_DUMP)
@@ -495,7 +518,7 @@ class IpAccountingTests(SamplerTestCase):
 
         sampler._exec = explode
         ips, available, _ = sampler.ip_snapshot()
-        self.assertEqual(ips, [{"ip": OLD_IP, "rx_bytes": 1100, "tx_bytes": 2200}])
+        self.assertEqual(ips, [{"ip": OLD_IP, **OLD_IP_COUNTERS}])
         self.assertTrue(available)
 
     def test_chains_hook_into_forward_for_relayed_traffic(self):
@@ -545,20 +568,36 @@ class IpAccountingTests(SamplerTestCase):
         self.assertTrue(complete)
         self.assertEqual(fake.dumped_tables(), ["filter", "mangle"])
         self.assertEqual(sampler.snapshot()[0], [{"port": 80, **PORT_80}])
-        self.assertEqual(ips, [{"ip": OLD_IP, "rx_bytes": 1100, "tx_bytes": 2200}])
+        self.assertEqual(ips, [{"ip": OLD_IP, **OLD_IP_COUNTERS}])
 
-    def test_foreign_direction_is_skipped_by_the_first_rule(self):
-        # Ответы интернета на запросы самого Xray не должны перебирать правила всех адресов
+    def test_own_connections_are_split_off_by_the_first_rule(self):
+        # Пакеты своих соединений — ответы интернета на запросы Xray и сами запросы —
+        # не должны перебирать клиентские правила всех адресов
         sampler, fake = self.make_sampler(tracked=[], dump=IP_DUMP, rules_exist=False)
 
         asyncio.run(sampler.init())
 
-        inserted = fake.rule_calls("-I", "mangle")
+        mangle = [call[5:] for call in fake.calls if call[0] == "iptables" and call[4] == "mangle"]
+        for chain, direction, own_chain in (
+            ("TRAFFIC_ACCOUNTING_IP_IN", "REPLY", "TRAFFIC_ACCOUNTING_OWN_IN"),
+            ("TRAFFIC_ACCOUNTING_IP_OUT", "ORIGINAL", "TRAFFIC_ACCOUNTING_OWN_OUT"),
+        ):
+            split = ["-I", chain, "1", "-m", "conntrack", "--ctdir", direction, "-g", own_chain]
+            self.assertIn(split, mangle)
+            # goto на несуществующую цепочку iptables не примет
+            self.assertLess(mangle.index(["-N", own_chain]), mangle.index(split))
+
+    def test_legacy_direction_guards_are_removed_on_start(self):
+        # Прежняя сборка отбрасывала свои соединения первым правилом: оставшись,
+        # оно лишней проверкой висело бы на каждом клиентском пакете
+        sampler, fake = self.make_sampler(tracked=[], dump=IP_DUMP, rules_exist=True)
+
+        asyncio.run(sampler.init())
+
+        deleted = fake.rule_calls("-D", "mangle")
+        self.assertIn(["-D", "TRAFFIC_ACCOUNTING_IP_IN", "-m", "conntrack", "--ctdir", "REPLY", "-j", "RETURN"], deleted)
         self.assertIn(
-            ["-I", "TRAFFIC_ACCOUNTING_IP_IN", "1", "-m", "conntrack", "--ctdir", "REPLY", "-j", "RETURN"], inserted,
-        )
-        self.assertIn(
-            ["-I", "TRAFFIC_ACCOUNTING_IP_OUT", "1", "-m", "conntrack", "--ctdir", "ORIGINAL", "-j", "RETURN"], inserted,
+            ["-D", "TRAFFIC_ACCOUNTING_IP_OUT", "-m", "conntrack", "--ctdir", "ORIGINAL", "-j", "RETURN"], deleted,
         )
 
 

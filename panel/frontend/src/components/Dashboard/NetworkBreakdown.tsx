@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { trafficApi, type TrafficBreakdown, type TrafficBreakdownRow } from '../../api/client'
+import { trafficApi, type TrafficBreakdown, type TrafficDrop, type TrafficSpeedView } from '../../api/client'
 import { formatBitsPerSecLocalized } from '../../utils/format'
 
 // Окно открыто, пока на него смотрят — обновляем его чаще, чем раз в цикл дашборда
@@ -61,7 +61,12 @@ export default function NetworkBreakdown({ serverId }: NetworkBreakdownProps) {
               <Hint>{t('network_breakdown.no_ips')}</Hint>
             ) : (
               <>
-                {data.ips.map(row => <BreakdownRow key={row.key} row={row} label={row.key} />)}
+                {data.ips.map(row => (
+                  <div key={row.key}>
+                    <BreakdownRow view={row} label={row.key} />
+                    <BreakdownRow view={row.clients} label={t('network_breakdown.clients')} drop={row.clients.drop} secondary />
+                  </div>
+                ))}
                 <p className="py-1 text-[11px] text-dark-500">{t('network_breakdown.ips_scope')}</p>
               </>
             )}
@@ -71,7 +76,7 @@ export default function NetworkBreakdown({ serverId }: NetworkBreakdownProps) {
             {data.interfaces.length === 0 ? (
               <Hint>{t('network_breakdown.no_data')}</Hint>
             ) : (
-              data.interfaces.map(row => <BreakdownRow key={row.key} row={row} label={row.key} />)
+              data.interfaces.map(row => <BreakdownRow key={row.key} view={row} label={row.key} />)
             )}
           </Section>
 
@@ -79,7 +84,7 @@ export default function NetworkBreakdown({ serverId }: NetworkBreakdownProps) {
             {data.ports.length === 0 ? (
               <Hint>{t('network_breakdown.no_ports')}</Hint>
             ) : (
-              data.ports.map(row => <BreakdownRow key={row.key} row={row} label={`:${row.key}`} />)
+              data.ports.map(row => <BreakdownRow key={row.key} view={row} label={`:${row.key}`} />)
             )}
           </Section>
 
@@ -103,27 +108,36 @@ function Hint({ children }: { children: ReactNode }) {
   return <p className="py-1 text-xs text-dark-500">{children}</p>
 }
 
-function BreakdownRow({ row, label }: { row: TrafficBreakdownRow; label: string }) {
+interface BreakdownRowProps {
+  view: TrafficSpeedView
+  label: string
+  drop?: TrafficDrop | null
+  // Строка клиентов под адресом: с отступом и приглушённая, чтобы не спорить с ним
+  secondary?: boolean
+}
+
+function BreakdownRow({ view, label, drop = null, secondary = false }: BreakdownRowProps) {
   const { t } = useTranslation()
   const speed = (value: number | null) => (value === null ? '—' : formatBitsPerSecLocalized(value, t))
+  const sparkColor = drop ? 'text-warning' : secondary ? 'text-dark-400' : 'text-accent-400'
 
-  // Колонка подписи вмещает IPv4 целиком; пометка падения встаёт под адрес, а не рядом,
-  // чтобы не обрезать его до «185.…»
+  // Колонка подписи вмещает IPv4 целиком; пометка падения встаёт под подпись, а не рядом,
+  // чтобы не обрезать адрес до «185.…»
   return (
-    <div className="flex items-center gap-2 py-1 font-mono text-xs">
+    <div className={`flex items-center gap-2 font-mono text-xs ${secondary ? 'pb-1 opacity-80' : 'py-1'}`}>
       <div className="flex w-[120px] flex-shrink-0 flex-col items-start gap-0.5">
-        <span className="max-w-full truncate text-dark-200">{label}</span>
-        {row.drop && (
-          <span className="rounded-md bg-warning/15 px-1.5 py-px font-sans text-[10px] text-warning">
-            {row.drop.ratio === null
+        <span className={`max-w-full truncate ${secondary ? 'pl-3 font-sans text-dark-400' : 'text-dark-200'}`}>{label}</span>
+        {drop && (
+          <span className={`rounded-md bg-warning/15 px-1.5 py-px font-sans text-[10px] text-warning ${secondary ? 'ml-3' : ''}`}>
+            {drop.ratio === null
               ? t('network_breakdown.gone')
-              : t('network_breakdown.dropped', { count: Math.round(row.drop.ratio) })}
+              : t('network_breakdown.dropped', { count: Math.round(drop.ratio) })}
           </span>
         )}
       </div>
-      <Sparkline points={row.sparkline} className={row.drop ? 'text-warning' : 'text-accent-400'} />
-      <span className="ml-auto w-[104px] whitespace-nowrap text-right text-success">↓ {speed(row.rx_bytes_per_sec)}</span>
-      <span className="w-[104px] whitespace-nowrap text-right text-accent-400">↑ {speed(row.tx_bytes_per_sec)}</span>
+      <Sparkline points={view.sparkline} className={sparkColor} />
+      <span className="ml-auto w-[104px] whitespace-nowrap text-right text-success">↓ {speed(view.rx_bytes_per_sec)}</span>
+      <span className="w-[104px] whitespace-nowrap text-right text-accent-400">↑ {speed(view.tx_bytes_per_sec)}</span>
     </div>
   )
 }

@@ -6,13 +6,13 @@
 целиком — медленно отвечающая нода для панели неотличима от упавшей. Поэтому
 `snapshot()`/`ip_snapshot()` синхронные и только копируют уже собранное.
 
-Учёт по IP считает только соединения, которые открыли К адресу: правило
-сравнивает исходный адрес назначения из conntrack (`--ctorigdst`), а не
-заголовок пакета. Исходящие соединения самой ноды (Xray ходит в интернет с
-основного адреса) сюда не попадают — иначе заблокированный у клиентов адрес
-выглядел бы живым. Тот же `--ctorigdst` хранит адрес до DNAT, поэтому транзит
-релея учитывается по его публичному адресу, хотя в FORWARD у пакета уже адрес
-бэкенда.
+Учёт по IP разделён надвое, адрес берётся из conntrack, а не из заголовка пакета.
+Клиенты — соединения, которые открыли К адресу (`--ctorigdst`): по ним видно,
+ходят ли ещё клиенты на заблокированный у них адрес. Свои — соединения, которые
+сервер открыл С адреса (`--ctrepldst`): Xray ходит в интернет, релей пересылает
+клиента на бэкенд с маскарадом. Сумма двух — весь трафик адреса, как у
+интерфейса. Адреса из conntrack — до DNAT и после SNAT, поэтому транзит релея
+ложится на его публичный адрес, хотя в FORWARD у пакета адреса другие.
 
 Цепочки учёта по IP живут в mangle, а не в filter: в filter первым правилом
 INPUT и OUTPUT стоит ACCEPT белого списка (`ipset_manager` держит его наверху
@@ -44,9 +44,9 @@ CHAIN_OUT = "TRAFFIC_ACCOUNTING_OUT"
 PORT_CHAIN_HOOKS = (("INPUT", CHAIN_IN), ("OUTPUT", CHAIN_OUT))
 TRACKED_PROTOCOLS = ("tcp", "udp")
 
-# Клиентские пакеты входящего соединения идут в INPUT (локальный сервис) или в
-# FORWARD (DNAT-релей), ответы — в OUTPUT или FORWARD. Каждый пакет проходит ровно
-# одну из этих цепочек, поэтому двойного счёта нет.
+# _IN видит пакеты, пришедшие на хост (INPUT и FORWARD), _OUT — уходящие с него
+# (OUTPUT и FORWARD): транзитный пакет релея проходит обе, как на интерфейсе он
+# и принят, и отправлен.
 CHAIN_IP_IN = "TRAFFIC_ACCOUNTING_IP_IN"
 CHAIN_IP_OUT = "TRAFFIC_ACCOUNTING_IP_OUT"
 IP_CHAIN_HOOKS = (
@@ -55,12 +55,26 @@ IP_CHAIN_HOOKS = (
     ("OUTPUT", CHAIN_IP_OUT),
     ("FORWARD", CHAIN_IP_OUT),
 )
-IP_RULE_DIRECTIONS = ((CHAIN_IP_IN, "ORIGINAL"), (CHAIN_IP_OUT, "REPLY"))
+# Своих соединений из встроенных цепочек не видно: в них переходят из _IP_IN и _IP_OUT.
+# Имена не длиннее 28 символов — предел iptables.
+CHAIN_OWN_IN = "TRAFFIC_ACCOUNTING_OWN_IN"
+CHAIN_OWN_OUT = "TRAFFIC_ACCOUNTING_OWN_OUT"
 # Правило на адрес проверяется каждым пакетом, а адресов бывает два десятка (пул
-# исходящих). Первым правилом цепочки уходит «чужое» направление — на VPN-ноде это
-# ответы интернета на запросы самого Xray, около половины пакетов, — а совпавший с
-# адресом пакет сразу возвращается, не проверяя остальные адреса.
-IP_DIRECTION_GUARDS = ((CHAIN_IP_IN, "REPLY"), (CHAIN_IP_OUT, "ORIGINAL"))
+# исходящих). Поэтому первое правило цепочки отправляет пакеты своих соединений
+# (на VPN-ноде это около половины) goto-переходом в цепочку своих: клиентские
+# правила они не перебирают, а RETURN оттуда возвращает сразу во встроенную
+# цепочку. Совпавший с адресом пакет тоже сразу возвращается.
+IP_DIRECTION_SPLITS = ((CHAIN_IP_IN, "REPLY", CHAIN_OWN_IN), (CHAIN_IP_OUT, "ORIGINAL", CHAIN_OWN_OUT))
+# (цепочка, адрес из conntrack, направление пакета, поле снимка)
+IP_COUNTER_RULES = (
+    (CHAIN_IP_IN, "--ctorigdst", "ORIGINAL", "rx_bytes"),
+    (CHAIN_IP_OUT, "--ctorigdst", "REPLY", "tx_bytes"),
+    (CHAIN_OWN_IN, "--ctrepldst", "REPLY", "own_rx_bytes"),
+    (CHAIN_OWN_OUT, "--ctrepldst", "ORIGINAL", "own_tx_bytes"),
+)
+IP_COUNTER_FIELDS = frozenset(field for *_, field in IP_COUNTER_RULES)
+# Сборки до учёта своих соединений отбрасывали их первым правилом цепочки
+LEGACY_DIRECTION_GUARDS = ((CHAIN_IP_IN, "REPLY"), (CHAIN_IP_OUT, "ORIGINAL"))
 HOST_MASK_SUFFIX = "/32"
 
 PORT_MIN = 1
@@ -120,27 +134,25 @@ def parse_port_counters(dump: str) -> dict[int, dict[str, int]]:
 
 
 def parse_ip_counters(dump: str) -> dict[str, dict[str, int]]:
-    """Разобрать вывод `iptables-save -c -t filter` в {адрес: {rx_bytes, tx_bytes}}.
+    """Разобрать вывод `iptables-save -c -t mangle` в {адрес: {поле: байты}}.
 
-    Направление — по цепочке: в `_IP_IN` лежат пакеты клиента, в `_IP_OUT` —
-    ответы ему. Маску `/32` сохранение печатает не во всех сборках iptables,
+    Поле — по цепочке (`IP_COUNTER_RULES`); у адреса только те поля, правила которых
+    нашлись в дампе. Маску `/32` сохранение печатает не во всех сборках iptables,
     поэтому она снимается.
     """
+    rules_by_chain = {chain: (address_flag, field) for chain, address_flag, _, field in IP_COUNTER_RULES}
     counters: dict[str, dict[str, int]] = {}
 
     for byte_count, tokens in _counted_rules(dump):
-        if tokens[1] == CHAIN_IP_IN:
-            field = "rx_bytes"
-        elif tokens[1] == CHAIN_IP_OUT:
-            field = "tx_bytes"
-        else:
+        rule = rules_by_chain.get(tokens[1])
+        if rule is None:
             continue
-
-        address = _flag_argument(tokens, "--ctorigdst")
+        address_flag, field = rule
+        address = _flag_argument(tokens, address_flag)
         if not address:
             continue
-        address = address.removesuffix(HOST_MASK_SUFFIX)
-        counters.setdefault(address, dict(ZERO_COUNTER))[field] += byte_count
+        entry = counters.setdefault(address.removesuffix(HOST_MASK_SUFFIX), {})
+        entry[field] = entry.get(field, 0) + byte_count
 
     return counters
 
@@ -157,15 +169,22 @@ def _port_argument(tokens: list[str], flag: str) -> Optional[int]:
     return int(value) if value and value.isdigit() else None
 
 
-def _ip_rule(chain: str, direction: str, address: str) -> list[str]:
+def _ip_rules(address: str) -> list[list[str]]:
     return [
-        chain, "-m", "conntrack", "--ctstate", "ESTABLISHED",
-        "--ctorigdst", address, "--ctdir", direction, "-j", "RETURN",
+        [
+            chain, "-m", "conntrack", "--ctstate", "ESTABLISHED",
+            address_flag, address, "--ctdir", direction, "-j", "RETURN",
+        ]
+        for chain, address_flag, direction, _ in IP_COUNTER_RULES
     ]
 
 
-def _direction_guard(chain: str, skipped_direction: str) -> list[str]:
-    return [chain, "-m", "conntrack", "--ctdir", skipped_direction, "-j", "RETURN"]
+def _direction_split(chain: str, direction: str, own_chain: str) -> list[str]:
+    return [chain, "-m", "conntrack", "--ctdir", direction, "-g", own_chain]
+
+
+def _legacy_direction_guard(chain: str, direction: str) -> list[str]:
+    return [chain, "-m", "conntrack", "--ctdir", direction, "-j", "RETURN"]
 
 
 class TrafficCounterSampler:
@@ -194,7 +213,7 @@ class TrafficCounterSampler:
         async with self._lock:
             await self._ensure_chains()
             if self._available:
-                await self._remove_filter_ip_chains()
+                await self._remove_leftovers()
         if not self._available:
             logger.warning("iptables is not available - port and IP traffic accounting is off")
             return
@@ -225,7 +244,7 @@ class TrafficCounterSampler:
         return [dict(entry) for entry in self._ports], self._available, self._sampled_at
 
     def ip_snapshot(self) -> tuple[list[dict], bool, Optional[float]]:
-        """То же для адресов. Время снятия общее: порты и адреса читаются одним дампом."""
+        """То же для адресов. Время снятия общее: порты и адреса читаются в одном цикле."""
         return [dict(entry) for entry in self._ips], self._available, self._sampled_at
 
     def tracked_ports(self) -> list[int]:
@@ -335,7 +354,10 @@ class TrafficCounterSampler:
         # Отдать здесь ноль означало бы шаг счётчика назад — панель списала бы его
         # на сброс и молча потеряла бы накопленную дельту.
         missing_ports = [port for port in self._tracked if port not in port_counters]
-        missing_ips = [address for address in self._addresses if address not in ip_counters]
+        missing_ips = [
+            address for address in self._addresses
+            if ip_counters.get(address, {}).keys() != IP_COUNTER_FIELDS
+        ]
         if missing_ports:
             logger.warning("Traffic accounting rules are missing for ports %s", missing_ports)
         if missing_ips:
@@ -351,7 +373,7 @@ class TrafficCounterSampler:
         self._ips = [
             {"ip": address, **ip_counters[address]}
             for address in self._addresses
-            if address in ip_counters
+            if address not in missing_ips
         ]
         self._sampled_at = time.time()
         self._available = True
@@ -377,10 +399,12 @@ class TrafficCounterSampler:
 
         await self._ensure_hooks(PORT_TABLE, PORT_CHAIN_HOOKS)
         await self._ensure_hooks(IP_TABLE, IP_CHAIN_HOOKS)
-        for chain, skipped_direction in IP_DIRECTION_GUARDS:
-            guard = _direction_guard(chain, skipped_direction)
-            if not await self._run_iptables(["-C", *guard], IP_TABLE):
-                await self._run_iptables(["-I", chain, "1", *guard[1:]], IP_TABLE)
+        for chain, direction, own_chain in IP_DIRECTION_SPLITS:
+            # Цепочка-цель goto обязана существовать до правила, которое на неё ссылается
+            await self._run_iptables(["-N", own_chain], IP_TABLE)
+            split = _direction_split(chain, direction, own_chain)
+            if not await self._run_iptables(["-C", *split], IP_TABLE):
+                await self._run_iptables(["-I", chain, "1", *split[1:]], IP_TABLE)
 
         for port in self._tracked:
             await self._ensure_port_rules(port)
@@ -394,9 +418,18 @@ class TrafficCounterSampler:
             if not await self._run_iptables(["-C", builtin, "-j", chain], table):
                 await self._run_iptables(["-I", builtin, "-j", chain], table)
 
-    async def _remove_filter_ip_chains(self) -> None:
-        """Сборки до переезда учёта по IP в mangle оставили его цепочки в filter:
-        без уборки каждый пакет проходил бы ещё и брошенные правила."""
+    async def _remove_leftovers(self) -> None:
+        """Убрать то, что оставили прежние сборки: без уборки каждый пакет проходил
+        бы ещё и брошенные правила.
+
+        Цепочки учёта по IP жили в filter до переезда в mangle; первым правилом
+        цепочек в mangle стоял отброс своих соединений, пока их не начали считать.
+        """
+        for chain, direction in LEGACY_DIRECTION_GUARDS:
+            guard = _legacy_direction_guard(chain, direction)
+            if await self._run_iptables(["-C", *guard], IP_TABLE):
+                await self._run_iptables(["-D", *guard], IP_TABLE)
+
         if not await self._run_iptables(["-L", CHAIN_IP_IN, "-n"], PORT_TABLE):
             return
         for builtin, chain in IP_CHAIN_HOOKS:
@@ -424,14 +457,13 @@ class TrafficCounterSampler:
                 await self._run_iptables(["-D", chain, "-p", protocol, port_flag, str(port)])
 
     async def _ensure_ip_rules(self, address: str) -> None:
-        for chain, direction in IP_RULE_DIRECTIONS:
-            rule = _ip_rule(chain, direction, address)
+        for rule in _ip_rules(address):
             if not await self._run_iptables(["-C", *rule], IP_TABLE):
                 await self._run_iptables(["-A", *rule], IP_TABLE)
 
     async def _remove_ip_rules(self, address: str) -> None:
-        for chain, direction in IP_RULE_DIRECTIONS:
-            await self._run_iptables(["-D", *_ip_rule(chain, direction, address)], IP_TABLE)
+        for rule in _ip_rules(address):
+            await self._run_iptables(["-D", *rule], IP_TABLE)
 
     async def _run_iptables(self, args: list[str], table: str = PORT_TABLE) -> bool:
         """Аргументы принимаются списком: сборка команды из строки со split()

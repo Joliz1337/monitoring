@@ -194,7 +194,7 @@ class ResponseModelTests(unittest.TestCase):
 
         network = {
             **MINIMAL_PAYLOAD["network"],
-            "ips": [{"ip": "203.0.113.10", "rx_bytes": 1, "tx_bytes": 2}],
+            "ips": [{"ip": "203.0.113.10", "rx_bytes": 1, "tx_bytes": 2, "own_rx_bytes": 3, "own_tx_bytes": 4}],
             "ips_available": True,
             "ips_sampled_at": 1_700_000_000.0,
         }

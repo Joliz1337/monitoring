@@ -16,6 +16,7 @@ try:  # локальный прогон без установленного ра
     from app.services.traffic_breakdown import (  # noqa: E402
         SPARKLINE_HOURS,
         HourBucket,
+        build_ip_rows,
         build_rows,
         detect_drop,
         sparkline,
@@ -105,7 +106,7 @@ class BuildRowsTests(unittest.TestCase):
         rates = {"10.0.0.1": ObservedSpeeds(100.0, 100.0), "10.0.0.2": ObservedSpeeds(5_000.0, 5_000.0)}
         history = {"10.0.0.3": steady({1: 50 * MBIT})}
 
-        rows = build_rows(rates, history, NOW_HOUR, with_drop=False)
+        rows = build_rows(rates, history, NOW_HOUR)
 
         self.assertEqual([row["key"] for row in rows], ["10.0.0.2", "10.0.0.1", "10.0.0.3"])
         silent = rows[-1]
@@ -114,15 +115,57 @@ class BuildRowsTests(unittest.TestCase):
 
     def test_key_seen_only_before_the_sparkline_window_is_hidden(self):
         # Бакет 26 часов назад нужен детекту падения, но в окне за сутки строка была бы пустой
-        rows = build_rows({}, {"10.0.0.9": steady({26: MBIT})}, NOW_HOUR, with_drop=True)
+        rows = build_rows({}, {"10.0.0.9": steady({26: MBIT})}, NOW_HOUR)
 
         self.assertEqual(rows, [])
 
-    def test_drop_is_reported_only_when_asked(self):
-        history = {"10.0.0.1": day_of(lambda ago: 0.0 if ago < 3 else 10 * MBIT)}
 
-        self.assertIsNone(build_rows({}, history, NOW_HOUR, with_drop=False)[0]["drop"])
-        self.assertEqual(build_rows({}, history, NOW_HOUR, with_drop=True)[0]["drop"], {"ratio": None})
+ADDRESS = "194.55.239.32"
+
+
+class BuildIpRowsTests(unittest.TestCase):
+    def test_address_row_is_the_whole_traffic_with_clients_under_it(self):
+        # Скриншот VPN-ноды: клиенты 73/494 Мбит/с, сам сервер к сайтам 461/54 —
+        # вместе ровно интерфейс, 534/548
+        clients = {ADDRESS: ObservedSpeeds(73 * MBIT, 494 * MBIT)}
+        own = {ADDRESS: ObservedSpeeds(461 * MBIT, 54 * MBIT)}
+
+        [row] = build_ip_rows(clients, own, {}, {}, NOW_HOUR)
+
+        self.assertEqual((row["rx_bytes_per_sec"], row["tx_bytes_per_sec"]), (534 * MBIT, 548 * MBIT))
+        self.assertEqual(
+            (row["clients"]["rx_bytes_per_sec"], row["clients"]["tx_bytes_per_sec"]), (73 * MBIT, 494 * MBIT),
+        )
+
+    def test_drop_is_judged_on_clients_not_on_the_whole_traffic(self):
+        # Клиенты ушли с заблокированного адреса, а сервер продолжает ходить с него
+        # в интернет за клиентов нового: весь трафик ровный, падение — только у клиентов
+        client_history = {ADDRESS: day_of(lambda ago: 0.0 if ago < 3 else 10 * MBIT)}
+        own_history = {ADDRESS: day_of(lambda ago: 30 * MBIT)}
+
+        [row] = build_ip_rows({}, {}, client_history, own_history, NOW_HOUR)
+
+        self.assertEqual(row["clients"]["drop"], {"ratio": None})
+        self.assertNotIn("drop", row)
+        self.assertEqual(row["sparkline"][-1], 30 * MBIT)
+
+    def test_whole_traffic_sums_bytes_but_not_coverage(self):
+        # Оба ряда сняты одними замерами: сложенное покрытие вдвое занизило бы скорость
+        client_history = {ADDRESS: steady({0: 10 * MBIT})}
+        own_history = {ADDRESS: steady({0: 30 * MBIT})}
+
+        [row] = build_ip_rows({}, {}, client_history, own_history, NOW_HOUR)
+
+        self.assertEqual(row["sparkline"][-1], 40 * MBIT)
+        self.assertEqual(row["clients"]["sparkline"][-1], 10 * MBIT)
+
+    def test_address_without_clients_is_still_listed(self):
+        # Адрес из пула исходящих: клиентов на нём нет, но трафик сервера с него идёт
+        [row] = build_ip_rows({}, {ADDRESS: ObservedSpeeds(MBIT, MBIT)}, {}, {}, NOW_HOUR)
+
+        self.assertEqual(row["rx_bytes_per_sec"], MBIT)
+        self.assertIsNone(row["clients"]["rx_bytes_per_sec"])
+        self.assertIsNone(row["clients"]["drop"])
 
 
 if __name__ == "__main__":
