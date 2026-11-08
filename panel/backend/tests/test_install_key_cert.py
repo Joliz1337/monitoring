@@ -1,13 +1,14 @@
 """Тесты сертификата персонального ключа установки.
 
-Главное свойство — отсутствие clientAuth: nginx ноды пускает внутрь любой клиентский
-сертификат, подписанный панельным CA, поэтому ключ, отданный владельцу чужого сервера,
-не должен годиться на то, чтобы представиться панелью для остальных нод.
+Главное свойство — отсутствие clientAuth у серверных сертификатов ноды (общего и
+персонального): ключ, оказавшийся у владельца чужого сервера, не должен годиться на то,
+чтобы представиться панелью. clientAuth остаётся только у клиентского сертификата панели.
 """
 
 import os
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -19,8 +20,10 @@ from app.services.pki import (  # noqa: E402
     SHARED_NODE_CN,
     cert_expires_at,
     generate_ca,
+    generate_client_cert,
     generate_dedicated_node_cert,
     generate_node_cert,
+    load_or_create_keygen,
     pack_node_secret,
     unpack_node_secret,
 )
@@ -41,11 +44,13 @@ class DedicatedCertTests(unittest.TestCase):
         self.assertIn(ExtendedKeyUsageOID.SERVER_AUTH, eku)
         self.assertNotIn(ExtendedKeyUsageOID.CLIENT_AUTH, eku)
 
-    def test_shared_cert_keeps_client_auth(self):
+    def test_shared_cert_has_no_client_auth(self):
         cert_pem, _ = generate_node_cert(CA_CERT, CA_KEY, SHARED_NODE_CN)
-        eku = load_eku(cert_pem)
-        self.assertIn(ExtendedKeyUsageOID.SERVER_AUTH, eku)
-        self.assertIn(ExtendedKeyUsageOID.CLIENT_AUTH, eku)
+        self.assertEqual(load_eku(cert_pem), {ExtendedKeyUsageOID.SERVER_AUTH})
+
+    def test_panel_client_cert_keeps_client_auth(self):
+        cert_pem, _ = generate_client_cert(CA_CERT, CA_KEY)
+        self.assertEqual(load_eku(cert_pem), {ExtendedKeyUsageOID.CLIENT_AUTH})
 
     def test_dedicated_cert_signed_by_ca(self):
         _, cert_pem, _ = generate_dedicated_node_cert(CA_CERT, CA_KEY, 90)
@@ -81,3 +86,39 @@ class DedicatedCertTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _EmptyKeygenSession:
+    """Сессия БД без записи PKI: load_or_create_keygen идёт по ветке первого запуска."""
+
+    def __init__(self):
+        self.added = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def execute(self, _statement):
+        result = unittest.mock.Mock()
+        result.scalar_one_or_none.return_value = None
+        return result
+
+    def add(self, row):
+        self.added.append(row)
+
+    async def commit(self):
+        return None
+
+
+class IssuedKeygenTests(unittest.IsolatedAsyncioTestCase):
+    async def test_first_run_issues_server_only_shared_cert_and_client_auth_panel_cert(self):
+        session = _EmptyKeygenSession()
+
+        keygen = await load_or_create_keygen(lambda: session)
+
+        self.assertEqual(load_eku(keygen.shared_node_cert), {ExtendedKeyUsageOID.SERVER_AUTH})
+        self.assertEqual(load_eku(keygen.client_cert), {ExtendedKeyUsageOID.CLIENT_AUTH})
+        panel_cert = x509.load_pem_x509_certificate(keygen.client_cert.encode())
+        self.assertEqual(panel_cert.subject.rfc4514_string(), "CN=panel-client")

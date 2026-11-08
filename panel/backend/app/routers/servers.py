@@ -586,7 +586,7 @@ async def migrate_all_servers(
     keygen = request.app.state.pki
 
     # Ноды на осознанном персональном сертификате (dedicated_cert) не трогаем —
-    # заливка shared cert с clientAuth уничтожила бы их изоляцию от парка
+    # заливка общего cert вернула бы на них ключ, общий для всего парка
     candidates = [s for s in servers if not s.uses_shared_cert and not s.dedicated_cert]
     auto_targets = [s for s in candidates if s.pki_enabled]
     manual_targets = [s for s in candidates if not s.pki_enabled]
