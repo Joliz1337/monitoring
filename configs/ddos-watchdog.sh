@@ -72,9 +72,10 @@ HYSTERESIS=900              # auto-disable after this many seconds with no signa
 SYNPROXY_WSCALE=7
 SYNPROXY_MSS=1460
 
-# Self-confirm: if the node API stops answering on loopback this many cycles in
-# a row while emergency mode is on, tear the chain down. A rule bug must not be
-# able to leave the box unreachable until someone notices.
+# Self-confirm: if the node API stops answering and no SSH session is alive this
+# many cycles in a row while auto-triggered emergency mode is on, tear the chain
+# down. A rule bug must not be able to leave the box unreachable until someone
+# notices. A manual pin is kept — see safety_net_cleared.
 SELF_CONFIRM_FAILS=3
 
 # Перечитывается КАЖДЫЙ цикл, а не только при старте. tune-sysctl.sh считает
@@ -411,8 +412,9 @@ clear_rules() {
 
 # Emergency mode inserts a chain at INPUT position 1. If a rule bug there ever
 # cuts the box off, nobody can log in to fix it — so the loop proves the node is
-# still reachable on its own API and tears the chain down after
-# SELF_CONFIRM_FAILS consecutive failures. Cheap, no new units, self-healing.
+# still reachable on its own API and tears an auto-triggered chain down after
+# SELF_CONFIRM_FAILS consecutive failures (safety_net_cleared). Cheap, no new
+# units, self-healing.
 #
 # Печатает, чем подтверждена связь; код 1 — ничем. Сторож панель берёт с GitHub
 # своего канала, а версия ноды может быть любой: агент текущей ноды слушает
@@ -440,6 +442,31 @@ reachable_via() {
 }
 
 self_confirm_ok() { reachable_via >/dev/null; }
+
+# Страховка, раз в цикл; код 0 — цепочка снята. Ручной пин не снимается: его
+# ставит и снимает админ, SSH цепочка не режет никогда, а агент молчит ~30 с и
+# при обычном обновлении ноды или рестарте docker — снимать из-за этого защиту
+# посреди атаки нельзя. Автоматический режим детект включит снова сам.
+safety_net_cleared() {
+    if [ "$MODE" != "on" ] || self_confirm_ok; then
+        save_prev confirm_fails 0
+        return 1
+    fi
+    local cf; cf=$(read_prev confirm_fails)
+    cf=$(( ${cf:-0} + 1 ))
+    save_prev confirm_fails "$cf"
+    [ "$cf" -ge "$SELF_CONFIRM_FAILS" ] 2>/dev/null || return 1
+    if [ "$SOURCE" = "manual" ]; then
+        # Одна запись на весь простой, а не на каждый цикл
+        [ "$cf" -eq "$SELF_CONFIRM_FAILS" ] \
+            && log "node unreachable for $cf cycles — manual pin kept, only the operator lifts it"
+        return 1
+    fi
+    log "node unreachable for $cf cycles with emergency mode on — clearing rules"
+    disable_mode
+    save_prev confirm_fails 0
+    return 0
+}
 
 # self-heal: while active, guarantee the chain+jump survive a foreign ufw reset
 selfheal() {
@@ -717,22 +744,8 @@ run_loop() {
         read_state
         sample_signals
 
-        # Reachability check runs for ANY active emergency mode, manual pins
-        # included: a manual pin with a bad ruleset locks you out just as hard.
-        if [ "$MODE" = "on" ]; then
-            if self_confirm_ok; then
-                save_prev confirm_fails 0
-            else
-                local cf; cf=$(read_prev confirm_fails)
-                cf=$(( ${cf:-0} + 1 ))
-                save_prev confirm_fails "$cf"
-                if [ "$cf" -ge "$SELF_CONFIRM_FAILS" ] 2>/dev/null; then
-                    log "node unreachable for $cf cycles with emergency mode on — clearing rules"
-                    disable_mode
-                    save_prev confirm_fails 0
-                    sleep "$INTERVAL"; continue
-                fi
-            fi
+        if safety_net_cleared; then
+            sleep "$INTERVAL"; continue
         fi
 
         # manual pin: only self-heal, never auto-toggle

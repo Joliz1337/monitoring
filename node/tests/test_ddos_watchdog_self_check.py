@@ -5,7 +5,10 @@
 Проверка обязана найти живого агента в обоих случаях, иначе под атакой сторож
 сочтёт исправную ноду отрезанной и снимет защитную цепочку. И наоборот: без агента
 и без SSH-сессии связь не подтверждена — строка заголовка `ss` сессией не считается.
-Гоняет настоящий configs/ddos-watchdog.sh (verb self-check) с подставными curl/ss.
+Страховка цикла снимает по этой проверке только автоматический аварийный режим:
+ручной пин ставит и снимает админ.
+Гоняет настоящий configs/ddos-watchdog.sh (verb self-check и цикл loop) с подставными
+curl/ss и функциями, которые трогают iptables и /proc.
 Запуск:  python -m unittest discover -s node/tests   (на Windows — под WSL)
 """
 
@@ -20,6 +23,33 @@ WATCHDOG = Path(__file__).resolve().parents[2] / "configs" / "ddos-watchdog.sh"
 SOCKET_PROBE = "-sf --max-time 3 --unix-socket /run/monitoring-node/api.sock http://localhost/health"
 TCP_PROBE = "-sf --max-time 3 http://127.0.0.1:7500/health"
 CURL_REFUSED = 7
+CLI_MARKER = "# ── CLI ──"
+SAFETY_NET_FAILS = 3
+# Циклов цикла хватает, чтобы страховка успела сработать с запасом
+LOOP_CYCLES = SAFETY_NET_FAILS + 3
+
+# Цикл до CLI-разбора скрипта, без iptables, /proc и пауз: агент молчит,
+# SSH-сессии нет, сигналов атаки нет. sleep считает циклы и останавливает прогон.
+LOOP_DRIVER = r"""
+source "$WORK/watchdog_lib.sh"
+STATE_FILE="$WORK/state.json"
+RUN_DIR="$WORK/run"
+mkdir -p "$RUN_DIR"
+load_config() { :; }
+ensure_dirs() { :; }
+restore_whitelist() { :; }
+sample_signals() { SIG_STRONG=0; SIG_WEAK=0; SIG_REASON=""; }
+selfheal() { :; }
+reachable_via() { return 1; }
+clear_rules() { echo "RULES CLEARED"; }
+cycles=0
+sleep() {
+    cycles=$((cycles + 1))
+    [ "$cycles" -le "$LOOP_CYCLES" ] || exit 0
+}
+write_state on "$PIN_SOURCE" 1 "test" on
+run_loop
+"""
 
 # Как настоящий ss: строку заголовка (в ней есть двоеточия) печатает всегда,
 # если не передан -H/--no-header, — и при пустом списке соединений тоже
@@ -97,6 +127,40 @@ class WatchdogSelfCheckTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout.decode())
         self.assertIn("FAIL", result.stdout.decode())
         self.assertEqual(self.curl_calls(), [SOCKET_PROBE, TCP_PROBE])
+
+
+
+@unittest.skipIf(sys.platform == "win32", "bash-скрипт хоста: на Windows гоняется под WSL")
+class EmergencySafetyNetTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.work = Path(tmp.name)
+        source = WATCHDOG.read_bytes().decode("utf-8")
+        library, marker, _ = source.partition(CLI_MARKER)
+        self.assertTrue(marker, "в скрипте не найден CLI-разбор")
+        (self.work / "watchdog_lib.sh").write_bytes(library.encode("utf-8"))
+
+    def run_loop(self, pin_source: str) -> tuple[str, str]:
+        driver = self.work / "driver.sh"
+        driver.write_bytes(LOOP_DRIVER.encode("utf-8"))
+        env = {**os.environ, "WORK": str(self.work), "PIN_SOURCE": pin_source, "LOOP_CYCLES": str(LOOP_CYCLES)}
+        result = subprocess.run(["bash", str(driver)], capture_output=True, env=env, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+        state = (self.work / "state.json").read_text()
+        return result.stdout.decode() + result.stderr.decode(), state
+
+    def test_auto_mode_is_cleared_after_failed_checks(self):
+        output, state = self.run_loop("auto")
+        self.assertEqual(output.count("RULES CLEARED"), 1, output)
+        self.assertIn('"mode":"off"', state)
+
+    def test_manual_pin_is_kept(self):
+        output, state = self.run_loop("manual")
+        self.assertNotIn("RULES CLEARED", output)
+        self.assertIn('"mode":"on"', state)
+        self.assertIn('"source":"manual"', state)
+        self.assertEqual(output.count("manual pin kept"), 1, output)
 
 
 if __name__ == "__main__":
