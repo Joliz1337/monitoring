@@ -48,6 +48,12 @@ class DedicatedCertTests(unittest.TestCase):
         cert_pem, _ = generate_node_cert(CA_CERT, CA_KEY, SHARED_NODE_CN)
         self.assertEqual(load_eku(cert_pem), {ExtendedKeyUsageOID.SERVER_AUTH})
 
+    def test_node_cert_cannot_be_issued_with_client_auth(self):
+        # Сертификат ноды с clientAuth годился бы клиентом к другим нодам — выпустить
+        # такой нельзя даже явным флагом
+        with self.assertRaises(TypeError):
+            generate_node_cert(CA_CERT, CA_KEY, SHARED_NODE_CN, allow_client_auth=True)
+
     def test_panel_client_cert_keeps_client_auth(self):
         cert_pem, _ = generate_client_cert(CA_CERT, CA_KEY)
         self.assertEqual(load_eku(cert_pem), {ExtendedKeyUsageOID.CLIENT_AUTH})

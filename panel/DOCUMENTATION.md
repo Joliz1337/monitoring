@@ -887,14 +887,14 @@ interface NicInfo {
 
 ### Ключ установки ноды под один сервер
 
-Общий **Installer Token** (`GET /api/servers/installer-token`) один на весь парк: внутри лежит приватный ключ shared-сертификата ноды (CN `shared-node`) с `ExtendedKeyUsage = serverAuth`. Nginx ноды пускает только клиента `CN=panel-client` (`ssl_verify_client on` плюс сверка CN), поэтому общий сертификат не годится как клиентский и представиться панелью им нельзя. Общий сертификат, выпущенный раньше, сохраняет `clientAuth`, пока его не перевыпустят; обновлённые ноды отклоняют его как клиентский в любом случае, потому что принимают только `CN=panel-client`. Но общий ключ всё равно даёт возможность выдать себя за любую ноду парка, так что отдавать этот токен владельцу арендованного сервера, к которому нет доступа, не стоит.
+Общий **Installer Token** (`GET /api/servers/installer-token`) один на весь парк: внутри лежит приватный ключ shared-сертификата ноды (CN `shared-node`) с `ExtendedKeyUsage = serverAuth`. Nginx ноды пускает только клиента `CN=panel-client` (`ssl_verify_client on` плюс сверка CN), поэтому общий сертификат не годится как клиентский и представиться панелью им нельзя. Сверку имени клиента делает nginx ноды — обновите все ноды. Но общий ключ всё равно даёт возможность выдать себя за любую ноду парка, так что отдавать этот токен владельцу арендованного сервера, к которому нет доступа, не стоит.
 
 Для таких случаев в форме добавления сервера есть блок **«Ключ под один сервер»**. Под каждую выдачу выпускается собственный сертификат с CN `node-<12 hex>` и **без `clientAuth`** — годится только на роль ноды, представиться панелью с ним невозможно.
 
 Тот же сертификат мастер автоустановки выпускает сам по чекбоксу «Одноразовый (персональный) ключ» — без записи в `node_install_keys` и без участия оператора, см. [Авторазвёртывание ноды](#авторазвёртывание-ноды).
 
 **PKI (`panel/backend/app/services/pki.py`):**
-- `generate_node_cert(..., allow_client_auth: bool = False)` — общий shared-сертификат и персональные ключи выпускаются только с `serverAuth`; `clientAuth` есть лишь у клиентского сертификата панели (`generate_client_cert`, `CN=panel-client`)
+- `generate_node_cert(ca_cert_pem, ca_key_pem, node_name, san_hosts, validity_days)` — серверный сертификат ноды только с `serverAuth` (и общий shared-сертификат, и персональные ключи); `clientAuth` есть лишь у клиентского сертификата панели (`generate_client_cert`, `CN=panel-client`)
 - `generate_dedicated_node_cert(ca_cert_pem, ca_key_pem, validity_days) -> (common_name, cert_pem, key_pem)` — CN вида `node-<12 hex>` (`DEDICATED_NODE_CN_PREFIX` + `secrets.token_hex(6)`; запас против коллизии по `unique`-колонке `common_name`), EKU только `serverAuth`
 - `cert_expires_at(cert_pem) -> datetime` — дата окончания действия сертификата
 

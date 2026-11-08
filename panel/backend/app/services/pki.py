@@ -239,19 +239,15 @@ def generate_node_cert(
     node_name: str,
     san_hosts: list[str] | None = None,
     validity_days: int = 1095,
-    allow_client_auth: bool = False,
 ) -> tuple[str, str]:
-    """Серверный сертификат ноды (serverAuth + SAN с IP/DNS); clientAuth — только по явному флагу."""
-    eku = [ExtendedKeyUsageOID.SERVER_AUTH]
-    if allow_client_auth:
-        eku.append(ExtendedKeyUsageOID.CLIENT_AUTH)
+    """Серверный сертификат ноды: только serverAuth + SAN с IP/DNS."""
     san = _build_san(node_name, san_hosts)
     return _sign_leaf(
         ca_cert_pem,
         ca_key_pem,
         node_name,
         validity_days,
-        eku,
+        [ExtendedKeyUsageOID.SERVER_AUTH],
         san=san,
     )
 
@@ -274,7 +270,6 @@ def generate_dedicated_node_cert(
         common_name,
         san_hosts=None,
         validity_days=validity_days,
-        allow_client_auth=False,
     )
     return common_name, cert_pem, key_pem
 
