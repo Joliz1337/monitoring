@@ -45,7 +45,7 @@ If a server is behind heavy DPI (e.g. Russia's TSPU) and cannot pull the node im
 2. On the server, run the installer in blocked mode — it installs Docker, files, certificates and `.env`, then stops quickly at the image instead of hanging on the download:
 
    ```
-   MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 MON_EXPECTED_COMMIT=<SHA> bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+   MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
    ```
 
    `MON_BRANCH` **and** the branch in the URL must match your update channel: `main` for stable, `dev` for dev. For the dev channel replace `main` with `dev` in both places. `MON_BRANCH` matters: it sets which branch the installer takes the node code from.

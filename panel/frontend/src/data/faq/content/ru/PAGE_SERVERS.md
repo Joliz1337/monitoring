@@ -45,7 +45,7 @@
 2. На сервере запустите установщик в блок-режиме — он поставит Docker, файлы, сертификаты и `.env`, а на образе быстро остановится, не вися на скачивании:
 
    ```
-   MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 MON_EXPECTED_COMMIT=<SHA> bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+   MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
    ```
 
    `MON_BRANCH` **и** ветка в URL должны совпадать с вашим каналом обновлений: `main` — стабильный, `dev` — dev. Для dev-канала замените `main` на `dev` в обоих местах. `MON_BRANCH` важен: он задаёт, из какой ветки установщик берёт код ноды.
