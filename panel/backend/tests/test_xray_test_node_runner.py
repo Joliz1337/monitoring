@@ -11,6 +11,7 @@
 
 import asyncio
 import base64
+import dataclasses
 import json
 import os
 import sys
@@ -42,8 +43,20 @@ UUID = "11111111-2222-3333-4444-555555555555"
 TAB = "\t"
 
 
+def _unb64(value: str) -> str:
+    return base64.b64decode(value).decode()
+
+
 def _cell(link: str = ""):
     return build_matrix([parse_link(link or f"vless://{UUID}@h.io:443?security=tls#node")])[0]
+
+
+def _cell_with_address(address: str):
+    """Ячейка в обход валидации модели: проверяет, что сборщик задания не доверяет полям."""
+    cell = _cell()
+    endpoint = dataclasses.replace(cell.endpoint)
+    object.__setattr__(endpoint, "address", address)
+    return dataclasses.replace(cell, endpoint=endpoint)
 
 
 def _cells(*links):
@@ -119,17 +132,41 @@ class PayloadTest(unittest.TestCase):
             )
 
     def test_cell_row_carries_socks_port(self):
-        row = next(row for row in self._rows() if row[0] == "CELL")
-        self.assertEqual(row[3], "h.io")
+        row = next(row for row in self._rows() if row[0] == "CELL64")
+        self.assertEqual(_unb64(row[3]), "h.io")
         self.assertEqual(row[4], "443")
         self.assertEqual(row[5], "0")  # не UDP-протокол
         self.assertEqual(row[6], "7501")
 
+    def test_legacy_cell_row_not_emitted(self):
+        self.assertFalse([row for row in self._rows() if row[0] == "CELL"])
+
     def test_udp_protocol_flagged(self):
         rows = self._rows(cells=[_cell("hysteria2://pw@h.io:443#hy")],
                           ports=[7502], core=Core.SINGBOX)
-        row = next(r for r in rows if r[0] == "CELL")
+        row = next(r for r in rows if r[0] == "CELL64")
         self.assertEqual(row[5], "1")
+
+    def test_cell_untrusted_fields_are_base64(self):
+        """Адрес и SNI едут base64: в строке задания нет сырого текста из ссылки."""
+        cell = _cell(f"vless://{UUID}@srv.io:443?security=tls&sni=front.example.io#n")
+        row = next(r for r in self._rows(cells=[cell]) if r[0] == "CELL64")
+        self.assertEqual(len(row), 8)
+        self.assertEqual(_unb64(row[3]), "srv.io")
+        self.assertEqual(_unb64(row[7]), "front.example.io")
+        self.assertNotIn("srv.io", TAB.join(row))
+        self.assertNotIn("front.example.io", TAB.join(row))
+
+    def test_cell_values_with_separators_cannot_split_rows(self):
+        """Даже если в endpoint попало значение с разделителями, строки задания не множатся."""
+        hostile = "a\tb\nCELL64\t9"
+        rows = self._rows(cells=[_cell_with_address(hostile)])
+        self.assertEqual([row[0] for row in rows], ["CORE", "OPTS", "CONF", "CELL64"])
+        self.assertEqual(_unb64(rows[-1][3]), hostile)
+
+    def test_empty_sni_stays_empty_field(self):
+        row = next(r for r in self._rows(cells=[_cell_with_address("")]) if r[0] == "CELL64")
+        self.assertEqual(row[7], "")
 
     def test_row_per_cell(self):
         cells = _cells(
@@ -140,13 +177,13 @@ class PayloadTest(unittest.TestCase):
         rows = self._rows(cells=cells, ports=[7501, 7502, 7503])
         self.assertEqual(
             [row[0] for row in rows],
-            ["CORE", "OPTS", "CONF", "CELL", "CELL", "CELL"],
+            ["CORE", "OPTS", "CONF", "CELL64", "CELL64", "CELL64"],
         )
 
     def test_no_tabs_or_newlines_break_rows(self):
         """Каждая строка задания обязана остаться одной строкой."""
         rows = self._rows()
-        self.assertEqual([row[0] for row in rows], ["CORE", "OPTS", "CONF", "CELL"])
+        self.assertEqual([row[0] for row in rows], ["CORE", "OPTS", "CONF", "CELL64"])
 
     def test_speed_servers_sent_in_attempt_order(self):
         """Порядок попыток считает панель: исполнитель лишь выбирает список по стране."""

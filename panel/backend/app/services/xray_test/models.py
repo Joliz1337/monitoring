@@ -7,9 +7,18 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+
+from app.services.xray_test.errors import LinkParseError
+
+MAX_HOST_LENGTH = 253
+# \w в юникоде: сырые IDN-имена из ссылок тоже проходят, а пробелы,
+# табуляция и переводы строк — нет
+_HOST_PATTERN = re.compile(r"[\w.\-:\[\]%]+")
+_CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class Protocol(str, Enum):
@@ -114,6 +123,15 @@ class TransportSettings:
     xhttp_extra: Optional[str] = None
 
 
+def _ensure_host(label: str, value: Optional[str]) -> None:
+    if not value:
+        return
+    if len(value) > MAX_HOST_LENGTH:
+        raise LinkParseError(f"Слишком длинное поле: {label}")
+    if not _HOST_PATTERN.fullmatch(value):
+        raise LinkParseError(f"Недопустимые символы в поле: {label}")
+
+
 @dataclass(frozen=True)
 class ProxyEndpoint:
     protocol: Protocol
@@ -130,6 +148,18 @@ class ProxyEndpoint:
     tls: TlsSettings = field(default_factory=TlsSettings)
     transport: TransportSettings = field(default_factory=TransportSettings)
     extra: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        # Адрес, SNI и имя приходят из чужих ссылок и подписок и доезжают до
+        # задания ноды и ядра: отсекаем их здесь, на границе разбора
+        for label, value in (
+            ("адрес", self.address),
+            ("SNI", self.tls.sni),
+            ("host транспорта", self.transport.host),
+        ):
+            _ensure_host(label, value)
+        if _CONTROL_CHARS_PATTERN.search(self.remark):
+            raise LinkParseError("Имя содержит управляющие символы")
 
     @property
     def effective_sni(self) -> str:

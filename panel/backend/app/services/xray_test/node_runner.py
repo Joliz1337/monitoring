@@ -353,18 +353,20 @@ def _build_payload(
             ])
             for cell, port in zip(chunk, forward_ports)
         )
+    # Адрес и SNI пришли из чужих ссылок: в base64 они не могут вставить
+    # разделитель и склеить или добавить строку задания
     rows.extend(
         SEP.join([
-            "CELL",
+            "CELL64",
             str(cell.index),
             core.value,
-            cell.endpoint.address,
+            b64encode(cell.endpoint.address.encode()).decode(),
             str(cell.endpoint.port),
             "1" if cell.endpoint.is_udp_protocol else "0",
             str(port),
             # SNI нужен исполнителю отдельно: по нему проверяется запасной ход
             # REALITY, отличающий блокировку от неподходящих параметров
-            cell.endpoint.effective_sni,
+            b64encode(cell.endpoint.effective_sni.encode()).decode(),
         ])
         for cell, port in zip(chunk, ports)
     )
