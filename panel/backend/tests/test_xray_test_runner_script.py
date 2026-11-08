@@ -1,8 +1,8 @@
-"""Разбор задания в configs/xray-test-runner.sh: порядок строк CORE и CELL64.
+"""Разбор задания в configs/xray-test-runner.sh: порядок строк задания и CELL64.
 
 Скрипт читается с диска, его последняя строка `main "$@"` отрезается, а
 скачивание и запуск проверок подменяются заглушками — так гоняется настоящий
-разбор `main` и настоящий `ensure_core`.
+разбор `main`, настоящий `ensure_core` и настоящая TCP-проба.
 """
 
 from __future__ import annotations
@@ -10,15 +10,20 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 RUNNER = Path(__file__).resolve().parents[3] / "configs" / "xray-test-runner.sh"
 MAIN_CALL = 'main "$@"'
+# Тот же разбор версии, что у панели при доставке исполнителя (node_runner._version_re)
+RUNNER_VERSION_RE = re.compile(r'RUNNER_VERSION="([0-9.]+)"')
 
 SHA = "a" * 64
 LEGIT_URL = "https://panel.example.com:8443/api/xray-test/bundle/Xk3_-9aZ0PqRsTuVwXyZ1234567890abcdefghijklm"
@@ -30,6 +35,11 @@ ensure_core() {
     printf '%s\t%s\t%s\t%s\n' "$@" >> "$WORK/ensure.log"
     printf '%s' "$CORES_DIR/$1-$2"
 }
+start_core() {
+    printf '%s' "$1" > "$WORK/started.bin"
+    cp "$2" "$WORK/started.conf"
+}
+stop_core() { :; }
 run_cell() {
     printf 'RUN\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tpaths=%s|%s\n' "$@" \
         "${CORE_PATHS[xray]:-}" "${CORE_PATHS[sing-box]:-}"
@@ -59,6 +69,20 @@ ensure_core "$CORE_NAME" "$CORE_VERSION" "$CORE_URL" "$CORE_SHA"
 printf '\nrc=%s\n' "$?"
 """
 
+DRIVER_FOR_TCP_PING = r"""
+source "$WORK/runner_lib.sh"
+tcp_ping_ms "$PING_HOST" "$PING_PORT"
+"""
+
+# Адрес из чужой ссылки: каждый из них, оказавшись внутри строки bash -c,
+# выполнил бы команду на ноде
+HOSTILE_HOSTS = (
+    '$(touch "$WORK/pwned")',
+    '`touch "$WORK/pwned"`',
+    "127.0.0.1/1;touch \"$WORK/pwned\";#",
+    "x'$(touch \"$WORK/pwned\")'",
+)
+
 
 def b64(text: str) -> str:
     return base64.b64encode(text.encode()).decode()
@@ -77,6 +101,11 @@ def cell64_row(index: str, address: str, sni: str = "", core: str = "xray", sock
 
 
 OPTS_NO_HTTP = ("OPTS", "1", "0", "0", "0")
+OPTS_HTTP = ("OPTS", "1", "1", "0", "0")
+
+
+def conf_row(core: str, config: str) -> tuple[str, ...]:
+    return ("CONF", core, b64(config))
 
 
 @unittest.skipIf(sys.platform == "win32", "скрипт ноды рассчитан на POSIX-хост, на Windows bash уходит в WSL-лаунчер")
@@ -133,9 +162,86 @@ class RunnerScriptTest(unittest.TestCase):
         curl_log = self.work / "curl.log"
         return returncode, curl_log.read_text(encoding="utf-8") if curl_log.exists() else ""
 
-    def test_version_command_reports_bumped_runner(self) -> None:
+    def tcp_ping(self, host: str, port: str) -> str:
+        result = self.run_bash(DRIVER_FOR_TCP_PING, PING_HOST=host, PING_PORT=port)
+        return result.stdout.decode("utf-8")
+
+    def test_version_command_matches_version_panel_reads(self) -> None:
+        # Панель решает, переустанавливать ли исполнитель, сравнивая вывод `version`
+        # с RUNNER_VERSION из своей копии скрипта
+        declared = RUNNER_VERSION_RE.search(RUNNER.read_text(encoding="utf-8"))
+        self.assertIsNotNone(declared)
         result = subprocess.run(["bash", str(RUNNER), "version"], capture_output=True, timeout=30)
-        self.assertEqual(result.stdout.decode().strip(), "2.14.0")
+        self.assertEqual(result.stdout.decode().strip(), declared.group(1))
+
+    def test_rows_after_first_cell_are_ignored(self) -> None:
+        payload = job(
+            OPTS_NO_HTTP,
+            cell64_row("0", "a.example.com"),
+            OPTS_HTTP,
+            conf_row("xray", "{}"),
+            ("SPEED", "world", "evil", EVIL_URL),
+            ("IPERF", "world", "evil", "evil.example.com", "5201"),
+            ("FWD", "0", "20100", b64("{}")),
+        )
+        logs, cells, runs = self.run_main(payload)
+
+        self.assertEqual(len(runs), 1, "поздний OPTS включил бы HTTP-пробы без ядра")
+        self.assertEqual(cells, [])
+        self.assertEqual(sum("после проверок" in line for line in logs), 5)
+
+    def test_row_smuggled_through_legacy_cell_is_ignored(self) -> None:
+        smuggled = "a.example.com\n" + "\t".join(OPTS_HTTP)
+        payload = job(OPTS_NO_HTTP, ("CELL", "0", "xray", smuggled, "443", "0", "20001", ""))
+        logs, cells, runs = self.run_main(payload)
+
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(cells, [])
+        self.assertTrue(any("OPTS после проверок" in line for line in logs))
+
+    def test_conf_is_accepted_once(self) -> None:
+        payload = job(
+            core_row(),
+            core_row(name="sing-box", version="1.12.0"),
+            OPTS_HTTP,
+            conf_row("xray", '{"first":true}'),
+            conf_row("sing-box", '{"second":true}'),
+            cell64_row("0", "a.example.com"),
+        )
+        logs, cells, runs = self.run_main(payload)
+
+        self.assertEqual(cells, [])
+        self.assertEqual(len(runs), 1)
+        self.assertEqual((self.work / "started.bin").read_text(), f"{self.work}/cores/xray-1.8.24")
+        self.assertEqual((self.work / "started.conf").read_text(), '{"first":true}')
+        self.assertTrue(any("повторная строка CONF" in line for line in logs))
+
+    def test_tcp_ping_does_not_run_address_as_code(self) -> None:
+        for host in HOSTILE_HOSTS:
+            with self.subTest(host=host):
+                marker = self.work / "pwned"
+                marker.unlink(missing_ok=True)
+                self.tcp_ping(host, "80")
+                self.assertFalse(marker.exists())
+
+    def test_tcp_ping_measures_open_port(self) -> None:
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            listener.settimeout(10)
+
+            def accept_all() -> None:
+                for _ in range(3):
+                    try:
+                        conn, _ = listener.accept()
+                    except OSError:
+                        return
+                    conn.close()
+
+            acceptor = threading.Thread(target=accept_all, daemon=True)
+            acceptor.start()
+            output = self.tcp_ping("127.0.0.1", str(listener.getsockname()[1]))
+            acceptor.join(timeout=10)
+
+        self.assertRegex(output, r"^\d+ \d+ \d+$")
 
     def test_core_after_first_cell_is_ignored(self) -> None:
         payload = job(
