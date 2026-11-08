@@ -409,29 +409,37 @@ clear_rules() {
     ipt -F "$CHAIN"
 }
 
-# Сторож панель берёт с GitHub своего канала, а версия ноды может быть любой:
-# агент текущей ноды слушает сокет, старой — порт на петле.
-agent_healthy() {
-    curl -sf --max-time 3 --unix-socket "$AGENT_SOCKET" http://localhost/health >/dev/null 2>&1 \
-        || curl -sf --max-time 3 "http://127.0.0.1:$AGENT_LOOPBACK_PORT/health" >/dev/null 2>&1
-}
-
 # Emergency mode inserts a chain at INPUT position 1. If a rule bug there ever
 # cuts the box off, nobody can log in to fix it — so the loop proves the node is
 # still reachable on its own API and tears the chain down after
 # SELF_CONFIRM_FAILS consecutive failures. Cheap, no new units, self-healing.
-self_confirm_ok() {
-    agent_healthy && return 0
+#
+# Печатает, чем подтверждена связь; код 1 — ничем. Сторож панель берёт с GitHub
+# своего канала, а версия ноды может быть любой: агент текущей ноды слушает
+# сокет, старой — порт на петле.
+reachable_via() {
+    if curl -sf --max-time 3 --unix-socket "$AGENT_SOCKET" http://localhost/health >/dev/null 2>&1; then
+        echo "agent via unix socket"
+        return 0
+    fi
+    if curl -sf --max-time 3 "http://127.0.0.1:$AGENT_LOOPBACK_PORT/health" >/dev/null 2>&1; then
+        echo "agent via 127.0.0.1:$AGENT_LOOPBACK_PORT (node of an older version)"
+        return 0
+    fi
     # Fall back to "is any SSH session still established" — on a node where the
     # API is legitimately down we must not tear down protection for that alone.
+    # Без -H ss печатает заголовок и при пустом списке соединений.
     local p
     for p in $(detect_ssh_ports); do
-        if ss -tn state established "( sport = :$p )" 2>/dev/null | grep -q ':'; then
+        if ss -Htn state established "( sport = :$p )" 2>/dev/null | grep -q .; then
+            echo "live SSH session only (agent /health unreachable)"
             return 0
         fi
     done
     return 1
 }
+
+self_confirm_ok() { reachable_via >/dev/null; }
 
 # self-heal: while active, guarantee the chain+jump survive a foreign ufw reset
 selfheal() {
@@ -878,8 +886,8 @@ case "${1:-loop}" in
     audit-rules)     audit_never_drop "$(cat)" ;;
     self-test)       do_self_test ;;
     self-check)
-        if self_confirm_ok; then
-            echo "self-check: OK  node reachable (agent /health or live SSH session)"
+        if via=$(reachable_via); then
+            echo "self-check: OK  $via"
         else
             echo "self-check: FAIL  agent /health unreachable and no live SSH session"
             exit 1
