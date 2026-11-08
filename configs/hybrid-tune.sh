@@ -39,6 +39,9 @@ configure_flow_limit() {
     echo "$mask" > /proc/sys/net/core/flow_limit_cpu_bitmap 2>/dev/null || true
 }
 
+# CPU masks are built as comma-separated 32-bit groups ("ffff,ffffffff"): past
+# CPU 31 the kernel rejects a solid hex string with EOVERFLOW, and the write
+# would fail silently behind `|| true`.
 get_rps_mask() {
     local cpu_count=$1
     local skip_from=$2
@@ -50,6 +53,7 @@ get_rps_mask() {
             if (i+1 < c && i+1 >= skip) val += 2
             if (i+2 < c && i+2 >= skip) val += 4
             if (i+3 < c && i+3 >= skip) val += 8
+            if (i > 0 && i % 32 == 0) hex = "," hex
             hex = sprintf("%x", val) hex
         }
         print hex
@@ -60,15 +64,11 @@ cpu_index_mask() {
     local cpu_idx=$1
     awk -v idx="$cpu_idx" 'BEGIN {
         hex=""
-        block = int(idx / 4)
-        bit  = idx % 4
-        val  = 0
-        if (bit == 0) val = 1
-        if (bit == 1) val = 2
-        if (bit == 2) val = 4
-        if (bit == 3) val = 8
-        for (i=0; i<block; i++) hex = "0" hex
-        hex = sprintf("%x", val) hex
+        for (i=0; i<=idx; i+=4) {
+            val = (idx < i+4) ? 2^(idx-i) : 0
+            if (i > 0 && i % 32 == 0) hex = "," hex
+            hex = sprintf("%x", val) hex
+        }
         print hex
     }'
 }
