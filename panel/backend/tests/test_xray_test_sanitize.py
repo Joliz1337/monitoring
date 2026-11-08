@@ -160,6 +160,16 @@ class EndpointFieldValidationTest(unittest.TestCase):
         with self.assertRaises(LinkParseError):
             parse_link(f"vless://{UUID}@h.io:443?type=ws&host=a%0Ab.io")
 
+    def test_transport_host_list_passes(self):
+        endpoint = parse_link(f"vless://{UUID}@h.io:443?type=ws&host=a.com,%20b.com")
+        self.assertEqual(endpoint.transport.host, "a.com, b.com")
+
+    def test_control_char_inside_host_list_rejected(self):
+        for bad in ("a.com,%09b.com", "a.com%0A,b.com", "a.com,b.com%09"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(LinkParseError):
+                    parse_link(f"vless://{UUID}@h.io:443?type=ws&host={bad}")
+
     def test_control_chars_in_remark_rejected(self):
         with self.assertRaises(LinkParseError):
             parse_link(f"vless://{UUID}@h.io:443?security=tls#na%0Ame")

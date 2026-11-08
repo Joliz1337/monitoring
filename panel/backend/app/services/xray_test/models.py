@@ -123,13 +123,19 @@ class TransportSettings:
     xhttp_extra: Optional[str] = None
 
 
-def _ensure_host(label: str, value: Optional[str]) -> None:
+def _ensure_host(label: str, value: Optional[str], allow_list: bool = False) -> None:
     if not value:
         return
-    if len(value) > MAX_HOST_LENGTH:
-        raise LinkParseError(f"Слишком длинное поле: {label}")
-    if not _HOST_PATTERN.fullmatch(value):
-        raise LinkParseError(f"Недопустимые символы в поле: {label}")
+    # До strip: иначе табуляция по краям элемента списка прошла бы незамеченной
+    if _CONTROL_CHARS_PATTERN.search(value):
+        raise LinkParseError(f"Управляющие символы в поле: {label}")
+    # Заголовок Host у vmess бывает списком через запятую
+    names = value.split(",") if allow_list else [value]
+    for name in (item.strip() for item in names):
+        if len(name) > MAX_HOST_LENGTH:
+            raise LinkParseError(f"Слишком длинное поле: {label}")
+        if name and not _HOST_PATTERN.fullmatch(name):
+            raise LinkParseError(f"Недопустимые символы в поле: {label}")
 
 
 @dataclass(frozen=True)
@@ -152,12 +158,9 @@ class ProxyEndpoint:
     def __post_init__(self) -> None:
         # Адрес, SNI и имя приходят из чужих ссылок и подписок и доезжают до
         # задания ноды и ядра: отсекаем их здесь, на границе разбора
-        for label, value in (
-            ("адрес", self.address),
-            ("SNI", self.tls.sni),
-            ("host транспорта", self.transport.host),
-        ):
-            _ensure_host(label, value)
+        _ensure_host("адрес", self.address)
+        _ensure_host("SNI", self.tls.sni)
+        _ensure_host("host транспорта", self.transport.host, allow_list=True)
         if _CONTROL_CHARS_PATTERN.search(self.remark):
             raise LinkParseError("Имя содержит управляющие символы")
 
