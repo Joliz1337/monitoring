@@ -18,6 +18,7 @@ from app.auth import verify_auth
 from app.database import async_session_maker, get_db
 from app.models import RemnawaveCertProfile, RemnawaveNginxProfile
 from app.routers.servers import clean_folder_name
+from app.services import update_channel, upstream_commit
 from app.services.deploy_job_manager import PostDeployOptions, get_deploy_job_manager
 from app.services.deploy_service import DeployParams, InstallerLanguage, build_install_command
 from app.services.http_client import validate_proxy_input
@@ -342,6 +343,8 @@ async def deploy_server(
     params = await _build_deploy_params(
         req, host, request.app.state.pki, save_remnawave_cert=True,
     )
+    if not req.manual:
+        params.expected_commit = await upstream_commit.resolve(update_channel.current_branch())
     server_url = f"https://{host}:{req.monitoring_port}"
 
     post_opts = PostDeployOptions(

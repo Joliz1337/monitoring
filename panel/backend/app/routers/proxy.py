@@ -15,7 +15,7 @@ from app.services.http_client import get_node_client, get_node_apply_client, nod
 from app.database import get_db
 from app.models import Server, ServerCache, MetricsSnapshot
 from app.auth import verify_auth
-from app.services import node_update_watcher, update_channel
+from app.services import node_update_watcher, update_channel, upstream_commit
 from app.services.metrics_history import HistoryPeriod, load_history
 from app.services.metrics_rates import enrich_metrics_with_speeds
 from app.services.node_capabilities import (
@@ -948,6 +948,12 @@ async def trigger_node_update(
     if not data.get("target_version"):
         data["target_version"] = update_channel.current_branch()
     target_ref = data["target_version"]
+    # Коммит для сверки клона с зеркала панель узнаёт у GitHub только сама. Старая
+    # нода лишнее поле молча отбрасывает (модель запроса без extra="forbid")
+    data.pop("expected_commit", None)
+    expected_commit = await upstream_commit.resolve(target_ref)
+    if expected_commit:
+        data["expected_commit"] = expected_commit
     try:
         result = await proxy_request(server, "/api/system/update", method="POST", json_data=data)
     except HTTPException as exc:

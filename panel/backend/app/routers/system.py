@@ -21,12 +21,13 @@ from app.config import get_settings
 from app.database import get_db, async_session
 from app.models import Server, PanelSettings
 from app.security import is_direct_local_request
-from app.services import node_update_watcher, release_versions, update_channel
+from app.services import node_update_watcher, release_versions, update_channel, upstream_commit
 from app.services.haproxy_upgrade import describe_haproxy
 from app.services.net_utils import panel_ip_info
 from app.services.panel_host_metrics import HostHistoryPeriod, load_host_history
 from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.shutdown_hooks import run_shutdown_hooks
+from app.services.update_source import GIT_REF_PATTERN, render_clone_step
 from app.services.wildcard_ssl import USE_FOR_PANEL_SETTING
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -36,13 +37,6 @@ NODE_VERSIONS_CACHE_TTL_SEC = 30.0
 NODE_NIC_INFO_CACHE_TTL_SEC = 20.0
 OPTIMIZATIONS_CACHE_TTL_SEC = 60.0
 OPTIMIZATIONS_FAILED_CACHE_TTL_SEC = 5.0
-
-# Ссылка подставляется в текст shell-скрипта, который апдейтер исполняет в
-# privileged-контейнере с docker.sock — то есть это прямой путь к произвольной
-# команде на хосте панели. В наборе символов нет ни метасимвола shell, ни пробела;
-# ведущий символ алфавитно-цифровой, иначе ссылка сошла бы у git за опцию вида
-# --upload-pack=. Кавычки в самом скрипте — второй рубеж, не замена проверке.
-GIT_REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$"
 
 _node_versions_cache: dict[int, tuple[float, Optional[dict]]] = {}
 _node_versions_locks: dict[int, asyncio.Lock] = {}
@@ -91,6 +85,7 @@ async def get_panel_ip_endpoint(_: dict = Depends(verify_auth)):
 VERSION_FILE = Path("/app/VERSION")
 UPDATER_CONTAINER_NAME = "panel-updater"
 UPDATER_IMAGE = "docker:cli"
+UPDATER_CLONE_DIR = "/tmp/monitoring-fresh"
 
 
 # URL строится на каждый запрос: базовая ветка зависит от выбранного канала
@@ -367,6 +362,39 @@ async def get_single_node_version(
     return await _node_version_payload(server, await get_node_all_versions(server))
 
 
+def _panel_updater_script(ref_arg: str, expected_commit: Optional[str]) -> str:
+    """Скрипт контейнера-апдейтера: свежий клон и update.sh из него.
+
+    docker compose — плагин самого образа docker:cli: он ставится туда при сборке
+    образа со сверкой sha256, своя загрузка бинарника его бы только подменила.
+    """
+    clone_step = render_clone_step(ref_arg, UPDATER_CLONE_DIR, expected_commit)
+    return f"""#!/bin/sh
+set -e
+
+echo "[INFO] Installing dependencies..."
+apk add --no-cache git curl rsync bash gettext >/dev/null 2>&1
+
+if ! docker compose version >/dev/null 2>&1; then
+    echo "[ERROR] Docker Compose plugin is missing in the {UPDATER_IMAGE} image, refresh it: docker pull {UPDATER_IMAGE}"
+    exit 1
+fi
+
+echo "[INFO] Cloning repository..."
+TMP_CLONE={UPDATER_CLONE_DIR}
+{clone_step}
+
+echo "[INFO] Running update script..."
+chmod +x $TMP_CLONE/panel/update.sh
+bash $TMP_CLONE/panel/update.sh "{ref_arg}"
+
+echo "[INFO] Cleanup..."
+rm -rf $TMP_CLONE
+
+echo "[SUCCESS] Panel update completed!"
+"""
+
+
 async def run_panel_update_in_container(target_ref: str | None = None):
     """
     Run panel update in separate Docker container.
@@ -401,76 +429,9 @@ async def run_panel_update_in_container(target_ref: str | None = None):
         ref_arg = target_ref if target_ref else update_channel.current_branch()
         logger.info(f"Starting panel update to: {ref_arg}")
         
-        # Updater script:
-        # 1. Install dependencies
-        # 2. Detect country and select mirror
-        # 3. Clone fresh repo with fallback mirrors
-        # 4. Run update.sh from cloned repo
-        updater_script = f"""#!/bin/sh
-set -e
+        expected_commit = await upstream_commit.resolve(ref_arg)
+        updater_script = _panel_updater_script(ref_arg, expected_commit)
 
-echo "[INFO] Installing dependencies..."
-apk add --no-cache git curl rsync bash gettext >/dev/null 2>&1
-
-echo "[INFO] Installing Docker Compose..."
-mkdir -p /usr/local/lib/docker/cli-plugins
-COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
-COMPOSE_BIN="/usr/local/lib/docker/cli-plugins/docker-compose"
-COMPOSE_OK=0
-
-# Try GitHub first (30s timeout for large binary)
-echo "  Trying GitHub (30s timeout)..."
-if curl -fsSL --connect-timeout 10 --max-time 30 -o "$COMPOSE_BIN" "$COMPOSE_URL" 2>/dev/null && \
-   [ -f "$COMPOSE_BIN" ] && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version >/dev/null 2>&1; then
-    echo "  Docker Compose installed"
-    COMPOSE_OK=1
-else
-    # Try mirror with longer timeout
-    echo "  Trying mirror (ghfast.top)..."
-    rm -f "$COMPOSE_BIN" 2>/dev/null
-    if curl -fsSL --connect-timeout 10 --max-time 120 -o "$COMPOSE_BIN" "https://ghfast.top/$COMPOSE_URL" 2>/dev/null && \
-       [ -f "$COMPOSE_BIN" ] && chmod +x "$COMPOSE_BIN" && "$COMPOSE_BIN" version >/dev/null 2>&1; then
-        echo "  Docker Compose installed"
-        COMPOSE_OK=1
-    fi
-fi
-[ $COMPOSE_OK -eq 0 ] && echo "  WARNING: Docker Compose installation failed"
-
-echo "[INFO] Cloning repository..."
-
-# GitHub mirror
-GITHUB_MIRROR="https://ghfast.top"
-
-TMP_CLONE=/tmp/monitoring-fresh
-rm -rf $TMP_CLONE
-CLONE_SUCCESS=0
-
-echo "[INFO] Trying GitHub (30s timeout)..."
-if timeout 30 git clone --depth 1 --branch "{ref_arg}" "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
-    CLONE_SUCCESS=1
-else
-    rm -rf $TMP_CLONE
-    echo "[WARN] GitHub timeout/error, trying mirror (ghfast.top)..."
-    if timeout 120 git clone --depth 1 --branch "{ref_arg}" "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
-        CLONE_SUCCESS=1
-    fi
-fi
-
-if [ $CLONE_SUCCESS -eq 0 ]; then
-    echo "[ERROR] Failed to clone repository"
-    exit 1
-fi
-
-echo "[INFO] Running update script..."
-chmod +x $TMP_CLONE/panel/update.sh
-bash $TMP_CLONE/panel/update.sh "{ref_arg}"
-
-echo "[INFO] Cleanup..."
-rm -rf $TMP_CLONE
-
-echo "[SUCCESS] Panel update completed!"
-"""
-        
         container = await asyncio.to_thread(
             client.containers.run,
             image=UPDATER_IMAGE,
