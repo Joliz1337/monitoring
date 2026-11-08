@@ -11,7 +11,8 @@ upstream api_backend {
 
 # Публичный HTTPS с mTLS (порт ${NODE_API_PORT})
 # Без валидного клиентского сертификата, подписанного панельным CA,
-# nginx рвёт соединение ещё на TLS-handshake.
+# nginx рвёт соединение ещё на TLS-handshake; сертификат с чужим именем
+# (например, общий серверный сертификат ноды) получает 403.
 server {
     listen ${NODE_API_PORT} ssl;
     http2 on;
@@ -24,6 +25,13 @@ server {
     ssl_client_certificate /etc/nginx/ssl/ca.pem;
     ssl_verify_client      on;
     ssl_verify_depth       2;
+
+    # Подпись CA есть у любого выпущенного им сертификата, а панелью считается
+    # только клиент с CN=panel-client. Сверяется имя, не серийник: перевыпуск
+    # клиентского сертификата панели не должен отрезать ноды.
+    if ($ssl_client_s_dn !~ "(^|,)CN=panel-client(,|$)") {
+        return 403;
+    }
 
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
