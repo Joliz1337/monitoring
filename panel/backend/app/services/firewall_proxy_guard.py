@@ -15,6 +15,10 @@ from app.services.net_utils import host_to_ip
 
 NODE_API_DEFAULT_PORT = 9100
 ANY_SOURCE_NAMES = ("", "any", "anywhere")
+BROKEN_PROXY_MESSAGE = (
+    "Адрес прокси в настройках сервера не разобрать (ожидается ip:port или ip:port@login:pass) — "
+    "профиль на этот сервер не применён. Исправьте прокси сервера и повторите синхронизацию."
+)
 
 
 def node_api_port(server_url: str) -> int:
@@ -54,6 +58,8 @@ async def proxy_lockout_message(
     источниками без адреса прокси. Профиль вовсе без allow на порт API не трогаем —
     это отдельная, уже существующая проверка `node_port_allowed`.
     Прокси-хост, который не удалось привести к IP, считается не покрытым.
+    Битое значение прокси — отказ этому серверу, а не исключение: раскатка идёт
+    на все ноды разом, и одно такое значение не должно сорвать её остальным.
     """
     if not server.proxy_url or (default_incoming or "deny").lower() == "allow":
         return None
@@ -63,8 +69,11 @@ async def proxy_lockout_message(
     if not api_rules:
         return None
 
-    proxy_host = parse_proxy_input(server.proxy_url)[0]
-    proxy_ip = await host_to_ip(proxy_host)
+    try:
+        proxy_host = parse_proxy_input(server.proxy_url)[0]
+        proxy_ip = await host_to_ip(proxy_host)
+    except ValueError:
+        return BROKEN_PROXY_MESSAGE
     if any(_source_covers(r.get("from_ip"), proxy_ip) for r in api_rules):
         return None
 

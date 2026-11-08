@@ -16,7 +16,7 @@ from app.database import async_session_maker, get_db
 from app.models import FirewallProfile, FirewallSyncLog, Server
 from app.services.firewall_profile_sync import compute_rules_hash, sync_profile_to_servers
 from app.services.firewall_proxy_guard import NODE_API_DEFAULT_PORT
-from app.services.net_utils import resolve_panel_ip
+from app.services.net_utils import PanelIpSource, panel_ip_info
 
 logger = logging.getLogger(__name__)
 
@@ -123,9 +123,15 @@ DEFAULT_RULES: list[dict] = [
 
 
 async def build_default_rules() -> list[dict]:
-    """Правила нового профиля: API ноды открыт только адресу панели. Не удалось
-    определить адрес — правило остаётся «откуда угодно», чтобы не отрезать ноды."""
-    panel_ip = await resolve_panel_ip()
+    """Правила нового профиля: API ноды открыт только адресу панели.
+
+    Подставляется только адрес, который назвал внешний сервис, — его и видят ноды.
+    Адрес интерфейса за NAT и A-запись домена за Cloudflare могут оказаться чужими,
+    а такое правило при раскатке отрезало бы ноды от панели. Поэтому без ответа
+    сервиса правило остаётся «откуда угодно».
+    """
+    found = await panel_ip_info()
+    panel_ip = found.ip if found and found.source is PanelIpSource.EXTERNAL else None
     return [
         {**rule, "from_ip": panel_ip} if rule["port"] == NODE_API_PORT and panel_ip else dict(rule)
         for rule in DEFAULT_RULES

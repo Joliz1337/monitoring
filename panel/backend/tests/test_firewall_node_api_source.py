@@ -18,6 +18,7 @@ try:
     from app.routers import firewall_profiles  # noqa: E402
     from app.services import firewall_proxy_guard  # noqa: E402
     from app.services.firewall_proxy_guard import proxy_lockout_message  # noqa: E402
+    from app.services.net_utils import PanelIp, PanelIpSource  # noqa: E402
 except ImportError as e:  # рантайм панели не установлен
     raise unittest.SkipTest(f"firewall profiles require the panel runtime: {e}")
 
@@ -39,21 +40,27 @@ def server(proxy_url=None, url="https://198.51.100.50:9100") -> SimpleNamespace:
 
 
 class DefaultRulesTest(unittest.TestCase):
-    def test_api_rule_limited_to_panel_ip(self):
-        with mock.patch.object(firewall_profiles, "resolve_panel_ip", mock.AsyncMock(return_value=PANEL_IP)):
-            rules = run(firewall_profiles.build_default_rules())
-        by_port = {r["port"]: r for r in rules}
-        self.assertEqual(by_port[9100]["from_ip"], PANEL_IP)
-        self.assertIsNone(by_port[22]["from_ip"])
+    def build(self, found):
+        with mock.patch.object(firewall_profiles, "panel_ip_info", mock.AsyncMock(return_value=found)):
+            return {r["port"]: r for r in run(firewall_profiles.build_default_rules())}
+
+    def test_api_rule_limited_to_ip_seen_by_external_service(self):
+        rules = self.build(PanelIp(PANEL_IP, PanelIpSource.EXTERNAL))
+        self.assertEqual(rules[9100]["from_ip"], PANEL_IP)
+        self.assertIsNone(rules[22]["from_ip"])
+
+    def test_guessed_panel_ip_keeps_open_rule(self):
+        # Адрес интерфейса за NAT и A-запись домена за Cloudflare — не тот адрес,
+        # с которого панель приходит к нодам: правило с ним отрезало бы их
+        for source in (PanelIpSource.INTERFACE, PanelIpSource.DNS):
+            with self.subTest(source=source):
+                self.assertIsNone(self.build(PanelIp(PANEL_IP, source))[9100]["from_ip"])
 
     def test_unresolved_panel_ip_keeps_open_rule(self):
-        with mock.patch.object(firewall_profiles, "resolve_panel_ip", mock.AsyncMock(return_value=None)):
-            rules = run(firewall_profiles.build_default_rules())
-        self.assertIsNone({r["port"]: r for r in rules}[9100]["from_ip"])
+        self.assertIsNone(self.build(None)[9100]["from_ip"])
 
     def test_template_constant_untouched(self):
-        with mock.patch.object(firewall_profiles, "resolve_panel_ip", mock.AsyncMock(return_value=PANEL_IP)):
-            run(firewall_profiles.build_default_rules())
+        self.build(PanelIp(PANEL_IP, PanelIpSource.EXTERNAL))
         self.assertTrue(all(r["from_ip"] is None for r in firewall_profiles.DEFAULT_RULES))
 
 
@@ -101,6 +108,13 @@ class ProxyLockoutGuardTest(unittest.TestCase):
     def test_unresolved_hostname_counts_as_not_covered(self):
         with mock.patch.object(firewall_proxy_guard, "host_to_ip", mock.AsyncMock(return_value=None)):
             self.assertIsNotNone(self.check(server("proxy.example:1080"), [api_rule(PANEL_IP)]))
+
+    def test_broken_proxy_setting_refuses_only_this_server(self):
+        for proxy_url in ("proxy.example", "proxy.example:port@user:secret", ":1080", "a" * 64 + ".example:1080"):
+            with self.subTest(proxy_url=proxy_url):
+                message = self.check(server(proxy_url), [api_rule(PANEL_IP)])
+                self.assertIn("прокси", message)
+                self.assertNotIn("secret", message)
 
 
 if __name__ == "__main__":
