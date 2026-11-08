@@ -300,7 +300,7 @@ class BlocklistManager:
         поэтому управляющий трафик не попадёт под DROP даже при плохом блок-листе."""
         async with async_session() as db:
             servers = (await db.execute(
-                select(Server.id, Server.url, Server.folder, Server.last_metrics)
+                select(Server.id, Server.url, Server.folder, Server.last_metrics, Server.dedicated_cert)
                 .where(Server.is_active == True)  # noqa: E712
             )).all()
             manual = {
@@ -310,7 +310,7 @@ class BlocklistManager:
             ping_scope = await load_scope(db)
 
         # Резолв — после закрытия сессии: медленный DNS не держит коннект пула
-        auto = await collect_node_ips((row.url, row.last_metrics) for row in servers)
+        auto = await collect_node_ips((row.url, row.last_metrics, row.dedicated_cert) for row in servers)
         panel_ip = await resolve_panel_ip()
         if panel_ip:
             auto.add(panel_ip)

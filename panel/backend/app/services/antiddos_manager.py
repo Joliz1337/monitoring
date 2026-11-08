@@ -95,7 +95,7 @@ class AntiDdosManager:
         """Auto (all node addresses + panel IP + DDoS-Guard GRE endpoints and health
         networks) + manual (user CIDRs) + auto-source lists."""
         servers = (await db.execute(
-            select(Server.url, Server.last_metrics).where(Server.is_active == True)  # noqa: E712
+            select(Server.url, Server.last_metrics, Server.dedicated_cert).where(Server.is_active == True)  # noqa: E712
         )).all()
         ips = await collect_node_ips(servers)
 
