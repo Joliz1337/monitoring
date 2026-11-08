@@ -159,12 +159,25 @@ configure_xps() {
     done
 }
 
+# Vector names in /proc/interrupts are fixed when the driver opens the device.
+# After a rename while UP (netplan set-name: eno1 -> eth0) they still read
+# "eno1-TxRx-N", and a grep by the current name finds only the misc vector.
+# A PCI NIC lists its vectors in msi_irqs regardless of the name; virtio has no
+# such directory next to the interface and keeps the lookup by name.
+nic_irqs() {
+    local iface=$1 irqs=""
+    local msi_dir="/sys/class/net/$iface/device/msi_irqs"
+    [ -d "$msi_dir" ] && irqs=$(ls "$msi_dir" 2>/dev/null | sort -n)
+    [ -z "$irqs" ] && irqs=$(grep "$iface" /proc/interrupts 2>/dev/null | awk -F: '{print $1}' | tr -d ' ')
+    echo "$irqs"
+}
+
 configure_irq_affinity() {
     local iface=$1
     pgrep -x irqbalance &>/dev/null && return 0
 
     local irqs
-    irqs=$(grep "$iface" /proc/interrupts 2>/dev/null | awk -F: '{print $1}' | tr -d ' ')
+    irqs=$(nic_irqs "$iface")
     [ -z "$irqs" ] && return 0
 
     local cpu_count

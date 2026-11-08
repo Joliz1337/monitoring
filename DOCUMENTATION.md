@@ -69,7 +69,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 
 На ряде хостеров (OVH и аналогичных с port-security на свитчах) `ethtool -G` (resize ring buffers) на интерфейсах `igb`/`ixgbe`/`i40e` вызывает hard link reset, что может лишить доступа к серверу. По этой причине `ethtool -G` в tune-скриптах не используется.
 
-**Системный тюнинг — универсальный рендерер (`configs/tune-sysctl.sh`, `configs/VERSION` 5.9.0):**
+**Системный тюнинг — универсальный рендерер (`configs/tune-sysctl.sh`, `configs/VERSION` 5.9.1):**
 
 Единственный владелец всех производных чисел — `configs/tune-sysctl.sh`: он читает MemTotal/nproc/MTU/скорость линка самого хоста и пересчитывает conntrack, буферы, лимиты дескрипторов и HAProxy `maxconn` при каждом применении. Плоские константы, одинаковые для сервера на 4 ГБ и на 248 ГБ, были бы на маленьких хостах OOM-вектором (`nf_conntrack_max=2097152` ≈ 670 МБ одной только таблицы), а на больших — недокрутом (`fs.nr_open=524288` ломал бы контейнеры с бо́льшим `ulimits`).
 
@@ -87,7 +87,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/in
 - `configs/profiles/common.base.conf`, `vpn.base.conf`, `panel.base.conf`, `limits.tmpl`, `systemd-limits.tmpl` — входные файлы рендерера
 - `configs/tests/render-matrix.sh` — 252 комбинации (9 размеров RAM × 7 CPU × 2 профиля × 2 page size), 301 проверка инвариантов (включая резервацию портов и полы эфемерного диапазона по профилям); прав root и VM не требует — факты хоста подменяются через `MON_FACT_*`, выходы пишутся в `MON_RENDER_ROOT`
 - `configs/network-tune.sh` — программный RPS/RFS: `rps_cpus`/`rps_flow_cnt` на всех очередях (`rps_flow_cnt` — обязательно степень двойки через `pow2_floor()`, иначе ядро молча отклоняет RFS); `configure_conntrack()` только грузит модуль и поднимает hashsize из `tuning-facts.env`, если он там выше текущего — сами sysctl-значения задаёт рендерер; `configure_gro_batching()` на интерфейсах с одной RX-очередью включает `napi_defer_hard_irqs`/`gro_flush_timeout` (50 мкс) — даёт GRO собрать несколько пакетов в один skb, чтобы через единственное кольцо и стек проходило меньше буферов; на многоочередных картах и ядре < 5.10 не применяется
-- `configs/multiqueue-tune.sh` — аппаратный multiqueue: `ethtool -L combined N` (или `-L rx N tx N` для карт без combined-каналов), XPS, IRQ affinity; ring buffer resize (`ethtool -G`) не используется
+- `configs/multiqueue-tune.sh` — аппаратный multiqueue: `ethtool -L combined N` (или `-L rx N tx N` для карт без combined-каналов), XPS, IRQ affinity (вектор N → ядро N по порядку номеров, при живом `irqbalance` не трогается); ring buffer resize (`ethtool -G`) не используется
+- Векторы прерываний карты все три tune-скрипта (`nic_irqs()`) берут из `/sys/class/net/<if>/device/msi_irqs` — списка MSI-векторов самого PCI-устройства, а не по имени в `/proc/interrupts`: имя вектора фиксируется, когда драйвер открывает карту, и после переименования на лету (netplan `set-name`, `eno1 → eth0`) там остаётся `eno1-TxRx-N` — поиск по текущему имени находил бы только служебный вектор, а очереди оставались бы на ядрах «своего» NUMA-узла. У virtio каталога рядом с интерфейсом нет, и у карт без MSI он пуст — там поиск по имени
 - `configs/hybrid-tune.sh` — гибридный режим: аппаратные очереди на часть ядер + RPS на остальные
 - `configs/*-tune.service` — systemd-юниты, у каждого `ExecStartPre=-.../tune-sysctl.sh render`
 
