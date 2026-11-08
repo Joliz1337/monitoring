@@ -36,10 +36,12 @@ LOG_BUFFER_LIMIT = 5000
 SSH_CONNECT_ATTEMPTS = 3
 SSH_CONNECT_RETRY_DELAY = 10
 # docker-compose.yml на диске ноды любой версии: у текущей агент слушает локальный
-# сокет, у старой — 127.0.0.1:7500
+# сокет, у старой — 127.0.0.1:7500. Потолок на пробу: агент, принявший соединение
+# и замолчавший, иначе держал бы цикл ожидания вечно
+AGENT_PROBE_TIMEOUT_SEC = 3
 AGENT_HEALTH_PROBE = (
-    "{ curl -sf --unix-socket /run/monitoring-node/api.sock http://localhost/health"
-    " || curl -sf http://127.0.0.1:7500/health; } >/dev/null 2>&1"
+    f"{{ curl -sf --max-time {AGENT_PROBE_TIMEOUT_SEC} --unix-socket /run/monitoring-node/api.sock http://localhost/health"
+    f" || curl -sf --max-time {AGENT_PROBE_TIMEOUT_SEC} http://127.0.0.1:7500/health; }} >/dev/null 2>&1"
 )
 
 

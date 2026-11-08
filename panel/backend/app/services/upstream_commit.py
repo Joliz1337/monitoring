@@ -25,6 +25,9 @@ GITHUB_API = "https://api.github.com"
 # Ответом будет голый SHA вместо JSON коммита
 SHA_MEDIA_TYPE = "application/vnd.github.sha"
 GITHUB_TIMEOUT_SEC = 10.0
+# Таймаут httpx — на каждую фазу запроса, а не на весь: ответ, капающий по байту,
+# держал бы общий лок, а за ним — всю волну обновлений
+GITHUB_TOTAL_TIMEOUT_SEC = 15.0
 # «Обновить всё» запускает обновления всех нод разом, а без токена GitHub API
 # даёт 60 запросов в час на IP — один ответ на всю волну. Дольше держать нельзя:
 # после пуша клон с зеркала разошёлся бы со старым SHA и обновление отменилось бы
@@ -48,10 +51,13 @@ def _is_plain_ref(ref: object) -> bool:
 async def _fetch_commit(ref: str) -> Optional[str]:
     url = f"{GITHUB_API}/repos/{GITHUB_REPO}/commits/{quote(ref, safe='/')}"
     try:
-        response = await get_external_client().get(
-            url, headers={"Accept": SHA_MEDIA_TYPE}, timeout=GITHUB_TIMEOUT_SEC,
+        response = await asyncio.wait_for(
+            get_external_client().get(
+                url, headers={"Accept": SHA_MEDIA_TYPE}, timeout=GITHUB_TIMEOUT_SEC,
+            ),
+            GITHUB_TOTAL_TIMEOUT_SEC,
         )
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, TimeoutError) as e:
         logger.warning("upstream_commit_fetch_failed ref=%s error=%r", ref, e)
         return None
     if response.status_code != 200:

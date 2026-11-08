@@ -11,6 +11,7 @@
 import asyncio
 import os
 import sys
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -31,15 +32,16 @@ OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
 
 
 class FakeGitHub:
-    def __init__(self, status=200, text=SHA, error=None):
+    def __init__(self, status=200, text=SHA, error=None, delay=0.0):
         self.status = status
         self.text = text
         self.error = error
+        self.delay = delay
         self.calls: list[tuple[str, dict]] = []
 
     async def get(self, url, **kwargs):
         self.calls.append((url, kwargs))
-        await asyncio.sleep(0)
+        await asyncio.sleep(self.delay)
         if self.error:
             raise self.error
         return SimpleNamespace(status_code=self.status, text=self.text)
@@ -101,6 +103,26 @@ class FetchTests(ResolveTestCase):
             with self.subTest(ref=ref):
                 self.assertIsNone(self.resolve(ref))
         self.assertEqual(self.github.calls, [])
+
+
+class DeadlineTests(unittest.TestCase):
+    """Своя установка без подмены часов: на замороженных часах asyncio таймер не сработает."""
+
+    def test_hung_github_gives_no_commit_within_total_deadline(self):
+        # Таймаут httpx — на каждую фазу запроса: GitHub, отдающий ответ по байту,
+        # держал бы общий лок, а за ним и всю волну обновлений
+        github = FakeGitHub(delay=30)
+        upstream_commit._cache.clear()
+        self.addCleanup(upstream_commit._cache.clear)
+        with (
+            patch.object(upstream_commit, "get_external_client", lambda: github),
+            patch.object(upstream_commit, "_lock", asyncio.Lock()),
+            patch.object(upstream_commit, "GITHUB_TOTAL_TIMEOUT_SEC", 0.05),
+        ):
+            started = time.perf_counter()
+            commit = asyncio.run(upstream_commit.resolve("dev"))
+        self.assertIsNone(commit)
+        self.assertLess(time.perf_counter() - started, 5)
 
 
 class CacheTests(ResolveTestCase):

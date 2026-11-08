@@ -762,9 +762,11 @@ CONTAINERS_STOPPED=0
 log_info "Waiting for API..."
 MAX_ATTEMPTS=30
 ATTEMPT=0
+# Агент, принявший соединение и замолчавший, без потолка повесил бы обновление
+HEALTH_PROBE_TIMEOUT=3
 
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    if curl -sf --unix-socket "$AGENT_SOCKET" http://localhost/health > /dev/null 2>&1; then
+    if curl -sf --max-time "$HEALTH_PROBE_TIMEOUT" --unix-socket "$AGENT_SOCKET" http://localhost/health > /dev/null 2>&1; then
         log_success "API is healthy"
         break
     fi

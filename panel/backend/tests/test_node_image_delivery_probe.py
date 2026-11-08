@@ -16,8 +16,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services import node_image_delivery as module  # noqa: E402
 
-SOCKET_PROBE = "curl -sf --unix-socket /run/monitoring-node/api.sock http://localhost/health"
-TCP_PROBE = "curl -sf http://127.0.0.1:7500/health"
+# --max-time: агент, принявший соединение и замолчавший, иначе держал бы пробу вечно
+SOCKET_PROBE = "curl -sf --max-time 3 --unix-socket /run/monitoring-node/api.sock http://localhost/health"
+TCP_PROBE = "curl -sf --max-time 3 http://127.0.0.1:7500/health"
 CURL_REFUSED = 7
 FAKE_CURL = """#!/bin/sh
 printf '%s\\n' "$*" >> "$CURL_LOG"

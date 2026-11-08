@@ -111,11 +111,17 @@ class HostScriptsProbeTest(unittest.TestCase):
     def assert_probes_socket(self, script: Path):
         text = script.read_text(encoding="utf-8")
         self.assertIn(f'AGENT_SOCKET="{SOCKET}"', text)
-        self.assertRegex(text, r'curl -sf --unix-socket "\$AGENT_SOCKET" "?http://localhost')
+        self.assertRegex(text, r'curl -sf (--max-time \S+ )?--unix-socket "\$AGENT_SOCKET" "?http://localhost')
         self.assertNotIn(LEGACY_PORT, text)
 
     def test_apply_update_waits_on_socket(self):
         self.assert_probes_socket(APPLY_UPDATE)
+
+    def test_apply_update_probe_has_deadline(self):
+        # Агент, принявший соединение и замолчавший, повесил бы обновление
+        # навсегда: у curl без --max-time своего потолка нет
+        text = APPLY_UPDATE.read_text(encoding="utf-8")
+        self.assertRegex(text, r'curl -sf --max-time \S+ --unix-socket "\$AGENT_SOCKET"')
 
     def test_deploy_checks_on_socket(self):
         self.assert_probes_socket(DEPLOY)
