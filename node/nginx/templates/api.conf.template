@@ -2,8 +2,11 @@
 # ${NODE_API_PORT} из окружения контейнера (compose берёт его из .env ноды,
 # дефолт 9100) и кладёт результат в /etc/nginx/conf.d/api.conf. Переменные
 # nginx ($host, $remote_addr...) не трогаются — заменяются только заданные env.
+# Агент слушает только локальный сокет (command сервиса api в docker-compose.yml).
+# Запасного TCP-адреса нет: пока агент перезапускается, запросы панели ушли бы
+# тому, кто займёт свободный порт на петле.
 upstream api_backend {
-    server 127.0.0.1:7500;
+    server unix:/run/monitoring-node/api.sock;
     keepalive 64;
     keepalive_requests 1000;
     keepalive_timeout 75s;

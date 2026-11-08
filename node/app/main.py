@@ -1,7 +1,8 @@
 """Server Monitoring Agent API — Main Application
 
 Nginx на порту 9100 требует клиентский сертификат (mTLS), подписанный панельным CA.
-Uvicorn слушает только 127.0.0.1:7500 и доверяет прошедшим mTLS запросам от nginx.
+Uvicorn слушает только локальный сокет /run/monitoring-node/api.sock (docker-compose.yml)
+и доверяет прошедшим mTLS запросам от nginx.
 """
 
 import asyncio

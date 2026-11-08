@@ -1,9 +1,9 @@
 """Доставка образа ноды с панели на заблокированную ноду по SSH.
 
-Один SSH-сеанс: SFTP-заливка gzip-tar образа → docker load → запуск update.sh
-(код едет git-clone'ом с зеркалом, pull промахивается мимо GHCR, а
-compose_images_present поднимает уже загруженный локальный образ). Не зависит от
-mTLS — работает даже когда агент ноды лежит.
+Один SSH-сеанс: SFTP-заливка gzip-tar образа → docker load → `docker compose up -d`
+на загруженном образе. update.sh не запускается и код на диске ноды не меняется:
+нода поднимается со своим docker-compose.yml, какой бы версии он ни был. Не зависит
+от mTLS — работает даже когда агент ноды лежит.
 
 Доставка идёт фоновой задачей, не привязанной к HTTP: заливка ~200 МБ по 6 Мбит
 длится минуты, обрыв вкладки её не прерывает; лог стримится подписчикам и
@@ -35,6 +35,12 @@ LOG_BUFFER_LIMIT = 5000
 # Подключение к серверу за ТСПУ срывается через раз — повторный запуск обычно проходит
 SSH_CONNECT_ATTEMPTS = 3
 SSH_CONNECT_RETRY_DELAY = 10
+# docker-compose.yml на диске ноды любой версии: у текущей агент слушает локальный
+# сокет, у старой — 127.0.0.1:7500
+AGENT_HEALTH_PROBE = (
+    "{ curl -sf --unix-socket /run/monitoring-node/api.sock http://localhost/health"
+    " || curl -sf http://127.0.0.1:7500/health; } >/dev/null 2>&1"
+)
 
 
 def _error_text(exc: BaseException) -> str:
@@ -72,6 +78,19 @@ async def _run_streamed(conn, command: str, timeout: int) -> AsyncIterator[dict]
         yield {"type": "log", "line": line.rstrip("\n")}
     await process.wait()
     yield {"type": "exit", "code": process.returncode if process.returncode is not None else 1}
+
+
+def _start_command(tag: str) -> str:
+    """Поднять ноду на доставленном образе. Тег в .env приводится к доставленному,
+    иначе compose полез бы в реестр."""
+    return (
+        "cd /opt/monitoring-node && "
+        f"{{ grep -q '^MON_IMAGE_TAG=' .env && sed -i 's|^MON_IMAGE_TAG=.*|MON_IMAGE_TAG={tag}|' .env "
+        f"|| echo 'MON_IMAGE_TAG={tag}' >> .env; }} && "
+        "docker compose up -d && "
+        f"for i in $(seq 1 30); do {AGENT_HEALTH_PROBE} && break; sleep 2; done; "
+        "echo '[node] нода поднята на доставленном образе'"
+    )
 
 
 async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
@@ -141,19 +160,10 @@ async def deliver_image(target: SSHTarget, tag: str) -> AsyncIterator[dict]:
                 else:
                     yield ev
 
-            # Никаких скачиваний с ноды: образ уже загружен, просто поднимаем её на
-            # нём. Тег в .env приводим к доставленному, иначе compose полез бы в реестр.
+            # Никаких скачиваний с ноды: образ уже загружен, просто поднимаем её на нём
             yield {"type": "step", "step": "start"}
             yield {"type": "log", "line": "[panel] Поднимаю ноду на доставленном образе (без скачивания)…"}
-            apply_cmd = (
-                "cd /opt/monitoring-node && "
-                f"{{ grep -q '^MON_IMAGE_TAG=' .env && sed -i 's|^MON_IMAGE_TAG=.*|MON_IMAGE_TAG={tag}|' .env "
-                f"|| echo 'MON_IMAGE_TAG={tag}' >> .env; }} && "
-                "docker compose up -d && "
-                "for i in $(seq 1 30); do curl -sf http://localhost:7500/health >/dev/null 2>&1 && break; sleep 2; done; "
-                "echo '[node] нода поднята на доставленном образе'"
-            )
-            async for ev in _run_streamed(conn, apply_cmd, UPDATE_TIMEOUT):
+            async for ev in _run_streamed(conn, _start_command(tag), UPDATE_TIMEOUT):
                 if ev["type"] == "exit":
                     if ev["code"] != 0:
                         yield {"type": "error", "message": f"Не удалось поднять ноду на образе (код {ev['code']})"}

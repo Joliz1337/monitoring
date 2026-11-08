@@ -187,6 +187,9 @@ DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-1800}"
 DOCKER_PULL_RETRIES=3
 DOCKER_PULL_RETRY_DELAY=15
 
+# Агент слушает только локальный сокет (command сервиса api в docker-compose.yml)
+AGENT_SOCKET="/run/monitoring-node/api.sock"
+
 # Arguments
 TMP_DIR="$1"
 NODE_DIR="$2"
@@ -744,14 +747,6 @@ log_info "Restarting containers on new version..."
 docker compose down --timeout 30 || true
 CONTAINERS_STOPPED=1
 
-# Wait for port 7500 to be released
-for i in {1..15}; do
-    if ! ss -tlnp 2>/dev/null | grep -q ':7500 '; then
-        break
-    fi
-    sleep 1
-done
-
 # up -d ждёт healthy у api (depends_on) и при медленном старте может выйти с
 # ошибкой, оставив nginx в статусе Created — тогда поднимаем контейнеры напрямую
 if ! spin "Starting containers" docker compose up -d; then
@@ -769,7 +764,7 @@ MAX_ATTEMPTS=30
 ATTEMPT=0
 
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    if curl -sf "http://localhost:7500/health" > /dev/null 2>&1; then
+    if curl -sf --unix-socket "$AGENT_SOCKET" http://localhost/health > /dev/null 2>&1; then
         log_success "API is healthy"
         break
     fi

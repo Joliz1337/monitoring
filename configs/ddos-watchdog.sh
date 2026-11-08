@@ -48,7 +48,8 @@ NEWBURST=240                # burst for the rate limiter
 HL_MAX=262144               # hashlimit hash table size
 HASHLIMIT_SRCMASK=32        # 24 helps against a /24 botnet, hurts CGNAT
 NODE_API_PORT_DEFAULT=9100  # nginx mTLS; let in by the whitelist only, no ACCEPT of its own
-AGENT_LOOPBACK_PORT=7500    # uvicorn agent; ACCEPTed from loopback only
+AGENT_SOCKET=/run/monitoring-node/api.sock  # агент ноды текущей версии
+AGENT_LOOPBACK_PORT=7500    # агент нод старых версий; ACCEPT только с петли
 LOOPBACK_NET="127.0.0.0/8"
 
 # detection thresholds (conservative — must not fire on a legit evening peak)
@@ -408,12 +409,19 @@ clear_rules() {
     ipt -F "$CHAIN"
 }
 
+# Сторож панель берёт с GitHub своего канала, а версия ноды может быть любой:
+# агент текущей ноды слушает сокет, старой — порт на петле.
+agent_healthy() {
+    curl -sf --max-time 3 --unix-socket "$AGENT_SOCKET" http://localhost/health >/dev/null 2>&1 \
+        || curl -sf --max-time 3 "http://127.0.0.1:$AGENT_LOOPBACK_PORT/health" >/dev/null 2>&1
+}
+
 # Emergency mode inserts a chain at INPUT position 1. If a rule bug there ever
 # cuts the box off, nobody can log in to fix it — so the loop proves the node is
 # still reachable on its own API and tears the chain down after
 # SELF_CONFIRM_FAILS consecutive failures. Cheap, no new units, self-healing.
 self_confirm_ok() {
-    curl -sf --max-time 3 http://127.0.0.1:7500/health >/dev/null 2>&1 && return 0
+    agent_healthy && return 0
     # Fall back to "is any SSH session still established" — on a node where the
     # API is legitimately down we must not tear down protection for that alone.
     local p
@@ -869,11 +877,18 @@ case "${1:-loop}" in
         audit_never_drop "$dry_rules" ;;
     audit-rules)     audit_never_drop "$(cat)" ;;
     self-test)       do_self_test ;;
+    self-check)
+        if self_confirm_ok; then
+            echo "self-check: OK  node reachable (agent /health or live SSH session)"
+        else
+            echo "self-check: FAIL  agent /health unreachable and no live SSH session"
+            exit 1
+        fi ;;
     version)         echo "$WATCHDOG_VERSION" ;;
     status)
         ensure_dirs; read_state
         r=$(printf '%s' "$REASON" | tr -d '"\\')
         printf '{"mode":"%s","source":"%s","since":%s,"reason":"%s","watchdog":"%s","version":"%s"}\n' \
             "$MODE" "$SOURCE" "${SINCE:-0}" "$r" "$WATCHDOG" "$WATCHDOG_VERSION" ;;
-    *)               echo "usage: $0 {loop|enable-manual|disable-manual|watchdog-on|watchdog-off|apply|clear|selfheal|whitelist-sync|detect-ports|dry-run|audit-rules|self-test|version|status}" >&2; exit 1 ;;
+    *)               echo "usage: $0 {loop|enable-manual|disable-manual|watchdog-on|watchdog-off|apply|clear|selfheal|whitelist-sync|detect-ports|dry-run|audit-rules|self-test|self-check|version|status}" >&2; exit 1 ;;
 esac
