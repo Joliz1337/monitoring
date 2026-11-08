@@ -45,7 +45,7 @@
 2. На сервере запустите установщик в блок-режиме — он поставит Docker, файлы, сертификаты и `.env`, а на образе быстро остановится, не вися на скачивании:
 
    ```
-   MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+   MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 MON_EXPECTED_COMMIT=<SHA> bash <(curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
    ```
 
    `MON_BRANCH` **и** ветка в URL должны совпадать с вашим каналом обновлений: `main` — стабильный, `dev` — dev. Для dev-канала замените `main` на `dev` в обоих местах. `MON_BRANCH` важен: он задаёт, из какой ветки установщик берёт код ноды.
@@ -54,10 +54,10 @@
 
 Та же команда с блок-режимом чинит ноду со старым или отсутствующим `.env`: установщик перезапишет конфиг и сертификаты, дальше — доставка образа. Порядок такой, потому что на голом сервере сначала нужен установщик (Docker, сертификаты, `.env`), и только потом образ.
 
-Код ноды установщик тянет с GitHub, а если тот недоступен — автоматически с зеркала (`ghfast.top`). Если заблокирован и сам адрес установщика, запустите его через зеркало, дописав `https://ghfast.top/` перед `https://raw...`:
+Код ноды установщик тянет с GitHub. Зеркало (`ghfast.top`) он берёт, только если знает, какой коммит должен получить: при автоустановке панель передаёт его сама, вручную допишите `MON_EXPECTED_COMMIT=<SHA>` — последний коммит ветки (`main` или `dev`), его видно на GitHub или командой `git ls-remote https://github.com/Joliz1337/monitoring.git main` с машины, где GitHub открыт. Если заблокирован и сам адрес установщика, запустите его через зеркало, дописав `https://ghfast.top/` перед `https://raw...` (сам установщик при этом не проверяется — надёжнее «Качать всё через панель»):
 
 ```
-MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 MON_EXPECTED_COMMIT=<SHA> bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
 ```
 
 ## Что нода отдаёт панели
