@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.13.0"
+RUNNER_VERSION="2.14.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -186,8 +186,20 @@ kill_stale_cores() {
     done < <(ps -eo pid=,etimes=,args= 2>/dev/null)
 }
 
+# Ссылку на ядро панель строит как https://<хост>[:порт]/api/xray-test/bundle/<токен>;
+# проверка отсекает чужие схемы, userinfo, query и пути мимо /bundle/. От
+# подмены задания защищает порядок строк в main, а не эта проверка.
+CORE_NAME_RE='^(xray|sing-box)$'
+CORE_VERSION_RE='^[0-9][0-9A-Za-z.-]*$'
+CORE_SHA_RE='^[0-9a-f]{64}$'
+CORE_URL_RE='^https://[][A-Za-z0-9.:_-]+(/[A-Za-z0-9._~%-]+)*/bundle/[A-Za-z0-9._~%-]+$'
+
 ensure_core() {
     local name="$1" version="$2" url="$3" want_sha="$4"
+    [[ "$name" =~ $CORE_NAME_RE ]] || return 1
+    [[ "$version" =~ $CORE_VERSION_RE ]] || return 1
+    [[ "$want_sha" =~ $CORE_SHA_RE ]] || return 1
+    [[ "$url" =~ $CORE_URL_RE ]] || return 1
     local path="$CORES_DIR/${name}-${version}"
 
     if [ -x "$path" ] && [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$want_sha" ]; then
@@ -647,13 +659,25 @@ run_cell() {
         "$J_SPEED_SERVER"
 }
 
+# Адрес и SNI приходят в base64, чтобы ни одно значение из ссылки не могло
+# вмешаться в разбор строк задания. Управляющий символ в результате — отказ:
+# он разорвал бы строку проверки на поля заново.
+DECODED=""
+decode_b64_field() {
+    DECODED=""
+    [ -n "$1" ] || return 0
+    DECODED=$(printf '%s' "$1" | base64 -d 2>/dev/null) || return 1
+    [[ "$DECODED" != *[[:cntrl:]]* ]]
+}
+
 main() {
     [ "${1:-}" = "version" ] && { printf '%s
 ' "$RUNNER_VERSION"; return 0; }
     [ -n "${1:-}" ] || { log "нет полезной нагрузки"; return 2; }
 
     kill_stale_cores
-    declare -A CORE_PATHS=()
+    declare -A CORE_PATHS=() CORE_SEEN=()
+    local cells_seen=0
     OPT_TCP=1; OPT_HTTP=1; OPT_EXIT=1; OPT_SPEED=0
     local batch_core="" batch_conf="" ports=""
     local cells=()
@@ -664,6 +688,22 @@ main() {
     while IFS=$'	' read -r kind a b c d e f g; do
         case "$kind" in
             CORE)
+                # Ядро задаётся только в начале задания и один раз на имя:
+                # строка, пришедшая после проверок или повторно, не должна
+                # подменять уже принятый бинарник
+                if [ "$cells_seen" = 1 ]; then
+                    log "строка CORE после проверок проигнорирована"
+                    continue
+                fi
+                if [[ ! "$a" =~ $CORE_NAME_RE ]]; then
+                    log "неизвестное ядро в строке CORE проигнорировано"
+                    continue
+                fi
+                if [ -n "${CORE_SEEN[$a]:-}" ]; then
+                    log "повторная строка CORE $a проигнорирована"
+                    continue
+                fi
+                CORE_SEEN[$a]=1
                 local path
                 if path=$(ensure_core "$a" "$b" "$c" "$d"); then
                     CORE_PATHS[$a]="$path"
@@ -696,7 +736,22 @@ main() {
                 FWD_TEMPLATE[$a]="$c"
                 ;;
             CELL)
+                cells_seen=1
                 cells+=("$a"$'	'"$b"$'	'"$c"$'	'"$d"$'	'"$e"$'	'"$f"$'	'"$g")
+                ports="$ports $f"
+                ;;
+            CELL64)
+                cells_seen=1
+                local address="" sni=""
+                if decode_b64_field "$c" && [ -n "$DECODED" ]; then
+                    address=$DECODED
+                    decode_b64_field "$g" && sni=$DECODED || address=""
+                fi
+                if [ -z "$address" ]; then
+                    emit_cell "$a" "fail" '"INTERNAL"' "адрес или SNI проверки не разобрать"
+                    continue
+                fi
+                cells+=("$a"$'	'"$b"$'	'"$address"$'	'"$d"$'	'"$e"$'	'"$f"$'	'"$sni")
                 ports="$ports $f"
                 ;;
         esac
