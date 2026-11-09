@@ -106,6 +106,7 @@ class BalancerOptionsData(BaseModel):
     allbackups: bool = False
     fullconn: Optional[int] = None
     timeout_queue: Optional[str] = None
+    load_weights: bool = False
 
 
 class ServerAddressesUpdate(BaseModel):
@@ -752,6 +753,7 @@ def _serialize_balancer_options(opts: BalancerOptions) -> dict:
         "retries": opts.retries, "redispatch": opts.redispatch,
         "allbackups": opts.allbackups,
         "fullconn": opts.fullconn, "timeout_queue": opts.timeout_queue,
+        "load_weights": opts.load_weights,
     }
 
 

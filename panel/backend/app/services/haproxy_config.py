@@ -17,6 +17,13 @@ VALID_ALGORITHMS = (
     "url_param", "hdr", "random", "first", "rdp-cookie",
 )
 
+# Вес на лету меняют только динамические алгоритмы: static-rr после старта принимает
+# лишь 0 и 100%, а у hash-алгоритмов смена веса перекидывает уже распределённых клиентов
+DYNAMIC_ALGORITHMS = frozenset({"roundrobin", "leastconn", "random"})
+
+LOAD_WEIGHTS_MARKER = "# load-weights"
+_LOAD_WEIGHTS_LINE = re.compile(rf"^\s*{LOAD_WEIGHTS_MARKER}\s*$", re.MULTILINE)
+
 # Символы, которые HAProxy допускает в имени сервера; пробел разорвал бы строку `server`
 _SERVER_NAME = re.compile(r"^[a-zA-Z0-9_.:-]+$")
 
@@ -44,7 +51,7 @@ _FORM_OWNED_LINE = re.compile(
     r"|retries|fullconn|timeout\s+queue|http-check\s+expect"
     r"|option\s+(tcp-check|httpchk|redispatch|allbackups)"
     rf"|acl\s+{SNI_FILTER_ACL}|tcp-request\s+content\s+silent-drop\s+unless\s+{SNI_FILTER_ACL}"
-    r"|# sni-filter)(\s|$)"
+    rf"|# sni-filter|{LOAD_WEIGHTS_MARKER})(\s|$)"
 )
 
 
@@ -128,8 +135,12 @@ def _section_span(lines: list[str], kind: str, name: str) -> Optional[tuple[int,
     return None
 
 
+def rule_backend_name(rule: "HAProxyRule") -> str:
+    return f"backend_{rule.rule_type}_{rule.name}"
+
+
 def _rule_section_names(rule: "HAProxyRule") -> tuple[tuple[str, str], tuple[str, str]]:
-    return ("frontend", f"{rule.rule_type}_{rule.name}"), ("backend", f"backend_{rule.rule_type}_{rule.name}")
+    return ("frontend", f"{rule.rule_type}_{rule.name}"), ("backend", rule_backend_name(rule))
 
 
 def _position_after(lines: list[str], stripped: str) -> int:
@@ -220,6 +231,8 @@ class BalancerOptions:
     allbackups: bool = False
     fullconn: Optional[int] = None
     timeout_queue: Optional[str] = None
+
+    load_weights: bool = False
 
 
 @dataclass
@@ -419,6 +432,9 @@ frontend {frontend_name}
             lines.append(f"    balance {alg}({opts.algorithm_param})")
         else:
             lines.append(f"    balance {alg}")
+
+        if opts.load_weights:
+            lines.append(f"    {LOAD_WEIGHTS_MARKER}")
 
         if opts.hash_type and alg in ("source", "uri", "url_param", "hdr"):
             lines.append(f"    hash-type {opts.hash_type}")
@@ -626,6 +642,8 @@ backend {backend_name}
                 alg = opts.algorithm or "roundrobin"
                 if alg not in VALID_ALGORITHMS:
                     return False, f"Invalid balance algorithm: {alg}"
+                if opts.load_weights and alg not in DYNAMIC_ALGORITHMS:
+                    return False, "Load-based weights need roundrobin, leastconn or random"
         else:
             if not 1 <= rule.target_port <= 65535:
                 return False, "Invalid target port (1-65535)"
@@ -693,6 +711,8 @@ backend {backend_name}
         if bal_m:
             opts.algorithm = bal_m.group(1)
             opts.algorithm_param = bal_m.group(2)
+
+        opts.load_weights = bool(_LOAD_WEIGHTS_LINE.search(block))
 
         ht_m = re.search(r'hash-type\s+(\S+)', block)
         if ht_m:
