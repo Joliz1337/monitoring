@@ -61,6 +61,7 @@ CERTBOT_ISSUE_TIMEOUT_SEC = 120
 CERTBOT_RENEW_TIMEOUT_SEC = 300
 
 STATS_SOCKET_TIMEOUT_SEC = 3.0
+CONFIG_UNCHANGED_MESSAGE = "Config unchanged, reload skipped"
 STATS_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
@@ -164,6 +165,8 @@ class HAProxyManager:
         self._stats_cache_time: float = 0
         self._stats_cache_ttl: float = 2.0
         self._cert_info_cache: dict[str, tuple[float, dict]] = {}
+        # Конфиг, который агент сам загрузил в HAProxy последним reload
+        self._loaded_config: Optional[str] = None
 
     @staticmethod
     def _is_domain(target: str) -> bool:
@@ -200,13 +203,17 @@ class HAProxyManager:
             return self.config_path.read_text(encoding='utf-8', errors='replace')
         return ""
     
+    @staticmethod
+    def _normalize_config(content: str) -> str:
+        content = content.encode('utf-8', errors='replace').decode('utf-8')
+        return content if content.endswith('\n') else content + '\n'
+
     def _write_config(self, content: str):
         """Write HAProxy config file"""
-        content = content.encode('utf-8', errors='replace').decode('utf-8')
-        if not content.endswith('\n'):
-            content += '\n'
+        # Кто бы ни переписал файл, загружен ли он в HAProxy — агенту уже неизвестно
+        self._loaded_config = None
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(content, encoding='utf-8')
+        self.config_path.write_text(self._normalize_config(content), encoding='utf-8')
     
     @contextmanager
     def _config_rollback(self) -> Iterator[Callable[[], None]]:
@@ -1411,13 +1418,20 @@ backend {backend_name}
 
         Returns: (success, message, reloaded)
         """
+        try:
+            config_content = self._prepare_config(config_content)
+        except Exception as e:
+            return False, f"Failed to write config: {e}", False
+
+        # Панель шлёт конфиг при любом сохранении правила, даже без правок. Reload
+        # поднял бы новый воркер — сбросил веса и счётчики, а старый через
+        # hard-stop-after оборвал бы долгие VPN-сессии
+        if not ensure_started and self._is_loaded(config_content):
+            self._sync_silent_drop_guard(config_content)
+            return True, CONFIG_UNCHANGED_MESSAGE, False
+
         with self._config_rollback() as rollback:
             try:
-                config_content = self._patch_dns_resolvers(config_content)
-                config_content = self._ensure_global_maxconn(config_content)
-                config_content = self._ensure_global_pipesize(config_content)
-                config_content = cpu_affinity.apply(config_content, psutil.cpu_count() or 1)
-                config_content = self._add_silent_drop_rst_ttl(config_content)
                 self._write_config(config_content)
             except Exception as e:
                 rollback()
@@ -1445,7 +1459,26 @@ backend {backend_name}
         # Check if HAProxy was actually reloaded or just config saved
         if "not running" in reload_msg or "stopped" in reload_msg:
             return True, f"Config applied ({reload_msg})", False
+        self._loaded_config = config_content
         return True, "Config applied and reloaded", True
+
+    def _prepare_config(self, content: str) -> str:
+        """Конфиг панели с поправками под этот сервер — ровно то, что ляжет на диск."""
+        content = self._patch_dns_resolvers(content)
+        content = self._ensure_global_maxconn(content)
+        content = self._ensure_global_pipesize(content)
+        content = cpu_affinity.apply(content, psutil.cpu_count() or 1)
+        return self._normalize_config(self._add_silent_drop_rst_ttl(content))
+
+    def _is_loaded(self, content: str) -> bool:
+        """С этим конфигом HAProxy уже работает: его загрузил сам агент, файл с тех
+        пор никто не трогал, сервис запущен. После рестарта агента это неизвестно —
+        первое применение всегда идёт через reload."""
+        return (
+            content == self._loaded_config
+            and content == self._read_config()
+            and self.is_running()
+        )
     
     def get_available_certs(self) -> list[str]:
         """Get list of available certificates from /etc/letsencrypt/live/"""

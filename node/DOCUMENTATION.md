@@ -117,6 +117,8 @@ HAProxy работает как **нативный systemd сервис** на �
 
 Существующий шаблон в уже применённых конфигах обновляется через «Перегенерировать конфиг» на странице профиля в панели или через `POST /api/haproxy/config/apply` с новым содержимым — сама по себе установка/обновление ноды конфиг не трогает.
 
+Тот же конфиг повторно reload не вызывает. Панель шлёт конфиг при любом сохранении правила, даже без правок, а reload поднимает новый воркер: сбрасываются веса и счётчики, старый воркер через `hard-stop-after 1h` обрывает долгие VPN-сессии. Поэтому `apply_config()` сначала собирает итоговый файл (`_prepare_config()`: поправки под сервер, ровно то, что ляжет на диск) и, если он совпадает с конфигом, который агент сам загрузил последним reload (`_loaded_config`), файл с тех пор не менялся и HAProxy запущен (`_is_loaded()`), отвечает `Config unchanged, reload skipped` (`reloaded: false`) — панель показывает это в логе синхронизации. Через обычный путь идут: первое применение после рестарта агента, `ensure_started`, любая другая запись конфига (`_write_config()` сбрасывает `_loaded_config`), правка файла руками, остановленный HAProxy. Тесты: `node/tests/test_haproxy_apply_config.py`.
+
 **Живая статистика (stats socket):**
 
 `GET /api/haproxy/stats` — живой срез `show stat` + `show info` через stats socket (строка `stats socket /var/run/haproxy.sock ... level admin` есть в базовом шаблоне конфига). Эндпоинт только читает; admin-команды сокета использует смена весов (ниже). Методы — в `haproxy_manager.py` (`get_stats()` и чистые парсеры).
@@ -559,7 +561,7 @@ data: {"message": "error description"}
 
 При ошибке `/start`, `/stop`, `/reload`, `/restart` возвращают `HTTP 500` с полем `detail`, содержащим реальную причину от менеджера (например: `"Restart failed: ..."`, `"Config validation failed: ..."`, `"HAProxy is not installed"`, `"Failed to stop: ..."`). Панель транслирует это сообщение в результатах массовых действий по каждому серверу.
 | GET | /api/haproxy/config | Получить конфиг |
-| POST | /api/haproxy/config/apply | Применить конфиг; тело `ConfigApplyRequest`: `config_content`, `ensure_started: bool = False` — при `True` поднимает остановленный HAProxy через `reload(auto_start=True)` |
+| POST | /api/haproxy/config/apply | Применить конфиг; тело `ConfigApplyRequest`: `config_content`, `ensure_started: bool = False` — при `True` поднимает остановленный HAProxy через `reload(auto_start=True)`; уже загруженный агентом конфиг применяется без reload (`reloaded: false`) |
 
 Изменения конфига (создание/обновление/удаление правила, apply) **и** сертификатные эндпоинты (generate, renew всех/одного, delete, upload) на роутере сериализованы общим `asyncio.Lock` (`_config_lock`) — панель шлёт такие запросы пачками (bulk-действия), а методы менеджера уходят в тред-пул, без лока параллельные правки затирали бы друг друга. На стороне менеджера снимок для отката (`_config_rollback()`) пишется в файл с уникальным именем (`haproxy.cfg.<uuid>.bak`) вместо общего `haproxy.cfg.bak` — общее имя означало бы, что откат одной операции подхватывает снимок другой, идущей параллельно, и возвращает конфиг к чужому состоянию.
 
