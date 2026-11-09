@@ -63,6 +63,10 @@ CERTBOT_RENEW_TIMEOUT_SEC = 300
 STATS_SOCKET_TIMEOUT_SEC = 3.0
 STATS_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
+
+class StatsSocketUnavailableError(OSError):
+    """В конфиге нет stats socket или HAProxy его не создал."""
+
 # Срок сертификата меняется раз в месяцы, а get_cert_info вызывается на каждом
 # опросе метрик по каждому домену — без кэша это форк openssl на домен раз в
 # несколько секунд. Сбрасывается при выпуске/продлении/загрузке/удалении.
@@ -573,6 +577,22 @@ resolvers mydns
         except OSError:
             pass
         return result
+
+    def runtime_command(self, command: str) -> str:
+        """Команда CLI HAProxy через stats socket; ответ — как его дал HAProxy."""
+        socket_path = self._stats_socket_path_from_config()
+        if not socket_path:
+            raise StatsSocketUnavailableError("No 'stats socket' line in haproxy.cfg")
+        for candidate in self._stats_socket_candidates(socket_path):
+            try:
+                return self._query_stats_socket(command, candidate)
+            except (FileNotFoundError, NotADirectoryError, ConnectionRefusedError):
+                continue
+        raise StatsSocketUnavailableError("Stats socket is configured but absent — HAProxy needs a restart to create it")
+
+    def read_live_proxies(self) -> list[dict]:
+        """Срез show stat мимо кэша get_stats: после смены весов нужен текущий."""
+        return self._parse_show_stat(self.runtime_command("show stat"))
 
     def _stats_socket_path_from_config(self) -> Optional[str]:
         match = re.search(r'^\s*stats socket\s+(\S+)', self._read_config(), re.MULTILINE)
