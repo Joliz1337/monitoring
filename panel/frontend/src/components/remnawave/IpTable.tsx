@@ -9,8 +9,6 @@ import { Toggle } from '../ui/Toggle'
 import { Tooltip } from '../ui/Tooltip'
 import { formatAgo } from './geo'
 import { ProviderBadge } from './ProviderBadge'
-import RouteButton from './RouteButton'
-import RouteModal from './RouteModal'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -36,7 +34,6 @@ export default function IpTable({ bbox, place, node, refreshKey, onClearPlace, o
   const [rows, setRows] = useState<RemnawaveGeoIpRow[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
-  const [routeRow, setRouteRow] = useState<RemnawaveGeoIpRow | null>(null)
 
   useEffect(() => {
     const timer = window.setTimeout(() => setSearch(searchInput.trim()), SEARCH_DEBOUNCE_MS)
@@ -146,7 +143,7 @@ export default function IpTable({ bbox, place, node, refreshKey, onClearPlace, o
             ) : rows.length === 0 ? (
               <tr><td colSpan={6} className="text-center py-10 text-dark-500">{t('remnawave.geo.table_empty')}</td></tr>
             ) : (
-              rows.map(row => <IpRow key={row.ip} row={row} lang={lang} onOpenUser={onOpenUser} onRoute={setRouteRow} />)
+              rows.map(row => <IpRow key={row.ip} row={row} lang={lang} onOpenUser={onOpenUser} />)
             )}
           </tbody>
         </table>
@@ -175,18 +172,6 @@ export default function IpTable({ bbox, place, node, refreshKey, onClearPlace, o
           </motion.button>
         </div>
       )}
-
-      {routeRow && (
-        <RouteModal
-          ip={routeRow.ip}
-          nodes={routeRow.nodes}
-          countryCode={routeRow.country_code}
-          place={routeRow.place}
-          asOrg={routeRow.as_org}
-          asn={routeRow.asn}
-          onClose={() => setRouteRow(null)}
-        />
-      )}
     </div>
   )
 }
@@ -212,19 +197,14 @@ function SortHeader({ label, column, sort, dir, onSort }: {
   )
 }
 
-function IpRow({ row, lang, onOpenUser, onRoute }: {
-  row: RemnawaveGeoIpRow
-  lang: string
-  onOpenUser: (id: number) => void
-  onRoute: (row: RemnawaveGeoIpRow) => void
-}) {
+function IpRow({ row, lang, onOpenUser }: { row: RemnawaveGeoIpRow; lang: string; onOpenUser: (id: number) => void }) {
   const { t } = useTranslation()
   const [firstNode, ...otherNodes] = row.nodes
   const firstUser = row.users[0]
 
   const openFirstUser = (e: React.MouseEvent) => {
     if (!firstUser) return
-    // Копирование IP, ссылки, маршрут и имена делают своё; выделение текста мышью — не клик по строке
+    // Копирование IP, ссылка и имена делают своё; выделение текста мышью — не клик по строке
     if (e.target instanceof Element && e.target.closest('a, button, [role="button"]')) return
     if (window.getSelection()?.toString()) return
     onOpenUser(firstUser.id)
@@ -254,7 +234,6 @@ function IpRow({ row, lang, onOpenUser, onRoute }: {
               <ExternalLink className="w-3.5 h-3.5" />
             </a>
           </Tooltip>
-          <RouteButton relay={!!row.relay} disabled={row.nodes.length === 0} onClick={() => onRoute(row)} />
         </span>
       </td>
       <td className="px-4 py-2.5">

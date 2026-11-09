@@ -8,21 +8,6 @@ export const COMPARE_COLORS: Record<CompareLevel, string> = {
   drop: '#ef4444',
 }
 
-// Участок маршрута клиента: задержка в норме / выше, чем объясняет расстояние / сильно выше /
-// неизвестна (клиент не ответил на трассу)
-export const ROUTE_LEG_COLORS = {
-  ok: '#22d3ee',
-  warn: '#f59e0b',
-  bad: '#ef4444',
-  unknown: '#94a3b8',
-} as const
-
-export const ROUTE_STOP_COLORS = {
-  client: '#4ade80',
-  router: '#22d3ee',
-  node: '#a78bfa',
-} as const
-
 // Меньше пяти клиентов вчера — сравнение шумит: один ушедший клиент даёт −50 %
 export const COMPARE_MIN_PREV = 5
 export const COMPARE_WARN_RATIO = 0.7

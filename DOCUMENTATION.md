@@ -236,7 +236,7 @@ bash install.sh --unattended
 
 Подробная документация по каждому компоненту:
 
-- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.79.0)
+- [panel/DOCUMENTATION.md](panel/DOCUMENTATION.md) — веб-панель: API, БД, конфигурация, безопасность (v10.79.1)
 - [node/DOCUMENTATION.md](node/DOCUMENTATION.md) — нода-агент: API, метрики, HAProxy (с потерями до адресов назначения), DNAT-маршрутизация, дополнительные IP-адреса, пул исходящих адресов, публичные адреса за NAT, GRE-туннели DDoS-Guard, трафик, Remnawave, Remnawave Nginx, Firewall Profiles, Системные оптимизации, Анти-DDoS
 
 ## Архитектура
