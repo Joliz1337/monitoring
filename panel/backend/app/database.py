@@ -2375,6 +2375,28 @@ async def _migrate_encrypt_secrets(conn) -> None:
             )
 
 
+async def _migrate_remnawave_geo(conn):
+    """Карта клиентов Remnawave: ноды в текущем снимке IP и срок истории.
+
+    Таблицы истории, гео и присутствия создаёт create_all; здесь — только новые
+    колонки существующих таблиц и автовакуум для истории, которую каждый цикл
+    сбора обновляет upsert'ом.
+    """
+    statements = [
+        "ALTER TABLE xray_stats ADD COLUMN IF NOT EXISTS node_uuids VARCHAR(64)[] NOT NULL DEFAULT '{}'",
+        "ALTER TABLE remnawave_settings ADD COLUMN IF NOT EXISTS ip_history_days INTEGER DEFAULT 30",
+        "ALTER TABLE remnawave_ip_history SET ("
+        " autovacuum_vacuum_scale_factor = 0.02,"
+        " autovacuum_vacuum_threshold = 1000,"
+        " autovacuum_analyze_scale_factor = 0.05)",
+    ]
+    for sql in statements:
+        try:
+            await conn.execute(text(sql))
+        except Exception as e:
+            logger.warning(f"Remnawave geo DDL skipped ({sql}): {e}")
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
@@ -2408,6 +2430,7 @@ async def init_db():
         await _migrate_torrent_blocker_server_mode(conn)
         await _migrate_node_update_step(conn)
         await _migrate_encrypt_secrets(conn)
+        await _migrate_remnawave_geo(conn)
 
     await _warmup_pool()
 

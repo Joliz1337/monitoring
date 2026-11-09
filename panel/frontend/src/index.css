@@ -459,3 +459,67 @@ body {
   min-height: 0;
   overflow: hidden;
 }
+
+/* ========== КАРТА КЛИЕНТОВ REMNAWAVE (MapLibre в тёмной теме панели) ========== */
+/* MapLibre ставит свой шрифт на всю карту — без этого флаги стран в попапах выводятся буквами */
+.rw-map .maplibregl-map {
+  font-family: inherit;
+}
+
+.rw-map .maplibregl-popup-content {
+  background: #16161b;
+  color: #d9d9e3;
+  border: 1px solid #2a2a32;
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+.rw-map .maplibregl-popup-tip {
+  border-top-color: #2a2a32 !important;
+  border-bottom-color: #2a2a32 !important;
+}
+
+.rw-map .maplibregl-popup-close-button {
+  color: #8e8ea0;
+  font-size: 16px;
+  padding: 0 6px;
+}
+
+.rw-map .maplibregl-popup-close-button:hover {
+  background: transparent;
+  color: #ececf1;
+}
+
+.rw-map .rw-map-hover {
+  pointer-events: none;
+}
+
+.rw-map .maplibregl-ctrl-group {
+  background: #16161b;
+  border: 1px solid #2a2a32;
+}
+
+.rw-map .maplibregl-ctrl-group button + button {
+  border-top-color: #2a2a32;
+}
+
+.rw-map .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  filter: invert(0.85);
+}
+
+.rw-map .maplibregl-ctrl.maplibregl-ctrl-attrib,
+.rw-map .maplibregl-ctrl.maplibregl-ctrl-attrib.maplibregl-compact {
+  background-color: rgba(11, 11, 13, 0.8);
+  color: #8e8ea0;
+}
+
+.rw-map .maplibregl-ctrl-attrib-inner,
+.rw-map .maplibregl-ctrl-attrib a {
+  color: #8e8ea0;
+}
+
+.rw-map .maplibregl-ctrl-attrib-button {
+  filter: invert(0.85);
+  background-color: transparent;
+}

@@ -1,11 +1,12 @@
 """
 Xray stats collector — fetches user IPs directly from Remnawave Panel API.
 
-Collection flow (ephemeral — each cycle replaces all data):
+Collection flow:
 1. GET /api/nodes → filter connected & enabled
 2. POST /api/ip-control/fetch-users-ips/{nodeUuid} → jobId per node
-3. Poll results → merge all (user_id, ip) pairs, filter ACTIVE users
-4. DELETE old IPs → INSERT fresh snapshot
+3. Poll results → merge (user_id, ip) pairs with their nodes, filter ACTIVE users
+4. DELETE old IPs → INSERT fresh snapshot (xray_stats — «онлайн сейчас»)
+5. History, geo and per-place hourly sums for the client map (remnawave_geo_ingest)
 """
 
 import asyncio
@@ -14,19 +15,21 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from urllib.parse import urlparse
 
 from sqlalchemy import select, delete, func as sql_func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import async_session
-from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, RemnawaveHwidDevice, AlertSettings, Server
+from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, RemnawaveHwidDevice, AlertSettings
 from app.services.remnawave_api import get_remnawave_api, RemnawaveAPIError
 from app.services.asn_lookup import lookup_ips_cached, group_ips_by_asn, effective_ip_count, enrich_with_names
 from app.services import ip_anomaly_state
 from app.services.known_clients import build_ua_pattern
-from app.services.net_utils import host_to_ip
+from app.services.remnawave_geo_ingest import (
+    DEFAULT_IP_HISTORY_DAYS, SnapshotEntry, cleanup_geo, fleet_ip_names, ingest_cycle, merge_node_results,
+    mark_cycle, parse_remnawave_time,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,24 +177,19 @@ class XrayStatsCollector:
 
             sem = asyncio.Semaphore(IP_POLL_CONCURRENCY)
 
-            async def _poll_node(node: dict) -> list[dict]:
+            async def _poll_node(node: dict) -> tuple[str, list[dict]]:
                 async with sem:
                     try:
-                        return await api.poll_users_ips(node["uuid"])
+                        return node["uuid"], await api.poll_users_ips(node["uuid"])
                     except RemnawaveAPIError as e:
                         logger.debug(f"IP fetch failed for node {node.get('name', node['uuid'])}: {e.message}")
-                        return []
                     except Exception as e:
                         logger.debug(f"IP fetch error for node {node.get('name', node['uuid'])}: {e}")
-                        return []
+                    return node["uuid"], []
 
             results = await asyncio.gather(*[_poll_node(n) for n in active_nodes])
 
-            # Мержим результаты: (user_id, ip) -> last_seen
-            merged: dict[tuple[int, str], datetime] = {}
             ignored = await self._get_ignored_user_ids()
-
-            # Только ACTIVE пользователи
             async with async_session() as db:
                 active_result = await db.execute(
                     select(RemnawaveUserCache.email).where(RemnawaveUserCache.status == 'ACTIVE')
@@ -200,36 +198,25 @@ class XrayStatsCollector:
 
             now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
             freshness_cutoff = now_utc - timedelta(seconds=self._collection_interval)
+            snapshot, history = merge_node_results(results, active_user_ids - ignored, freshness_cutoff)
 
-            for node_users in results:
-                for user_entry in node_users:
-                    try:
-                        user_id = int(user_entry.get("userId", "0"))
-                    except (ValueError, TypeError):
-                        continue
-                    if not user_id or user_id in ignored or user_id not in active_user_ids:
-                        continue
-                    for ip_entry in user_entry.get("ips", []):
-                        ip = ip_entry.get("ip", "")
-                        if not ip:
-                            continue
-                        last_seen = self._parse_datetime(ip_entry.get("lastSeen"))
-                        if not last_seen or last_seen < freshness_cutoff:
-                            continue
-                        key = (user_id, ip)
-                        existing = merged.get(key)
-                        if existing is None or last_seen > existing:
-                            merged[key] = last_seen
+            if snapshot:
+                await self._save_stats(snapshot)
 
-            if merged:
-                await self._save_stats(merged)
+            # Карта клиентов — надстройка: её сбой не должен ломать снимок и аномалии
+            try:
+                await ingest_cycle(snapshot, history, nodes, now_utc)
+            except Exception as e:
+                logger.warning(f"Client map ingest failed: {e}")
+            finally:
+                mark_cycle()
 
             self._last_collect_time = datetime.now(timezone.utc).replace(tzinfo=None)
-            unique_users_with_ip = len({k[0] for k in merged})
             logger.info(
                 f"IP collection: {len(active_nodes)} nodes, "
-                f"{unique_users_with_ip} users with IPs, "
-                f"{len(merged)} (user,ip) pairs, "
+                f"{len({k[0] for k in snapshot})} users with IPs, "
+                f"{len(snapshot)} (user,ip) pairs, "
+                f"{len(history)} history rows, "
                 f"{len(active_user_ids)} ACTIVE in cache"
             )
 
@@ -279,7 +266,7 @@ class XrayStatsCollector:
             "last_nodes_count": self._last_nodes_count,
         }
 
-    async def _save_stats(self, merged: dict[tuple[int, str], datetime]):
+    async def _save_stats(self, snapshot: dict[tuple[int, str], SnapshotEntry]):
         """Заменяет все IP-данные актуальным снимком (DELETE + INSERT)."""
         async with self._db_write_lock:
             async with async_session() as db:
@@ -291,18 +278,19 @@ class XrayStatsCollector:
                 # этой таблицы занижены в _migrate_db_optimizations.
                 await db.execute(delete(XrayStats))
 
-                items = list(merged.items())
+                items = list(snapshot.items())
                 for i in range(0, len(items), UPSERT_BATCH_SIZE):
                     batch = items[i:i + UPSERT_BATCH_SIZE]
                     values = [
-                        {"email": email, "source_ip": source_ip, "last_seen": last_seen}
-                        for (email, source_ip), last_seen in batch
+                        {"email": email, "source_ip": source_ip, "last_seen": entry.last_seen,
+                         "node_uuids": sorted(entry.node_uuids)}
+                        for (email, source_ip), entry in batch
                     ]
                     await db.execute(pg_insert(XrayStats).values(values))
 
                 await db.commit()
 
-            logger.debug(f"Saved {len(merged)} current IP entries (full replace)")
+            logger.debug(f"Saved {len(snapshot)} current IP entries (full replace)")
 
     # === User cache ===
 
@@ -601,14 +589,7 @@ class XrayStatsCollector:
     async def _get_node_ips(self) -> set[str]:
         """IP всех нод парка: транзитная нода (DNAT-релей) светится в Xray-логах
         как source_ip клиента и не должна считаться устройством пользователя."""
-        async with async_session() as db:
-            urls = (await db.execute(select(Server.url))).scalars().all()
-        ips: set[str] = set()
-        for url in urls:
-            ip = await host_to_ip(urlparse(url).hostname or "")
-            if ip:
-                ips.add(ip)
-        return ips
+        return set(await fleet_ip_names())
 
     async def _check_anomalies(self, settings: RemnawaveSettings):
         if not settings.anomaly_enabled:
@@ -1048,18 +1029,16 @@ class XrayStatsCollector:
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
 
+        try:
+            settings = await self._get_settings()
+            history_days = (settings.ip_history_days if settings else None) or DEFAULT_IP_HISTORY_DAYS
+            await cleanup_geo(now, history_days)
+        except Exception as e:
+            logger.error(f"Client map cleanup error: {e}")
+
     # === Helpers ===
 
-    def _parse_datetime(self, value: str | None) -> datetime | None:
-        if not value:
-            return None
-        try:
-            if value.endswith('Z'):
-                value = value[:-1] + '+00:00'
-            dt = datetime.fromisoformat(value)
-            return dt.replace(tzinfo=None)
-        except (ValueError, TypeError):
-            return None
+    _parse_datetime = staticmethod(parse_remnawave_time)
 
     @staticmethod
     def _as_int(value) -> int | None:

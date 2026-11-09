@@ -1,14 +1,14 @@
-import { useState, useEffect, useCallback, useRef, memo, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Radio, Settings, Users, BarChart3, Check, X,
-  Search, Play, Server, Trash2, Eye, EyeOff, ChevronDown, ChevronUp,
+  Search, Server, Trash2, Eye, EyeOff, ChevronDown, ChevronUp,
   Loader2, Smartphone, Globe, ArrowUp, ArrowDown, AlertTriangle, Shield, ExternalLink,
   Download, Plus, Save, Terminal
 } from 'lucide-react'
 import { remnawaveApi, serversApi, remnawaveInstallApi, remnawaveInstallStreamUrl, nodeImageApi } from '../api/client'
 import type {
-  RemnawaveApiNode, RemnawaveHwidDevice, RemnawaveAnomaly,
+  RemnawaveHwidDevice, RemnawaveAnomaly,
   Server as ServerInfo, RemnawaveCertProfile, RemnawaveInstallEvent,
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
@@ -20,12 +20,14 @@ import { SecretInput } from '../components/ui/SecretInput'
 import { FAQIcon } from '../components/FAQ'
 import { streamNdjsonGet, StreamUnauthorizedError } from '../utils/ndjsonStream'
 import { nodeAllows } from '../utils/nodeCapabilities'
-import { getFlag } from '../utils/format'
 import { cleanInstallLogLine } from '../utils/installLog'
 import { Checkbox } from '../components/ui/Checkbox'
 import SshCredsFields, {
   SSH_CREDS_DEFAULTS, SshCredsValue, credsFromSettings, hasSshSecret, hasStoredSshSecret, toDeliveryCreds,
 } from '../components/servers/SshCredsFields'
+import OverviewTab from '../components/remnawave/OverviewTab'
+import UserGeoDetails from '../components/remnawave/UserGeoDetails'
+import GeoDbStatus from '../components/remnawave/GeoDbStatus'
 
 type TabType = 'overview' | 'users' | 'anomalies' | 'install' | 'settings'
 
@@ -120,130 +122,6 @@ function Section({ title, icon, children, right }: {
     </motion.div>
   )
 }
-
-function OverviewTab() {
-  const { t } = useTranslation()
-  const [summary, setSummary] = useState<any>(null)
-  const [status, setStatus] = useState<any>(null)
-  const [nodes, setNodes] = useState<RemnawaveApiNode[]>([])
-  const [loading, setLoading] = useState(true)
-  const [collecting, setCollecting] = useState(false)
-
-  const fetchData = useCallback(async () => {
-    try {
-      const [summaryRes, statusRes, nodesRes] = await Promise.all([
-        remnawaveApi.getSummary(),
-        remnawaveApi.getCollectorStatus(),
-        remnawaveApi.getNodes(),
-      ])
-      setSummary(summaryRes.data)
-      setStatus(statusRes.data)
-      setNodes(nodesRes.data.nodes || [])
-    } catch { /* ignore */ } finally { setLoading(false) }
-  }, [])
-
-  useEffect(() => { fetchData() }, [fetchData])
-  useAutoRefresh(fetchData, { customInterval: 60000 })
-
-  const handleCollect = async () => {
-    setCollecting(true)
-    try {
-      const res = await remnawaveApi.collectNow()
-      if (res.data.success) {
-        toast.success(t('remnawave.collectSuccess'))
-        await fetchData()
-      } else {
-        toast.error(res.data.error || 'Error')
-      }
-    } catch { toast.error('Error') } finally { setCollecting(false) }
-  }
-
-  const connectedNodes = nodes.filter(n => n.is_connected && !n.is_disabled)
-  const totalOnline = connectedNodes.reduce((s, n) => s + (n.users_online || 0), 0)
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -12 }}
-      className="space-y-6"
-    >
-      <div className="flex items-center justify-end">
-        <div className="flex items-center gap-3">
-          {status && (
-            <div className="flex items-center gap-2 text-sm text-dark-400">
-              <div className={`w-2 h-2 rounded-full ${status.running ? 'bg-green-400 shadow-sm shadow-green-400/50' : 'bg-dark-600'}`} />
-              {status.running ? t('remnawave.running') : t('remnawave.stopped')}
-              {status.next_collect_in != null && (
-                <span className="text-dark-500">({status.next_collect_in}s)</span>
-              )}
-            </div>
-          )}
-          <motion.button
-            onClick={handleCollect}
-            disabled={collecting}
-            className="btn btn-primary text-sm"
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-          >
-            {collecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-            {t('remnawave.collectNow')}
-          </motion.button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <StatCard title={t('remnawave.uniqueUsers')} value={summary?.unique_users ?? 0} loading={loading} />
-        <StatCard title={t('remnawave.uniqueIps')} value={summary?.unique_ips ?? 0} loading={loading} />
-        <StatCard title={t('remnawave.totalDevices')} value={summary?.total_devices ?? 0} loading={loading} />
-      </div>
-      <p className="text-dark-500 text-xs -mt-4">{t('remnawave.onlineOnlyHint')}</p>
-
-      {nodes.length > 0 && (
-        <Section title={t('remnawave.nodes')} icon={<Server className="w-4 h-4" />}
-          right={<span className="text-dark-500 text-xs">{connectedNodes.length}/{nodes.length} {t('remnawave.nodesOnline')}, {totalOnline} {t('remnawave.nodesUsers')}</span>}
-        >
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-            {nodes.map(node => (
-              <div key={node.uuid} className="flex items-center justify-between py-2.5 px-4 bg-dark-800/40 rounded-xl border border-dark-800/30">
-                <div className="flex items-center gap-2.5">
-                  <span className="text-base">{getFlag(node.country_code)}</span>
-                  <span className="text-dark-100 text-sm truncate max-w-[140px]">{node.name}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  {node.is_connected && !node.is_disabled && (
-                    <span className="text-dark-500 text-xs">{node.users_online}</span>
-                  )}
-                  <div className={`w-2 h-2 rounded-full ${
-                    node.is_disabled ? 'bg-dark-600' :
-                    node.is_connected ? 'bg-green-400 shadow-sm shadow-green-400/50' : 'bg-red-400'
-                  }`} />
-                </div>
-              </div>
-            ))}
-          </div>
-        </Section>
-      )}
-    </motion.div>
-  )
-}
-
-const StatCard = memo(function StatCard({ title, value, loading }: { title: string; value: number; loading: boolean }) {
-  return (
-    <motion.div
-      className="card"
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-    >
-      <div className="text-dark-400 text-sm mb-1">{title}</div>
-      {loading ? (
-        <div className="h-8 bg-dark-700/50 rounded-lg animate-pulse w-24" />
-      ) : (
-        <div className="text-2xl font-bold text-dark-50">{value.toLocaleString()}</div>
-      )}
-    </motion.div>
-  )
-})
 
 const STATUS_OPTIONS = ['ACTIVE', 'DISABLED', 'LIMITED', 'EXPIRED'] as const
 
@@ -515,91 +393,7 @@ function UserRow({ user, expanded, details, detailsLoading, onToggle, onDeleteIp
                       {[1,2,3].map(i => <div key={i} className="h-8 bg-dark-700/50 rounded-lg animate-pulse" />)}
                     </div>
                   ) : details ? (
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-dark-400 text-sm">
-                          {details.unique_ips} IP
-                        </span>
-                        <motion.button
-                          onClick={(e) => { e.stopPropagation(); onDeleteAllIps() }}
-                          className="btn-danger flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs"
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          {t('remnawave.deleteAllIps')}
-                        </motion.button>
-                      </div>
-
-                      {details.ips?.length > 0 && (
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-1.5 text-dark-400 text-xs font-medium mb-1.5">
-                            <Globe className="w-3.5 h-3.5" />
-                            {t('remnawave.ipAddresses')}
-                          </div>
-                          {details.ips.map((ip: any) => (
-                            <div key={ip.source_ip} className="flex items-center justify-between py-2 px-3 bg-dark-800/40 rounded-xl group transition-colors hover:bg-dark-800/60">
-                              <div className="flex items-center gap-2">
-                                <span className="text-dark-100 font-mono text-sm">{ip.source_ip}</span>
-                                <a
-                                  href={`https://check-host.net/ip-info?host=${ip.source_ip}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  onClick={e => e.stopPropagation()}
-                                  className="text-dark-500 hover:text-accent-400 transition-colors"
-                                >
-                                  <ExternalLink className="w-3.5 h-3.5" />
-                                </a>
-                              </div>
-                              <div className="flex items-center gap-3">
-                                {ip.last_seen && (
-                                  <span className="text-dark-500 text-xs">
-                                    {new Date(ip.last_seen).toLocaleString()}
-                                  </span>
-                                )}
-                                <Tooltip label={t('common.delete')}>
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); onDeleteIp(ip.source_ip) }}
-                                    className="opacity-60 group-hover:opacity-100 p-1.5 hover:bg-danger/20 rounded-lg text-danger transition-all"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                </Tooltip>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {details.devices?.length > 0 && (
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-1.5 text-dark-400 text-xs font-medium mb-1.5">
-                            <Smartphone className="w-3.5 h-3.5" />
-                            {t('remnawave.hwidDevices')} ({details.devices.length})
-                          </div>
-                          {details.devices.map((dev: RemnawaveHwidDevice) => (
-                            <div key={dev.hwid} className="flex items-center justify-between py-2 px-3 bg-dark-800/40 rounded-xl">
-                              <div className="flex items-center gap-3">
-                                <Smartphone className="w-3.5 h-3.5 text-dark-500" />
-                                <div>
-                                  <span className="text-dark-200 text-sm">
-                                    {dev.device_model || dev.platform || 'Unknown'}
-                                  </span>
-                                  {dev.os_version && (
-                                    <span className="text-dark-500 text-xs ml-2">{dev.os_version}</span>
-                                  )}
-                                </div>
-                              </div>
-                              {dev.created_at && (
-                                <span className="text-dark-500 text-xs">
-                                  {new Date(dev.created_at).toLocaleDateString()}
-                                </span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                    <UserGeoDetails details={details} onDeleteIp={onDeleteIp} onDeleteAllIps={onDeleteAllIps} />
                   ) : (
                     <div className="text-dark-500 text-sm">{t('remnawave.noData')}</div>
                   )}
@@ -1438,7 +1232,7 @@ function SettingsTab() {
   const [showCookie, setShowCookie] = useState(false)
   const [showAnomalyToken, setShowAnomalyToken] = useState(false)
   const [form, setForm] = useState({
-    api_url: '', api_token: '', cookie_secret: '', enabled: false, collection_interval: 300,
+    api_url: '', api_token: '', cookie_secret: '', enabled: false, collection_interval: 300, ip_history_days: 30,
     anomaly_enabled: false, anomaly_use_custom_bot: false,
     anomaly_ip_enabled: true, anomaly_hwid_enabled: true,
     anomaly_ua_enabled: true, anomaly_devdata_enabled: true,
@@ -1474,6 +1268,7 @@ function SettingsTab() {
         cookie_secret: '',
         enabled: s.enabled,
         collection_interval: s.collection_interval,
+        ip_history_days: s.ip_history_days ?? 30,
         anomaly_enabled: s.anomaly_enabled || false,
         anomaly_use_custom_bot: s.anomaly_use_custom_bot || false,
         anomaly_ip_enabled: s.anomaly_ip_enabled ?? true,
@@ -1651,6 +1446,15 @@ function SettingsTab() {
                   onChange={e => updateField('collection_interval', parseInt(e.target.value) || 300)}
                   className="input" />
               </div>
+
+              <div>
+                <label className="block text-sm text-dark-400 mb-2">{t('remnawave.geo.settings_history_days')}</label>
+                <input type="number" value={form.ip_history_days} min={1} max={90}
+                  onChange={e => updateField('ip_history_days', Math.min(90, Math.max(1, parseInt(e.target.value) || 30)))}
+                  className="input" />
+              </div>
+
+              <GeoDbStatus />
             </div>
           </Section>
 

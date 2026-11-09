@@ -22,3 +22,4 @@ certbot>=2.0.0
 certbot-dns-cloudflare>=2.0.0
 asyncssh>=2.14.0
 python-socks==2.8.2
+maxminddb==3.2.0

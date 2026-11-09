@@ -488,7 +488,7 @@ Emoji-флаги (🇷🇺, 🇩🇪) можно вводить в любые т
 Панель использует **PostgreSQL 16** для хранения данных:
 - Метрики серверов (история 24ч raw + 30 дней hourly + 365 дней daily, включая TCP states; у сырых снапшотов рядом со средними — пики за интервал `cpu_usage_max`, `net_rx_bytes_per_sec_max`, `net_tx_bytes_per_sec_max`, у агрегатов — `max_cpu`, `max_memory_percent`, `max_load`, `max_rx_speed`, `max_tx_speed`; `NULL` в колонке пика — нода без оконной статистики или строка до миграции, читается через `COALESCE(max, avg)`; steal — `cpu_steal` у снапшота и `avg_cpu_steal` у агрегата, `NULL` — нода его не считает)
 - История трафика (server_traffic: 14 дней часовых бакетов + 400 дней суточных; server_traffic_counters — база для расчёта дельт; server_downtime — интервалы недоступности нод)
-- Remnawave статистика (xray_stats: user → IP → count, эфемерная — заменяется каждый цикл; remnawave_hwid_devices: HWID-устройства)
+- Remnawave статистика (xray_stats: user → IP → ноды, снимок «онлайн сейчас» — заменяется каждый цикл; remnawave_ip_history: история IP за срок; ip_geo, remnawave_geo_presence, remnawave_node_cache — карта клиентов; remnawave_hwid_devices: HWID-устройства)
 - Кэш пользователей, blocklist правила, настройки
 - ASN-кэш (asn_cache — IP → ASN/prefix, TTL 7 дней)
 
@@ -1641,7 +1641,7 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 
 ### Remnawave Integration
 
-Интеграция с Remnawave Panel: отслеживание пользователей, их IP-адресов, количества посещений и HWID-устройств. Сбор IP происходит напрямую через Remnawave Panel API (без агентов на нодах).
+Интеграция с Remnawave Panel: отслеживание пользователей, их IP-адресов (с нодой, городом и провайдером), HWID-устройств и карта клиентов. Сбор IP происходит напрямую через Remnawave Panel API (без агентов на нодах).
 
 **API:**
 
@@ -1652,30 +1652,45 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 | GET/POST/DELETE | /api/remnawave/ignored-users | Управление игнорируемыми пользователями |
 | GET | /api/remnawave/status | Статус коллектора |
 | POST | /api/remnawave/collect | Принудительный сбор статистики |
-| GET | /api/remnawave/stats/summary | Сводка (unique_users, unique_ips, total_devices) |
+| GET | /api/remnawave/stats/summary | Сводка: unique_users, unique_ips (онлайн), total_devices, cities_online, ips_history (уникальные IP за срок истории), history_days, relay_users |
 | GET | /api/remnawave/stats/top-users?status=ACTIVE\|DISABLED\|LIMITED\|EXPIRED&source_ip=x.x.x.x | Топ пользователей (дефолт: status=ACTIVE) |
-| GET | /api/remnawave/stats/user/{email} | IP-адреса пользователя и его HWID-устройства |
-| DELETE | /api/remnawave/stats/clear | Очистить всю статистику |
-| DELETE | /api/remnawave/stats/user/{email}/ips | Очистить IP пользователя |
+| GET | /api/remnawave/stats/user/{email} | IP-адреса пользователя (`ips` — текущий снимок; `history` — IP за срок истории с нодами, местом и провайдером), ноды с координатами, сводка (городов/провайдеров/нод/IP), HWID-устройства |
+| GET | /api/remnawave/stats/user/{email}/traffic | Расход пользователя за сутки из Remnawave (`bytes`, `null` — данных нет); отдельно, чтобы карточка не ждала Remnawave |
+| GET | /api/remnawave/geo/map?node= | Данные карты: места (`key` = `CC\|место`, координаты, ips, users, `prev` — вчера в этот час), страны, ноды с числом IP, `compare_available`, `relay_users`, `unlocated_ips`, `geo_ready`, `geo_error` (почему база не скачалась) |
+| GET | /api/remnawave/geo/ips?bbox=&place=&node=&search=&active_only=&sort=&dir=&offset=&limit= | Таблица IP: строка на IP — активность, онлайн, пользователи, ноды, город, провайдер, `relay` (имя сервера, если это наш релей) |
+| GET / POST | /api/remnawave/geo/status, /api/remnawave/geo/update | Состояние локальной базы геолокации и её внеочередное обновление |
+| DELETE | /api/remnawave/stats/clear | Очистить всю статистику (снимок, историю IP, почасовые суммы карты, устройства) |
+| DELETE | /api/remnawave/stats/user/{email}/ips | Очистить IP пользователя (снимок и история) |
 
 **Схема БД:**
 
-- **xray_stats** — `PK(email, source_ip)` → count, last_seen (эфемерные данные: полностью заменяются каждый цикл сбора через DELETE ALL + INSERT)
+- **xray_stats** — `PK(email, source_ip)` → last_seen, `node_uuids` (VARCHAR(64)[] — через какие ноды IP виден сейчас). Текущий снимок «онлайн сейчас»: полностью заменяется каждый цикл сбора через DELETE ALL + INSERT
+- **remnawave_ip_history** — история IP за `ip_history_days` (default 30): `PK(user_id, source_ip, node_uuid)` → first_seen, last_seen. Каждый цикл новые строки вставляются `INSERT ... ON CONFLICT DO NOTHING`, а `last_seen` обновляется отдельным `UPDATE ... FROM unnest(...)` только там, где сдвинулся больше чем на час (`HISTORY_TOUCH_INTERVAL`). Один upsert с `WHERE` блокировал бы каждую конфликтующую строку (запись в заголовок кортежа и WAL) у всех онлайн-клиентов каждый цикл, даже когда менять нечего
+- **ip_geo** — место и провайдер IP из локальной базы: country_code, region, place (город без хвоста «(округ)», иначе регион), lat/lon, asn, as_org. При смене месяца базы не удаляется: записи прошлой сборки (`resolved_at` раньше `build` базы) остаются в ходу и перерезолвливаются по мере сил — сначала онлайн-IP, затем остальные IP из ответа Remnawave, затем IP истории без гео или со старым гео (`plan_geo_resolve`, до 50 000 за цикл). Строки без ссылок из снимка и истории чистит `_cleanup_loop`
+- **remnawave_geo_presence** — почасовые суммы для сравнения карты «к вчера»: `PK(bucket, country_code, place)` → lat, lon, ips_sum, samples; строка `('', '')` — счётчик циклов часа (среднее места = сумма / циклов часа). Хранится 8 дней
+- **remnawave_node_cache** — ноды Remnawave (uuid, name, country_code, address, lat/lon по адресу ноды): имя ноды в истории переживает её удаление из Remnawave, координаты нужны для линий на мини-карте
 - **remnawave_user_cache** — кэш пользователей (обновляется каждые 30 минут); поля `sub_last_user_agent` и `sub_last_opened_at` удалены в Remnawave Panel 2.7.0
-- **remnawave_settings** — настройки подключения; поле `anomaly_use_custom_bot` (Boolean) — использовать отдельного бота для аномалий или бот из AlertSettings; поля `traffic_threshold_gb` (Float, default 30.0) и `traffic_confirm_count` (Integer, default 2) — настройки детектора трафик-аномалий; `anomaly_enabled` (Boolean, default FALSE) — мастер-переключатель всех проверок аномалий; `anomaly_ip_enabled`/`anomaly_hwid_enabled`/`anomaly_ua_enabled`/`anomaly_devdata_enabled` (Boolean, default TRUE) — пер-тип переключатели четырёх проверок ниже, NULL (строка до миграции) трактуется как включено; настраиваемые параметры проверок — `anomaly_ip_margin` (Integer, default 2), `anomaly_ip_confirm_count` (Integer, default 5), `anomaly_asn_margin` (Integer, default 0), `anomaly_ip_smart_enabled` (Boolean, default TRUE) и `anomaly_ip_smart_traffic_gb` (Float, default 20.0) — умное определение по суточному трафику, `anomaly_ua_patterns` (Text, nullable — NULL/пусто = встроенный список известных клиентов), см. ниже
+- **remnawave_settings** — настройки подключения; `ip_history_days` (Integer, default 30, 1–90) — срок истории IP; поле `anomaly_use_custom_bot` (Boolean) — использовать отдельного бота для аномалий или бот из AlertSettings; поля `traffic_threshold_gb` (Float, default 30.0) и `traffic_confirm_count` (Integer, default 2) — настройки детектора трафик-аномалий; `anomaly_enabled` (Boolean, default FALSE) — мастер-переключатель всех проверок аномалий; `anomaly_ip_enabled`/`anomaly_hwid_enabled`/`anomaly_ua_enabled`/`anomaly_devdata_enabled` (Boolean, default TRUE) — пер-тип переключатели четырёх проверок ниже, NULL (строка до миграции) трактуется как включено; настраиваемые параметры проверок — `anomaly_ip_margin` (Integer, default 2), `anomaly_ip_confirm_count` (Integer, default 5), `anomaly_asn_margin` (Integer, default 0), `anomaly_ip_smart_enabled` (Boolean, default TRUE) и `anomaly_ip_smart_traffic_gb` (Float, default 20.0) — умное определение по суточному трафику, `anomaly_ua_patterns` (Text, nullable — NULL/пусто = встроенный список известных клиентов), см. ниже
 - **remnawave_hwid_devices** — HWID-устройства из Remnawave API (user_id, hwid, platform, created_at); `user_id` (Integer, индекс `ix_remnawave_hwid_devices_user_id`) — числовой id пользователя, единственный идентификатор владельца устройства (начиная с Remnawave 3.x uuid пользователя в API не существует вовсе)
 - **remnawave_ip_anomaly_state** — персистентное состояние IP-аномалии по пользователю (email, trigger_count, known_ips JSON, last_notified_at, last_message_id, last_chat_id); создаётся автоматически через `Base.metadata.create_all`, отдельная миграция не требуется
 
 **Принцип работы:**
 1. `xray_stats_collector.py` вызывает `remnawave_api.get_all_nodes()` — получает список нод из Remnawave Panel
-2. Для каждой ноды вызывает `poll_users_ips()` — получает IP-адреса пользователей напрямую из Remnawave Panel API (только ACTIVE пользователи)
-3. Панель делает DELETE ALL + INSERT в `xray_stats` (данные полностью заменяются — эфемерная модель без истории)
+2. Для каждой ноды вызывает `poll_users_ips()` — получает IP-адреса пользователей напрямую из Remnawave Panel API; `merge_node_results()` (`remnawave_geo_ingest.py`) склеивает ответы, сохраняя ноды каждого IP, и оставляет только ACTIVE и неигнорируемых пользователей
+3. Панель делает DELETE ALL + INSERT в `xray_stats` (снимок только свежих IP, `lastSeen` не старше интервала сбора), затем `ingest_cycle()`: история по всем IP из ответа, кэш нод, резолв новых IP по локальной гео-базе (до 50 000 за цикл, в `run_in_executor`), сэмпл в почасовые суммы по местам. Сбой этого шага пишется в лог и не мешает снимку и аномалиям
 4. Параллельно синхронизируются HWID-устройства через `get_all_hwid_devices_paginated()`
 5. Кэш пользователей обновляется из Remnawave API каждые 30 минут; удаление устаревших записей выполняется через вычитание множеств в Python (`current_emails - fetched_emails`) с батчевым DELETE по `in_()` (батчи по 500) — вместо одного `DELETE ... WHERE email NOT IN (...)`, который не работает при 57k+ параметров
 6. После обновления кэша вызывается `_check_traffic_anomalies()` — снимок `used_traffic_bytes` для всех ACTIVE пользователей сравнивается с предыдущим, delta > порога увеличивает streak
 7. Аномалии проверяются только для ACTIVE пользователей (фильтрация по `status == 'ACTIVE'` в коллекторе и в роутере `/api/remnawave/anomalies`)
 
-**Эфемерные IP:** данные IP не накапливаются. Каждый цикл сбора полностью заменяет таблицу `xray_stats`. Период-фильтр на эндпоинтах отсутствует — данные всегда актуальные. Автоочистка (`_cleanup_loop`) не затрагивает `xray_stats`.
+**Снимок и история IP:** `xray_stats` — только «онлайн сейчас», каждый цикл заменяется целиком; на нём работают «Пользователи», аномалии и плитки онлайна. История IP за `ip_history_days` — в `remnawave_ip_history`, её показывают карточка пользователя и таблица IP с выключенным «только активные»; старше срока чистит `_cleanup_loop` (раз в час).
+
+**Карта клиентов:**
+
+- **Гео-база** — `services/geoip.py`: DB-IP Lite (City + ASN, CC BY 4.0, без ключей) в `/app/data/geoip/`, читается через mmap (`maxminddb`), лукап — без сетевых запросов. Фоновая задача раз в 6 часов: файла нет или месяц из `dbip.month` старше текущего — качает `https://download.db-ip.com/free/dbip-{city|asn}-lite-YYYY-MM.mmdb.gz` (404 текущего месяца — берёт предыдущий), распаковывает, проверяет открытием, атомарно заменяет; читатели открываются в `MODE_AUTO` (C-расширение — десятки тысяч лукапов за цикл не держат GIL); ошибка — повтор через час, причина видна на карте и в настройках. Названия городов в базе только английские, страны фронт локализует сам (`Intl.DisplayNames`). Нет базы — карта и таблица работают без мест, сбор не страдает.
+- **Релеи** — IP серверов парка (`fleet_ip_names()`: адрес из `Server.url`, DNS-резолв, кэш 10 мин) у Remnawave выглядят как IP клиента. В `ip_geo`, суммы мест и на карту они не попадают; в таблице и карточке вместо города — «через релей <имя>», на карте — строка «ещё N клиентов через релеи».
+- **«К вчера»** — `prev` места = среднее онлайн-IP из `remnawave_geo_presence` за тот же час сутки назад. Места, где вчера были клиенты, а сейчас 0, отдаются все (`ips = 0`): их вчерашние клиенты входят в суммы кластеров и стран, и регион из многих мелких городов, где все пропали, краснеет. Отдельным красным контуром фронт рисует такое место, только если вчера там было ≥ 5 IP — авария не должна выглядеть как «тут никого». С фильтром по ноде сравнение недоступно (суммы ведутся по всему парку).
+- **Чтение** — `services/remnawave_geo_queries.py`: карта, сводка и страницы таблицы кэшируются до следующего цикла сбора (`CycleCache` по `cycle_version()`, не больше 256 ответов; номер цикла растёт после записи снимка, даже если запись карты упала). Таблица IP — один параметризованный запрос с оконным `count(*) OVER ()` для total; фильтр по области карты или месту — подзапросом по `ip_geo` до группировки, а не после агрегации всего снимка; карточка пользователя — до 500 последних IP, общее число — отдельным `count(distinct)`; bbox свёрнут в [-180, 180] и через антимеридиан режется на два прямоугольника (`parse_bbox`).
 
 **Поддержка версий Remnawave Panel API (2.8.x и 3.x):** клиент `remnawave_api.py` определяет версию API панели сам и кэширует её по адресу панели (модульный словарь `_api_version_by_url`, ключ — URL). Детект приоритетно идёт по `GET /api/nodes` — у ноды в 3.x есть числовое поле `id`, в 2.x его нет; если нод ещё нет, запасной признак — `GET /api/users`: в 3.x поле `uuid` у пользователя удалено из API целиком. Совсем пустая панель (ни нод, ни пользователей) считается 3.x. `get_all_nodes()` обновляет кэш версии при каждом своём вызове, поэтому отдельный запрос на детект обычно не требуется. Для путей, разошедшихся между версиями (`_versioned_request()`), 404 на предполагаемой версии не считается ошибкой — запрос повторяется по альтернативному пути, и кэш переустанавливается по факту успеха (панель могла обновиться между двумя вызовами клиента).
 
@@ -1738,15 +1753,19 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - Переустановка на сервер с уже стоящей Remnawave: фронт показывает предупреждение (старая установка сносится `docker compose down -v`), `install.sh` в unattended-режиме переподтверждает сам.
 
 **Frontend:**
-- Страница Remnawave: 4 карточки в overview — Users, IPs, Devices, Nodes Online
+- Вкладка «Обзор» (`components/remnawave/OverviewTab.tsx`): статус сбора, 5 плиток (клиентов онлайн, онлайн IP, городов, IP за срок истории, устройств), полоса нод Remnawave (клик — фильтр карты и таблицы по ноде), карта, таблица IP. Обновление раз в минуту
+- Карта (`GeoMap.tsx`, MapLibre GL `~6.16.0`): грузится отдельным чанком только при открытии вкладки, воркер MapLibre задаётся явно (`setWorkerUrl` + `?worker&url` — сам он ищет файл рядом со своим модулем, а после сборки Vite его там нет). Подложка — тёмный стиль OpenFreeMap с подписями на языке интерфейса; если стиль (за 8 с) или первые тайлы не загрузились — контуры стран из `countries.geo.json` (импорт `?url`, лежит в `/assets/`: nginx панели без UID-префикса пропускает только `/assets/`) и свои шрифты подписей `public/assets/map-glyphs/` (Noto Sans Bold, латиница и цифры, OFL) — запасная карта не ходит на OpenFreeMap вообще. Номер стиля (`styleVersion`) ведёт `useMaplibreMap` и сбрасывает при смене стиля: до загрузки нового стиля компоненты не трогают слои. До зума 3 — круги по странам, дальше — места с кластеризацией (`clusterProperties` суммируют ips и поля сравнения). Размер — сколько IP сейчас, цвет — «к вчера» (голубой / жёлтый ≤ 70 % / красный ≤ 40 % от вчерашнего, сравнение только при вчерашних ≥ 5), переключатель «Только количество» (`localStorage`). Клик по кластеру — приближение, по месту — фильтр таблицы и «ромашка» до 60 IP вокруг точки (база знает город, а не улицу), клик по IP — попап с кнопкой «Открыть пользователя» (модалка с карточкой — работает и для офлайн-пользователя из истории). Колесо мыши масштабирует только после клика по карте. Подписи DB-IP и OpenFreeMap — в атрибуции
+- Таблица IP (`IpTable.tsx`) следует за картой: на зуме ≥ 3 запрашивается только видимая область (`bbox`), на «весь мир» — всё, включая клиентов через релеи и без места; при выбранном месте — только место, без области. Ответ на устаревший запрос отбрасывается (номер запроса), страница сбрасывается вместе со сменой фильтра. Обзор собирает данные через `Promise.allSettled` — сбой одного эндпоинта не обнуляет остальные блоки. Тумблер «только активные» (выключен — история за срок), поиск по IP/пользователю/городу/провайдеру, сортировка, пагинация 50
+- Провайдер (`ProviderBadge.tsx`): крупные операторы РФ узнаются по имени организации ASN (Билайн, МТС, МегаФон, Ростелеком, T2, Yota, Дом.ру) — бейдж в фирменном цвете; остальные — инициалы, цвет от номера ASN. Полное имя и AS — в подсказке
+- Карточка пользователя во вкладке «Пользователи» (`UserGeoDetails.tsx`): чипы (трафик за сутки, городов, провайдеров, нод, IP за срок), мини-карта (`ClientMiniMap.tsx`: точки IP — онлайн/раньше, ноды, дуги IP → нода), таблица IP с городом, провайдером, нодами и удалением, HWID-устройства
 - Вкладка Anomalies: 5 карточек в summary (включая `traffic_exceeds`)
-- HWID-устройства пользователя показываются в деталях пользователя
 - Overview и Users без PeriodSelector (данные всегда актуальные)
 - Status filter по умолчанию: `ACTIVE`
 - Toggle "Использовать другого Telegram бота" в настройках аномалий; поля token/chat_id показываются только при включённом toggle
 - При включённом мастер-тумблере `anomaly_enabled` — 4 суб-тумблера пер-тип проверок (IP/HWID/UA/данные устройства)
 - Под тумблером «IP превышает лимит» — три числовых поля (запас IP, число подтверждений, запас ASN) и отдельный суб-блок «Умное определение»: тумблер + числовое поле порога трафика в ГБ/сутки, видны только при включённом `anomaly_ip_enabled`; такой же суб-блок «Умное определение» — под тумблером «Невалидные данные устройства» (виден при включённом `anomaly_devdata_enabled`); под тумблером «Неизвестный User-Agent» — короткий label «Известные клиенты (по одному на строку)» и textarea реестра масок (моноширинный шрифт); очистка textarea и сохранение возвращает встроенный список клиентов. Объяснение параметров простым языком — в FAQ вкладки «Настройки» (обзорная статья `PAGE_REMNAWAVE.md`, раздел «Настройки проверок»), не в подсказках под полями
 - Кнопка игнора аномалии — контекстная: `ip_exceeds_limit` → «Игнор IP», остальные типы → «Игнор HWID»
+- Вкладка Settings, блок «Сбор данных»: интервал, срок истории IP (1–90 дней) и состояние базы геолокации (`GeoDbStatus.tsx`: месяц, ошибка, «Обновить сейчас»)
 - Вкладка Settings: двухколоночный grid (lg-брейкпоинт). Левая колонка: API / Collection / Anomaly Notifications. Правая колонка: Traffic Anomaly Triggers (порог в ГБ + confirm count). Save, Ignored Users, списки игнора и Danger Zone — на всю ширину под grid. Секции Ignored Users / Ignore IP / Ignore HWID — в трёхколоночном grid. Контент растянут на всю ширину без ограничения (max-w-5xl/max-w-3xl); поле поиска и IP-фильтр — без ограничения max-w-sm.
 - Все строки локализованы через i18n (ru.json / en.json)
 
@@ -1761,7 +1780,12 @@ Dashboard (`ServerCard.tsx`) читает скорость из `total.rx_bytes_
 - `panel/backend/app/services/remnawave_node_install.py` — установка на существующий сервер: `parse_sse_event`, `run_install_on_node` (через агента), `HostInstallJobManager`
 - `panel/backend/app/routers/remnawave_install.py` — роутер установки (prefix `/servers`): `POST /{id}/install-remnawave` (`via_panel` + `ssh` — по SSH через панель), `GET /remnawave-install/jobs`, `GET /remnawave-install/{job_id}/stream`
 - `panel/backend/tests/test_remnawave_install_command.py` — команда (с туннелем и без), разбор SSE агента, `install_via_panel` на живом asyncssh-сервере в процессе (адрес туннеля в команде, код выхода, отказ sshd в пробросе, неверный пароль)
+- `panel/backend/app/services/geoip.py` — локальная база DB-IP: разбор записей, лукап, ежемесячное обновление
+- `panel/backend/app/services/remnawave_geo_ingest.py` — склейка ответов нод, история IP, гео, почасовые суммы мест, кэш нод, IP релеев, чистка
+- `panel/backend/app/services/remnawave_geo_queries.py` — сводка, данные карты, таблица IP, история пользователя
+- `panel/backend/tests/test_geoip.py`, `tests/test_remnawave_geo.py` — разбор записей и выбор месяца базы; склейка ответов нод, подсчёт мест, bbox, пропавшие места, свёртка по странам
 - `panel/frontend/src/pages/Remnawave.tsx` — страница (overview, users, anomalies, install, settings)
+- `panel/frontend/src/components/remnawave/` — вкладка «Обзор», карта, таблица IP, карточка и модалка пользователя, мини-карта, бейдж провайдера, статус гео-базы, загрузчик MapLibre и стиля (`mapLoader.ts`, `useMaplibreMap.ts`), помощники (`geo.ts`), контуры стран для запасной подложки
 - `panel/frontend/src/api/client.ts` — API-клиент
 - `panel/frontend/src/locales/en.json`, `ru.json` — переводы
 

@@ -20,6 +20,7 @@ from app.routers import gre
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
+from app.services.geoip import start_geoip_updater, stop_geoip_updater
 from app.services.server_alerter import start_server_alerter, stop_server_alerter
 from app.services.loss_exclusions import load_loss_exclusions
 from app.services.billing_checker import start_billing_checker, stop_billing_checker
@@ -112,6 +113,7 @@ async def lifespan(app: FastAPI):
     blocklist_manager = get_blocklist_manager()
     await blocklist_manager.start()
 
+    await start_geoip_updater()
     await start_xray_stats_collector()
     await start_server_alerter()
     await start_billing_checker()
@@ -159,6 +161,7 @@ async def lifespan(app: FastAPI):
     await stop_billing_checker()
     await stop_server_alerter()
     await stop_xray_stats_collector()
+    await stop_geoip_updater()
     await blocklist_manager.stop()
     await stop_panel_host_sampler()
     await stop_collector()

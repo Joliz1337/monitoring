@@ -1788,6 +1788,7 @@ export interface RemnawaveSettings {
   cookie_secret: string | null
   enabled: boolean
   collection_interval: number
+  ip_history_days: number
   ignored_user_ids: number[]
   anomaly_enabled: boolean
   anomaly_ip_enabled: boolean
@@ -1859,6 +1860,110 @@ export interface RemnawaveSummary {
   unique_users: number
   unique_ips: number
   total_devices: number
+  cities_online: number
+  ips_history: number
+  history_days: number
+  relay_users: number
+}
+
+export interface RemnawaveGeoLocation {
+  key: string
+  country_code: string
+  place: string
+  lat: number
+  lon: number
+  ips: number
+  users: number
+  prev: number | null
+}
+
+export interface RemnawaveGeoCountry {
+  country_code: string
+  lat: number
+  lon: number
+  ips: number
+  prev: number | null
+}
+
+export interface RemnawaveGeoNode {
+  uuid: string
+  name: string | null
+  country_code: string | null
+  ips: number
+}
+
+export interface RemnawaveGeoMap {
+  locations: RemnawaveGeoLocation[]
+  countries: RemnawaveGeoCountry[]
+  nodes: RemnawaveGeoNode[]
+  compare_available: boolean
+  relay_users: number
+  unlocated_ips: number
+  geo_ready: boolean
+  geo_error: string | null
+}
+
+export interface RemnawaveNodeBrief {
+  uuid: string
+  name: string | null
+  country_code: string | null
+}
+
+export interface RemnawaveGeoIpRow {
+  ip: string
+  last_seen: string | null
+  online: boolean
+  users: { id: number; username: string | null }[]
+  users_total: number
+  nodes: RemnawaveNodeBrief[]
+  country_code: string | null
+  place: string | null
+  asn: number | null
+  as_org: string | null
+  lat: number | null
+  lon: number | null
+  relay: string | null
+}
+
+export interface RemnawaveGeoIpsParams {
+  bbox?: string
+  place?: string
+  node?: string
+  search?: string
+  active_only?: boolean
+  sort?: 'last_seen' | 'ip' | 'city' | 'provider'
+  dir?: 'asc' | 'desc'
+  offset?: number
+  limit?: number
+}
+
+export interface RemnawaveUserHistoryIp {
+  source_ip: string
+  first_seen: string | null
+  last_seen: string | null
+  online: boolean
+  nodes: string[]
+  country_code: string | null
+  place: string | null
+  lat: number | null
+  lon: number | null
+  asn: number | null
+  as_org: string | null
+  relay: string | null
+}
+
+export interface RemnawaveUserNode extends RemnawaveNodeBrief {
+  lat: number | null
+  lon: number | null
+}
+
+export interface RemnawaveGeoStatus {
+  ready: boolean
+  month: string | null
+  build: string | null
+  updating: boolean
+  error: string | null
+  checked_at: string | null
 }
 
 export interface RemnawaveUser {
@@ -1892,6 +1997,10 @@ export interface RemnawaveUserDetails {
   unique_ips: number
   ips: RemnawaveUserIp[]
   devices: RemnawaveHwidDevice[]
+  history: RemnawaveUserHistoryIp[]
+  history_days: number
+  nodes: RemnawaveUserNode[]
+  summary: { cities: number; providers: number; nodes: number; ips_history: number }
 }
 
 export interface RemnawaveAnomaly {
@@ -1946,6 +2055,14 @@ export const remnawaveApi = {
     api.get<{ users: RemnawaveUser[]; total: number; offset: number; limit: number }>('/remnawave/stats/top-users', { params }),
   getUserStats: (email: number) =>
     api.get<RemnawaveUserDetails>(`/remnawave/stats/user/${email}`),
+  getUserTraffic: (email: number) =>
+    api.get<{ bytes: number | null }>(`/remnawave/stats/user/${email}/traffic`),
+  getGeoMap: (node?: string) =>
+    api.get<RemnawaveGeoMap>('/remnawave/geo/map', { params: { node } }),
+  getGeoIps: (params: RemnawaveGeoIpsParams) =>
+    api.get<{ rows: RemnawaveGeoIpRow[]; total: number }>('/remnawave/geo/ips', { params }),
+  getGeoStatus: () => api.get<RemnawaveGeoStatus>('/remnawave/geo/status'),
+  updateGeoDb: () => api.post<{ started: boolean }>('/remnawave/geo/update'),
   clearStats: () =>
     api.delete<{ success: boolean; deleted: { xray_stats: number }; message: string }>('/remnawave/stats/clear'),
   clearUserIp: (email: number, sourceIp: string) =>

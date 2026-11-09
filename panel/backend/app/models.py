@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, BigInteger, Index, ForeignKey, UniqueConstraint
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.sql import func
 from app.database import Base
 from app.crypto import EncryptedString
@@ -475,6 +476,7 @@ class RemnawaveSettings(Base):
     enabled = Column(Boolean, default=False)
     collection_interval = Column(Integer, default=300)
     ignored_user_ids = Column(Text, nullable=True)  # JSON array of user IDs
+    ip_history_days = Column(Integer, default=30)    # сколько дней хранить историю IP клиентов
 
     # Anomaly detection
     anomaly_enabled = Column(Boolean, default=False)
@@ -530,9 +532,71 @@ class XrayStats(Base):
     email = Column(Integer, primary_key=True, nullable=False)
     source_ip = Column(String(45), primary_key=True, nullable=False)
     last_seen = Column(DateTime(timezone=True), server_default=func.now())
+    node_uuids = Column(ARRAY(String(64)), nullable=False, server_default='{}')
 
     # email — ведущая колонка составного PK (email, source_ip), поэтому отдельный
     # индекс на email избыточен: PK-индекс уже покрывает фильтр WHERE email = ...
+
+
+class RemnawaveIpHistory(Base):
+    """С каких IP и через какие ноды пользователь подключался за срок истории."""
+    __tablename__ = "remnawave_ip_history"
+
+    user_id = Column(Integer, primary_key=True)
+    source_ip = Column(String(45), primary_key=True)
+    node_uuid = Column(String(64), primary_key=True)
+    first_seen = Column(DateTime(timezone=True), nullable=False)
+    last_seen = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index('idx_rw_ip_history_last_seen', 'last_seen'),
+        Index('idx_rw_ip_history_ip', 'source_ip'),
+    )
+
+
+class IpGeo(Base):
+    """Место и провайдер IP по локальной базе DB-IP; чистится при смене месяца базы."""
+    __tablename__ = "ip_geo"
+
+    ip = Column(String(45), primary_key=True)
+    country_code = Column(String(2), nullable=True)
+    region = Column(String(120), nullable=True)
+    place = Column(String(120), nullable=False, server_default='')
+    lat = Column(Float, nullable=True)
+    lon = Column(Float, nullable=True)
+    asn = Column(Integer, nullable=True)
+    as_org = Column(String(200), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index('idx_ip_geo_place', 'country_code', 'place'),
+    )
+
+
+class RemnawaveGeoPresence(Base):
+    """Почасовые суммы онлайн-IP по местам — для сравнения карты «к вчера»."""
+    __tablename__ = "remnawave_geo_presence"
+
+    bucket = Column(DateTime(timezone=True), primary_key=True)
+    country_code = Column(String(2), primary_key=True)
+    place = Column(String(120), primary_key=True)
+    lat = Column(Float, nullable=False)
+    lon = Column(Float, nullable=False)
+    ips_sum = Column(BigInteger, nullable=False, default=0)
+    samples = Column(Integer, nullable=False, default=0)
+
+
+class RemnawaveNodeCache(Base):
+    """Ноды Remnawave с координатами: имя ноды в истории переживает её удаление."""
+    __tablename__ = "remnawave_node_cache"
+
+    uuid = Column(String(64), primary_key=True)
+    name = Column(String(200), nullable=True)
+    country_code = Column(String(8), nullable=True)
+    address = Column(String(255), nullable=True)
+    lat = Column(Float, nullable=True)
+    lon = Column(Float, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class RemnawaveIpAnomalyState(Base):
