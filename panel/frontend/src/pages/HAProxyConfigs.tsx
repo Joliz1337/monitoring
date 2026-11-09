@@ -679,10 +679,13 @@ function RuleForm({
   const singleTargetLabel = ownerLabel(findOwner(ipOwners, form.target_ip), addressRole)
   const interceptedByDnat = portsInterceptedOnServers(dnatServers, [parseInt(form.listen_port) || 0])
 
-  // Канал — свойство сервера панели: черновик правится здесь, а уходит на бэкенд при сохранении правила
-  const [capacityDraft, setCapacityDraft] = useState<Record<number, string>>(() => Object.fromEntries(
+  // Канал — свойство сервера панели: черновик правится здесь, а уходит на бэкенд при сохранении правила.
+  // Сравнение — со снимком на открытии формы, а не со свежими nodes: иначе вторая открытая
+  // форма при сохранении откатила бы канал, только что сохранённый в первой
+  const [initialCapacities] = useState<Record<number, string>>(() => Object.fromEntries(
     nodes.filter(node => node.link_capacity_mbit != null).map(node => [node.id, String(node.link_capacity_mbit)]),
   ))
+  const [capacityDraft, setCapacityDraft] = useState<Record<number, string>>(initialCapacities)
   const loadMode = form.is_balancer && (form.balancer_options?.load_weights ?? false)
   const ownerOf = (address: string) => findOwner(ipOwners, address)?.id
   const capacityOf = (serverId: number) => parseCapacity(capacityDraft[serverId])
@@ -694,12 +697,9 @@ function RuleForm({
     setForm(f => ({ ...f, balancer_options: options, servers: turnedOn && fallbackWeights ? fallbackWeights : f.servers }))
   }
 
-  const changedCapacities = (): Record<number, number | null> => {
-    const savedById = new Map(nodes.map(node => [node.id, node.link_capacity_mbit ?? null]))
-    return Object.fromEntries(backendGroups.groups
-      .map(({ serverId }) => [serverId, parseCapacity(capacityDraft[serverId])] as const)
-      .filter(([serverId, mbit]) => mbit !== (savedById.get(serverId) ?? null)))
-  }
+  const changedCapacities = (): Record<number, number | null> => Object.fromEntries(backendGroups.groups
+    .map(({ serverId }) => [serverId, parseCapacity(capacityDraft[serverId])] as const)
+    .filter(([serverId, mbit]) => mbit !== parseCapacity(initialCapacities[serverId])))
 
   const save = async () => {
     if (loadMode) {

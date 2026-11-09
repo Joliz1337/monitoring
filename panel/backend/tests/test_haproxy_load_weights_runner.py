@@ -12,12 +12,15 @@ import os
 import sys
 import unittest
 from datetime import datetime, timezone
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import httpx  # noqa: E402
+from sqlalchemy.dialects import postgresql  # noqa: E402
 
 from app.models import Server  # noqa: E402
+from app.services import haproxy_load_weights_runner as runner_module  # noqa: E402
 from app.services.haproxy_config import (  # noqa: E402
     BackendServer,
     BalancerOptions,
@@ -30,6 +33,7 @@ from app.services.haproxy_load_weights_runner import (  # noqa: E402
     CycleInput,
     LoadWeightsRunner,
     RelayTarget,
+    relay_select,
 )
 
 MBIT = 1_000_000 / 8
@@ -50,16 +54,19 @@ def profile_config() -> str:
 PROFILE = profile_config()
 
 
-def relay(node_version: str = "10.35.0") -> Server:
-    return Server(id=RELAY_ID, name="relay", url="https://relay.example:9100", api_key="key",
+def relay(node_version: str = "10.35.0", server_id: int = RELAY_ID, source_ips: list[str] | None = None,
+          sync_status: str = "synced") -> Server:
+    return Server(id=server_id, name=f"relay{server_id}", url=f"https://relay{server_id}.example:9100", api_key="key",
                   node_version=node_version, last_seen=datetime.now(timezone.utc),
                   node_capabilities=None, pki_enabled=False, proxy_url=None,
-                  active_haproxy_profile_id=PROFILE_ID, haproxy_listen_ips=None, haproxy_source_ips=None)
+                  active_haproxy_profile_id=PROFILE_ID, haproxy_listen_ips=None,
+                  haproxy_source_ips=json.dumps(source_ips) if source_ips else None,
+                  haproxy_sync_status=sync_status)
 
 
-def cycle_input(node_version: str = "10.35.0") -> CycleInput:
-    return CycleInput(relays=[RelayTarget(relay(node_version), PROFILE)], profiles={PROFILE_ID: PROFILE},
-                      owners=OWNERS, capacities=CAPS)
+def cycle_input(node_version: str = "10.35.0", relays: list[Server] | None = None) -> CycleInput:
+    targets = [RelayTarget(server, PROFILE) for server in (relays or [relay(node_version)])]
+    return CycleInput(relays=targets, profiles={PROFILE_ID: PROFILE}, owners=OWNERS, capacities=CAPS)
 
 
 class FakeClock:
@@ -145,6 +152,37 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.clock.now = 29
         await self.runner.push_cycle(cycle_input())
         self.assertIn({"backend": "backend_tcp_lb", "server": "srv1", "weight": 0}, self.sent_weights())
+
+    async def test_unsynced_relay_is_skipped(self):
+        # На релее ещё старый конфиг: веса для нового попали бы не туда
+        await self.runner.push_cycle(cycle_input(relays=[relay(sync_status="failed")]))
+        self.assertEqual(self.captured, [])
+
+    async def test_one_broken_relay_does_not_stop_the_others(self):
+        def factory(server):
+            if server.id == 1:
+                raise RuntimeError("no mTLS context")
+            return self.client
+        runner = LoadWeightsRunner(client_factory=factory, clock=self.clock)
+        await runner.push_cycle(cycle_input(relays=[relay(server_id=1), relay(server_id=2)]))
+        self.assertEqual([r.url.host for r in self.captured], ["relay2.example"])
+
+    async def test_relays_with_same_source_count_share_one_render(self):
+        relays = [relay(server_id=1, source_ips=["192.0.2.10", "192.0.2.11"]),
+                  relay(server_id=2, source_ips=["198.51.100.5", "198.51.100.6"]),
+                  relay(server_id=3)]
+        with mock.patch.object(runner_module, "render_for_server", wraps=runner_module.render_for_server) as render:
+            await self.runner.push_cycle(cycle_input(relays=relays))
+        self.assertEqual(render.call_count, 2)
+        by_host = {r.url.host: {w["server"] for w in json.loads(r.content)["weights"]} for r in self.captured}
+        self.assertIn("srv1_o2", by_host["relay1.example"])
+        self.assertIn("srv1_o2", by_host["relay2.example"])
+        self.assertNotIn("srv1_o2", by_host["relay3.example"])
+
+    def test_relay_query_skips_heavy_metrics(self):
+        sql = str(relay_select().compile(dialect=postgresql.dialect()))
+        self.assertNotIn("last_metrics", sql)
+        self.assertIn("node_version", sql)
 
     async def test_profile_view_for_rule_form(self):
         await self.runner.push_cycle(cycle_input())

@@ -15,10 +15,12 @@ from datetime import datetime, timezone
 from typing import Callable, Mapping, Optional
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import Select, select
+from sqlalchemy.orm import defer
 
 from app.database import async_session
 from app.models import HAProxyConfigProfile, Server
+from app.services.haproxy_addresses import ServerAddresses, load_ips, render_for_server
 from app.services.haproxy_config import LOAD_WEIGHTS_MARKER
 from app.services.haproxy_load_weights import (
     WEIGHT_RESEND_SECONDS,
@@ -30,7 +32,7 @@ from app.services.haproxy_load_weights import (
     rule_views,
     should_push,
 )
-from app.services.haproxy_profile_sync import is_server_online, render_profile_for_server
+from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.node_capabilities import Capability, server_allows
 from app.services.reserved_ports_sync import _version_tuple
@@ -51,6 +53,22 @@ PUSH_HARD_TIMEOUT_SEC = 15.0
 NODE_MAX_ITEMS = 4096
 # Карта «адрес → сервер» разбирает last_metrics всего парка — раз в цикл это дорого
 OWNERS_CACHE_SECONDS = 60
+# Подставные выходные адреса: имена копий _oN зависят только от их числа, а не от
+# самих адресов, поэтому релеи с одинаковым числом выходных IP считаются один раз
+PLACEHOLDER_SOURCE_NET = "192.0.2."
+SYNCED = "synced"
+
+ShapeKey = tuple[str, int]
+
+
+def relay_select() -> Select:
+    """Релеи профилей без last_metrics: метрики нужны коллектору, а здесь каждые
+    10 секунд они тянули бы из базы десятки килобайт на сервер впустую."""
+    return (
+        select(Server)
+        .options(defer(Server.last_metrics))
+        .where(Server.is_active == True, Server.active_haproxy_profile_id.isnot(None))  # noqa: E712
+    )
 
 
 @dataclass
@@ -154,9 +172,7 @@ class LoadWeightsRunner:
             profiles = {profile_id: config or "" for profile_id, config in rows}
             if not any(LOAD_WEIGHTS_MARKER in config for config in profiles.values()):
                 return None
-            relays = (await db.execute(
-                select(Server).where(Server.is_active == True, Server.active_haproxy_profile_id.isnot(None))  # noqa: E712
-            )).scalars().all()
+            relays = (await db.execute(relay_select())).scalars().all()
             capacities = dict((await db.execute(
                 select(Server.id, Server.link_capacity_mbit).where(Server.link_capacity_mbit.isnot(None))
             )).all())
@@ -180,10 +196,18 @@ class LoadWeightsRunner:
         self._views_at = datetime.now(timezone.utc)
 
         sem = asyncio.Semaphore(PUSH_CONCURRENCY)
+        shapes: dict[ShapeKey, dict[WeightKey, int]] = {}
 
         async def push_one(target: RelayTarget) -> None:
             async with sem:
-                await self._push_relay(target, data, loads)
+                try:
+                    await self._push_relay(target, data, loads, shapes)
+                except Exception:
+                    # Один сбойный релей (например, без mTLS-контекста) не должен
+                    # оставлять без весов весь парк
+                    if target.server.id not in self._failing:
+                        self._failing.add(target.server.id)
+                        logger.exception("load weights: relay %s failed", target.server.name)
 
         await asyncio.gather(*(push_one(t) for t in data.relays if self._eligible(t.server)))
 
@@ -192,6 +216,10 @@ class LoadWeightsRunner:
         return {sid: load for sid, (load, at) in self._loads.items() if now - at <= self._stale_after}
 
     def _eligible(self, server: Server) -> bool:
+        # Синхронизация не прошла — на релее старый конфиг, и веса нового попали бы
+        # не в те бэкенды (а при hash-алгоритме перекинули бы клиентов)
+        if server.haproxy_sync_status != SYNCED:
+            return False
         if not is_server_online(server) or not server_allows(server, Capability.HAPROXY, write=True):
             return False
         version = server.node_version
@@ -199,15 +227,25 @@ class LoadWeightsRunner:
             return False
         return not (server.id in self._unsupported and self._unsupported[server.id] == version)
 
-    async def _push_relay(self, target: RelayTarget, data: CycleInput, loads: Mapping[int, NodeLoad]) -> None:
+    async def _push_relay(
+        self,
+        target: RelayTarget,
+        data: CycleInput,
+        loads: Mapping[int, NodeLoad],
+        shapes: dict[ShapeKey, dict[WeightKey, int]],
+    ) -> None:
         server = target.server
         if LOAD_WEIGHTS_MARKER not in target.config_content:
             # Режим выключили — reload после синхронизации сам вернул веса из конфига
             self._pushed.pop(server.id, None)
             self._forced.discard(server.id)
             return
-        rendered = render_profile_for_server(target.config_content, server)
-        current = relay_weights(rendered, data.owners, data.capacities, loads)
+        shape = (target.config_content, len(load_ips(server.haproxy_source_ips)))
+        if shape not in shapes:
+            placeholders = ServerAddresses(source=tuple(f"{PLACEHOLDER_SOURCE_NET}{i + 1}" for i in range(shape[1])))
+            rendered = render_for_server(target.config_content, placeholders)
+            shapes[shape] = relay_weights(rendered, data.owners, data.capacities, loads)
+        current = shapes[shape]
         previous = self._pushed.get(server.id)
         since = None if previous is None else self._clock() - previous.at
         if not should_push(previous.weights if previous else None, current, since, server.id in self._forced):
