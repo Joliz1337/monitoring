@@ -7,7 +7,6 @@ Integration with the Remnawave panel: where clients connect from, their devices 
 - **Overview** — summary, nodes, the client map and the IP table: activity, user, node, city, provider. The table shows what's currently visible on the map; clicking a node keeps only its clients, clicking a table row opens the user card.
 - **Map** — countries from afar, cities closer in. Circle size is how many clients are online now, color compares with the same hour yesterday: yellow — noticeably fewer, red — far fewer, red outline — there were clients yesterday and none now. Clicking a city fans out its clients, clicking a dot opens the IP card.
 - **Users** — the user card with a mini map: where they connect from now and before, through which nodes, which providers, and their traffic over the last 24 hours.
-- **Route** — a button next to the IP in the table and in the card. The node the client is connected to traces the route to their address, and the map draws the traffic path through the cities where the routers are. A leg whose latency is higher than the distance explains is highlighted yellow or red — that shows where time is lost on the way. The Remnawave node has to be added to the panel as a server.
 - Connection settings and the ignore list.
 
 ## Anomalies

@@ -3,15 +3,14 @@
 IP collection via Remnawave Panel API, HWID device tracking.
 """
 
-import ipaddress
 import json
 import logging
 import re
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func as sql_func, and_, or_, delete, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,12 +18,9 @@ from app.auth import verify_auth
 from app.database import get_db
 from app.models import (
     RemnawaveSettings, XrayStats, RemnawaveUserCache, RemnawaveHwidDevice,
-    RemnawaveIpHistory, RemnawaveGeoPresence, Server,
+    RemnawaveIpHistory, RemnawaveGeoPresence,
 )
-from app.routers.loss import trace_http_error
-from app.services.client_route import RoutePoint, assemble_route, find_node_server, node_route_point
-from app.services.geoip import geoip_status, get_geoip, request_geoip_update
-from app.services.loss_trace import TraceError, fetch_trace, start_trace
+from app.services.geoip import geoip_status, request_geoip_update
 from app.services.known_clients import build_ua_pattern, default_ua_text
 from app.services.remnawave_api import get_remnawave_api
 from app.services.remnawave_geo_ingest import DEFAULT_IP_HISTORY_DAYS
@@ -35,10 +31,6 @@ from app.services.xray_stats_collector import get_xray_stats_collector
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 logger = logging.getLogger(__name__)
-
-# Трасса до клиента идёт TCP на этот порт: промежуточные роутеры отвечают на любой,
-# а 443 фильтруют реже прочих
-CLIENT_ROUTE_PORT = 443
 
 
 # === Request Models ===
@@ -564,65 +556,6 @@ async def get_geo_status(_: dict = Depends(verify_auth)):
 @router.post("/geo/update")
 async def update_geo_db(_: dict = Depends(verify_auth)):
     return {"started": request_geoip_update()}
-
-
-class ClientRouteRequest(BaseModel):
-    ip: str = Field(..., max_length=45)
-    node_uuid: str = Field(..., min_length=1, max_length=64)
-
-    @field_validator("ip")
-    @classmethod
-    def _public_ip(cls, value: str) -> str:
-        address = ipaddress.ip_address(value.strip())
-        if not address.is_global:
-            raise ValueError("ip must be a public address")
-        return str(address)
-
-
-@router.post("/geo/route")
-async def start_client_route(data: ClientRouteRequest, db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
-    """Трасса с ноды Remnawave до IP клиента; ход — GET /geo/route/{server_id}/{trace_id}."""
-    server = await find_node_server(db, data.node_uuid)
-    # Сессию отпускаем до похода на ноду
-    await db.commit()
-    if server is None:
-        raise HTTPException(status_code=404, detail="node_not_in_panel")
-    try:
-        trace_id = await start_trace(server, data.ip, CLIENT_ROUTE_PORT)
-    except TraceError as exc:
-        raise trace_http_error(exc)
-    return {"server_id": server.id, "server_name": server.name, "trace_id": trace_id}
-
-
-@router.get("/geo/route/{server_id}/{trace_id}")
-async def get_client_route(
-    server_id: int,
-    trace_id: str = Path(..., pattern="^[0-9a-f]{1,64}$"),
-    node_uuid: str = Query(..., min_length=1, max_length=64),
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth),
-):
-    geoip = get_geoip()
-    server = (await db.execute(
-        select(Server).where(Server.id == server_id, Server.is_active == True)  # noqa: E712
-    )).scalar_one_or_none()
-    node = await node_route_point(db, node_uuid, geoip.lookup)
-    await db.commit()
-    if server is None:
-        raise HTTPException(status_code=404, detail="not_found")
-    if node is None:
-        raise HTTPException(status_code=409, detail="node_location_unknown")
-    try:
-        trace = await fetch_trace(server, trace_id)
-    except TraceError as exc:
-        raise trace_http_error(exc)
-    client = RoutePoint.from_geo(geoip.lookup(trace.get("ip", "")))
-    route = assemble_route(trace, node, client, geoip.lookup)
-    return {
-        "ip": trace.get("ip"), "state": trace.get("state"), "error": trace.get("error"),
-        "rounds_done": trace.get("rounds_done", 0), "rounds_total": trace.get("rounds_total", 0),
-        **route,
-    }
 
 
 # === Anomalies ===
