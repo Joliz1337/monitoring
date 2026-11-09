@@ -124,6 +124,15 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         await self.runner.push_cycle(cycle_input())
         self.assertEqual(len(self.captured), 1)
 
+    async def test_unsupported_mark_expires(self):
+        # На dev-канале обновлённая нода сохраняет номер версии — пометка не должна быть вечной
+        self.status = 404
+        await self.runner.push_cycle(cycle_input())
+        self.status = 200
+        self.clock.now += 601
+        await self.runner.push_cycle(cycle_input())
+        self.assertEqual(len(self.captured), 2)
+
     async def test_failed_push_is_retried(self):
         self.status = 500
         await self.runner.push_cycle(cycle_input())

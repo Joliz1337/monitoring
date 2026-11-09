@@ -57,6 +57,9 @@ OWNERS_CACHE_SECONDS = 60
 # самих адресов, поэтому релеи с одинаковым числом выходных IP считаются один раз
 PLACEHOLDER_SOURCE_NET = "192.0.2."
 SYNCED = "synced"
+# Нода без эндпоинта спрашивается заново через этот срок: на dev-канале обновлённая
+# нода сохраняет номер версии, и пометка по одной версии жила бы до рестарта панели
+UNSUPPORTED_RETRY_SECONDS = 600
 
 ShapeKey = tuple[str, int]
 
@@ -107,8 +110,8 @@ class LoadWeightsRunner:
         self._stale_after = STALE_CYCLES * DEFAULT_COLLECT_INTERVAL
         self._pushed: dict[int, _Pushed] = {}
         self._forced: set[int] = set()
-        # Нода, ответившая 404, не умеет веса до смены версии агента
-        self._unsupported: dict[int, Optional[str]] = {}
+        # Нода, ответившая 404, не умеет веса: версия агента и момент ответа
+        self._unsupported: dict[int, tuple[Optional[str], float]] = {}
         self._failing: set[int] = set()
         self._views: dict[int, dict[str, list[LineWeight]]] = {}
         self._views_at: Optional[datetime] = None
@@ -225,7 +228,8 @@ class LoadWeightsRunner:
         version = server.node_version
         if not version or _version_tuple(version) < _version_tuple(MIN_NODE_VERSION_HAPROXY_WEIGHTS):
             return False
-        return not (server.id in self._unsupported and self._unsupported[server.id] == version)
+        marked = self._unsupported.get(server.id)
+        return not (marked and marked[0] == version and self._clock() - marked[1] < UNSUPPORTED_RETRY_SECONDS)
 
     async def _push_relay(
         self,
@@ -282,7 +286,7 @@ class LoadWeightsRunner:
             self._warn_once(server, f"request failed: {e!r}")
             return None
         if response.status_code == 404:
-            self._unsupported[server.id] = server.node_version
+            self._unsupported[server.id] = (server.node_version, self._clock())
             logger.info("load weights: node %s (%s) has no runtime weights endpoint", server.name, server.node_version)
             return None
         if response.status_code != 200:
