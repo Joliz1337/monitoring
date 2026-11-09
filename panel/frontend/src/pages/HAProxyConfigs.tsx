@@ -33,7 +33,7 @@ import {
   PortUsageMap,
   portUsageApi,
 } from '../api/client'
-import { DYNAMIC_ALGORITHMS } from '../utils/loadWeights'
+import { DYNAMIC_ALGORITHMS, capacityWeights, groupBackendsByServer, isCapacityInvalid, parseCapacity } from '../utils/loadWeights'
 import { formatPortRanges, formatServerPorts, portsInterceptedOnServers, rangesCover, ServerRanges } from '../utils/portConflicts'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
@@ -42,6 +42,7 @@ import ServerAddressesEditor from '../components/haproxy/ServerAddressesEditor'
 import ServersPasteBox, { type ServersMergeMode } from '../components/haproxy/ServersPasteBox'
 import ServersFromNodesBox from '../components/haproxy/ServersFromNodesBox'
 import ServersPortBox from '../components/haproxy/ServersPortBox'
+import ServerCapacitiesBox from '../components/haproxy/ServerCapacitiesBox'
 
 
 function SyncStatusBadge({ status, online }: { status: string | null; online?: boolean }) {
@@ -678,6 +679,47 @@ function RuleForm({
   const singleTargetLabel = ownerLabel(findOwner(ipOwners, form.target_ip), addressRole)
   const interceptedByDnat = portsInterceptedOnServers(dnatServers, [parseInt(form.listen_port) || 0])
 
+  // Канал — свойство сервера панели: черновик правится здесь, а уходит на бэкенд при сохранении правила
+  const [capacityDraft, setCapacityDraft] = useState<Record<number, string>>(() => Object.fromEntries(
+    nodes.filter(node => node.link_capacity_mbit != null).map(node => [node.id, String(node.link_capacity_mbit)]),
+  ))
+  const loadMode = form.is_balancer && (form.balancer_options?.load_weights ?? false)
+  const ownerOf = (address: string) => findOwner(ipOwners, address)?.id
+  const capacityOf = (serverId: number) => parseCapacity(capacityDraft[serverId])
+  const backendGroups = groupBackendsByServer(form.servers, ownerOf)
+  const fallbackWeights = capacityWeights(form.servers, ownerOf, capacityOf)
+
+  const changeBalancerOptions = (options: BalancerOptions) => {
+    const turnedOn = (options.load_weights ?? false) && !(form.balancer_options?.load_weights ?? false)
+    setForm(f => ({ ...f, balancer_options: options, servers: turnedOn && fallbackWeights ? fallbackWeights : f.servers }))
+  }
+
+  const changedCapacities = (): Record<number, number | null> => {
+    const savedById = new Map(nodes.map(node => [node.id, node.link_capacity_mbit ?? null]))
+    return Object.fromEntries(backendGroups.groups
+      .map(({ serverId }) => [serverId, parseCapacity(capacityDraft[serverId])] as const)
+      .filter(([serverId, mbit]) => mbit !== (savedById.get(serverId) ?? null)))
+  }
+
+  const save = async () => {
+    if (loadMode) {
+      if (backendGroups.groups.some(({ serverId }) => isCapacityInvalid(capacityDraft[serverId]))) {
+        toast.error(t('balancer.capacities_invalid'))
+        return
+      }
+      const changed = changedCapacities()
+      if (Object.keys(changed).length > 0) {
+        try {
+          await haproxyProfilesApi.setServerCapacities(changed)
+        } catch {
+          toast.error(t('balancer.capacities_save_failed'))
+          return
+        }
+      }
+    }
+    onSave(form)
+  }
+
   const toggleBalancer = (enabled: boolean) => {
     if (enabled && form.servers.length === 0) {
       const first: BackendServer = {
@@ -866,7 +908,7 @@ function RuleForm({
             {/* Algorithm + Settings */}
             <BalancerSettingsSection
               opts={form.balancer_options || { ...DEFAULT_BALANCER_OPTIONS }}
-              onChange={o => setForm(f => ({ ...f, balancer_options: o }))}
+              onChange={changeBalancerOptions}
               t={t}
             />
 
@@ -926,11 +968,22 @@ function RuleForm({
                 {form.servers.map((srv, i) => (
                   <BackendServerRow key={i} srv={srv} index={i} owner={ownerLabel(findOwner(ipOwners, srv.address), addressRole)}
                     load={loadLines?.find(line => line.server_name === srv.name)}
-                    loadMode={form.balancer_options?.load_weights ?? false}
+                    loadMode={loadMode}
                     onChange={updateServer}
                     onRemove={removeServer} canRemove={form.servers.length > 1} t={t} />
                 ))}
               </div>
+              {loadMode && (
+                <ServerCapacitiesBox
+                  groups={backendGroups.groups}
+                  foreign={backendGroups.foreign}
+                  nodes={nodes}
+                  draft={capacityDraft}
+                  onDraftChange={(serverId, value) => setCapacityDraft(draft => ({ ...draft, [serverId]: value }))}
+                  onFillWeights={() => { if (fallbackWeights) setForm(f => ({ ...f, servers: fallbackWeights })) }}
+                  canFillWeights={fallbackWeights !== null}
+                />
+              )}
             </div>
           </>
         )}
@@ -959,7 +1012,7 @@ function RuleForm({
           <button onClick={onCancel} className="px-3 py-1.5 rounded-lg text-xs text-dark-300 hover:text-dark-100 bg-dark-800 hover:bg-dark-700 border border-dark-700 transition-colors">
             {t('common.cancel')}
           </button>
-          <button onClick={() => onSave(form)} disabled={saving}
+          <button onClick={save} disabled={saving}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5">
             {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             {isEdit ? t('common.save') : t('haproxy_configs.add_rule')}
