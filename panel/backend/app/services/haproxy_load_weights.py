@@ -6,6 +6,7 @@
 
 import json
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Mapping, Optional, Sequence
 
 from app.services.haproxy_config import (
@@ -121,15 +122,18 @@ def rule_line_weights(
     return result
 
 
-def load_weight_rules(config: str) -> list[HAProxyRule]:
+# Исполнитель зовёт разбор для каждого релея каждый цикл метрик, а текст конфига
+# меняется редко — кэш по самому тексту
+@lru_cache(maxsize=256)
+def load_weight_rules(config: str) -> tuple[HAProxyRule, ...]:
     """Правила с весами по нагрузке. Алгоритм проверяется и здесь: маркер могли
     вписать руками в бэкенд со static-rr, где смена веса на лету невозможна."""
-    return [
+    return tuple(
         rule for rule in get_config_generator().parse_rules_from_config(config)
         if rule.is_balancer and rule.balancer_options
         and rule.balancer_options.load_weights
         and (rule.balancer_options.algorithm or "roundrobin") in DYNAMIC_ALGORITHMS
-    ]
+    )
 
 
 def relay_weights(

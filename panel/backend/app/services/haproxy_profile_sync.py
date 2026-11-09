@@ -153,6 +153,9 @@ async def _sync_single_server(
                         status="success", message=msg, config_hash=config_hash,
                     ))
                     await db.commit()
+                    # Reload вернул веса к конфигу; импорт здесь — исполнитель сам импортирует этот модуль
+                    from app.services.haproxy_load_weights_runner import get_load_weights_runner
+                    get_load_weights_runner().request_push(server.id)
                     return SyncResult(server.id, server.name, True, msg, status="success")
 
                 return await _record_failure(db, server, profile_id, config_hash, msg)

@@ -38,6 +38,7 @@ from app.services.haproxy_config import (
     normalize_sni_domains,
 )
 from app.services.haproxy_load_weights import nic_speed_mbps
+from app.services.haproxy_load_weights_runner import get_load_weights_runner
 from app.services.haproxy_validator import validate_config
 from app.services.reserved_ports_sync import _version_tuple
 from app.services.server_ip_owners import load_ip_owners
@@ -844,6 +845,12 @@ def _rule_from_data(data: RuleData) -> HAProxyRule:
         servers=servers, balancer_options=balancer_options,
         sni_mode=data.sni_mode, sni_domains=sni_domains,
     )
+
+
+@router.get("/{profile_id}/load-weights")
+async def get_load_weights(profile_id: int, _=Depends(verify_auth)):
+    """Последний расчёт весов по нагрузке для формы правила: канал, загрузка, вес сейчас."""
+    return get_load_weights_runner().profile_view(profile_id)
 
 
 @router.get("/{profile_id}/rules")

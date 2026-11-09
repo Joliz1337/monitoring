@@ -30,6 +30,8 @@ from app.models import (
     Server, ServerCache, MetricsSnapshot, AggregatedMetrics, PanelSettings,
     ServerDowntime, ServerTraffic,
 )
+from app.services.haproxy_load_weights import NodeLoad
+from app.services.haproxy_load_weights_runner import get_load_weights_runner
 from app.services.metrics_rates import NodeRates, poll_window_seconds, snapshot_rates
 from app.services.traffic_ingest import get_traffic_ingest
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -235,6 +237,7 @@ class MetricsCollector:
         self._xray_check_task = asyncio.create_task(self._xray_check_loop())
         self._active_cache_task = asyncio.create_task(self._active_haproxy_cache_loop())
         self._haproxy_retry_task = asyncio.create_task(self._haproxy_pending_sync_loop())
+        await get_load_weights_runner().start()
         logger.info(f"Metrics collector started (interval: {self._collect_interval}s, haproxy: {self._haproxy_interval}s)")
 
     async def stop(self):
@@ -247,6 +250,7 @@ class MetricsCollector:
                     await task
                 except asyncio.CancelledError:
                     pass
+        await get_load_weights_runner().stop()
         # Финальный flush уже после остановки цикла сбора — иначе он гнался бы с observe().
         await get_traffic_ingest().stop()
         logger.info("Metrics collector stopped")
@@ -338,6 +342,15 @@ class MetricsCollector:
                     "last_error": error_info["message"],
                     "error_code": error_info["code"]
                 })
+
+        if snapshots:
+            get_load_weights_runner().observe(
+                {
+                    s["server_id"]: NodeLoad(s["net_rx_bytes_per_sec"], s["net_tx_bytes_per_sec"], s["cpu_usage"])
+                    for s in snapshots
+                },
+                self._collect_interval,
+            )
 
         if snapshots or server_updates:
             success_updates = [u for u in server_updates if "last_seen" in u]
