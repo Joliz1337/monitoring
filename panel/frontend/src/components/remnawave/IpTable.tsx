@@ -220,8 +220,21 @@ function IpRow({ row, lang, onOpenUser, onRoute }: {
 }) {
   const { t } = useTranslation()
   const [firstNode, ...otherNodes] = row.nodes
+  const firstUser = row.users[0]
+
+  const openFirstUser = (e: React.MouseEvent) => {
+    if (!firstUser) return
+    // Копирование IP, ссылки, маршрут и имена делают своё; выделение текста мышью — не клик по строке
+    if (e.target instanceof Element && e.target.closest('a, button, [role="button"]')) return
+    if (window.getSelection()?.toString()) return
+    onOpenUser(firstUser.id)
+  }
+
   return (
-    <tr className="border-b border-dark-800/30 hover:bg-dark-800/20 transition-colors">
+    <tr
+      onClick={openFirstUser}
+      className={`border-b border-dark-800/30 hover:bg-dark-800/20 transition-colors ${firstUser ? 'cursor-pointer' : ''}`}
+    >
       <td className="px-4 py-2.5 whitespace-nowrap">
         <span className="inline-flex items-center gap-2 text-dark-300">
           <span className={`w-2 h-2 rounded-full ${row.online ? 'bg-green-400 shadow-sm shadow-green-400/50' : 'bg-dark-600'}`} />
