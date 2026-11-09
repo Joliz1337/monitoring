@@ -3603,15 +3603,27 @@ export const portUsageApi = {
 
 // ==================== Torrent Blocker ====================
 
+export type TorrentBlockerServerMode = 'exclude' | 'include'
+
+/** Сервер в списке режима; пустые ports — режим по умолчанию (exclude: не банить, include: весь IP) */
+export interface TorrentBlockerServerRule {
+  id: number
+  ports: string[]
+}
+
 export interface TorrentBlockerSettings {
   enabled: boolean
   poll_interval_minutes: number
   ban_duration_minutes: number
-  excluded_server_ids: number[]
+  server_mode: TorrentBlockerServerMode
+  excluded_servers: TorrentBlockerServerRule[]
+  included_servers: TorrentBlockerServerRule[]
   webhook_enabled: boolean
   webhook_url: string
   webhook_secret: string
   webhook_delay_seconds: number
+  port_ban_min_node_version: string
+  port_ban_unsupported_server_ids: number[]
 }
 
 export interface TorrentBlockerStatus {

@@ -1,5 +1,6 @@
 """Database module with PostgreSQL support."""
 
+import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -2280,6 +2281,54 @@ async def _migrate_source_pool_manual(conn):
                 logger.warning(f"Could not add source_pool_nodes.{col_name}: {e}")
 
 
+async def _migrate_torrent_blocker_server_mode(conn):
+    """Режимы «кроме выбранных / только выбранные» и порты у серверов блокировщика торрентов.
+
+    Старый список id исключений переносится в записи режима exclude без портов;
+    колонка удаляется только после переноса, иначе исключения пропали бы.
+    """
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'torrent_blocker_settings'
+    """))
+    columns = {row[0] for row in result.fetchall()}
+    if not columns:
+        return
+    for col_name, col_type in (
+        ("server_mode", "VARCHAR(10) DEFAULT 'exclude'"),
+        ("excluded_servers", "TEXT"),
+        ("included_servers", "TEXT"),
+    ):
+        if col_name in columns:
+            continue
+        try:
+            await conn.execute(text(f'ALTER TABLE torrent_blocker_settings ADD COLUMN "{col_name}" {col_type}'))
+            logger.info(f"Added column: torrent_blocker_settings.{col_name}")
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.warning(f"Could not add torrent_blocker_settings.{col_name}: {e}")
+    if "excluded_server_ids" not in columns:
+        return
+    try:
+        rows = (await conn.execute(text(
+            "SELECT id, excluded_server_ids FROM torrent_blocker_settings WHERE excluded_servers IS NULL"
+        ))).all()
+        for row_id, raw in rows:
+            try:
+                server_ids = [int(server_id) for server_id in json.loads(raw or "[]")]
+            except (ValueError, TypeError):
+                logger.warning(f"Unreadable torrent_blocker_settings.excluded_server_ids {raw!r}, dropping it")
+                server_ids = []
+            await conn.execute(
+                text("UPDATE torrent_blocker_settings SET excluded_servers = :value WHERE id = :id"),
+                {"value": json.dumps([{"id": server_id, "ports": []} for server_id in server_ids]), "id": row_id},
+            )
+        await conn.execute(text('ALTER TABLE torrent_blocker_settings DROP COLUMN "excluded_server_ids"'))
+        logger.info("Moved torrent_blocker_settings.excluded_server_ids to excluded_servers")
+    except Exception as e:
+        logger.warning(f"Could not migrate torrent_blocker_settings.excluded_server_ids: {e}")
+
+
 async def _migrate_node_update_step(conn):
     """Этап обновления ноды для статуса на «Обновлениях» — таблица старше колонки."""
     try:
@@ -2356,6 +2405,7 @@ async def init_db():
         await _migrate_metrics_window_columns(conn)
         await _migrate_haproxy_profile_options(conn)
         await _migrate_source_pool_manual(conn)
+        await _migrate_torrent_blocker_server_mode(conn)
         await _migrate_node_update_step(conn)
         await _migrate_encrypt_secrets(conn)
 

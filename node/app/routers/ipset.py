@@ -1,12 +1,10 @@
 """IPSet blocklist management router"""
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
-
-
-from app.services.ipset_manager import get_ipset_manager
+from app.services.ipset_manager import get_ipset_manager, normalize_port_specs
 
 router = APIRouter(prefix="/api/ipset", tags=["ipset"])
 
@@ -28,6 +26,17 @@ class BulkIpRequest(BaseModel):
     permanent: bool = Field(True, description="Target permanent list (True) or temp list (False)")
     direction: str = Field("in", pattern="^(in|out)$", description="Traffic direction: in or out")
     timeout: Optional[int] = Field(None, ge=1, le=2592000, description="Per-request timeout in seconds (overrides default for temp list)")
+
+
+class PortBanRequest(BaseModel):
+    ips: list[str] = Field(..., min_length=1, description="IP addresses or CIDR notations")
+    ports: list[str] = Field(..., min_length=1, description="Ports or ranges: 8443, 10000-10100")
+    timeout: int = Field(..., ge=1, le=2592000, description="Ban duration in seconds")
+
+    @field_validator("ports")
+    @classmethod
+    def _normalize_ports(cls, value: list[str]) -> list[str]:
+        return normalize_port_specs(value)
 
 
 class SyncRequest(BaseModel):
@@ -135,6 +144,22 @@ def bulk_add_ips(request: BulkIpRequest):
         "errors": errors[:10],
         "list": "permanent" if request.permanent else "temp",
         "direction": request.direction
+    }
+
+
+@router.post("/port-ban")
+def port_ban(request: PortBanRequest):
+    """Temporarily ban IPs on the given ports only (TCP and UDP)."""
+    manager = get_ipset_manager()
+    success_count, fail_count, errors = manager.port_ban(request.ips, request.ports, request.timeout)
+
+    return {
+        "success": fail_count == 0,
+        "total": len(request.ips),
+        "added": success_count,
+        "failed": fail_count,
+        "errors": errors[:10],
+        "ports": request.ports,
     }
 
 

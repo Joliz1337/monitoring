@@ -21,6 +21,10 @@ DROP) — iptables идёт сверху вниз и ACCEPT обрывает о�
 сканер не отличает сервер от выключенного, а панель и соседние ноды пингуют как
 раньше. Исключение белого списка — внутри самого правила, поэтому от порядка
 правил в INPUT оно не зависит. По IPv6 ping закрыт для всех: белый список — IPv4.
+
+Бан по портам (torrent_port_ban, hash:net,port) — временный бан клиента только
+на выбранных портах: на мосту закрывается порт, ведущий на ноду с запретом
+торрентов, а остальные порты у клиента работают.
 """
 
 import ipaddress
@@ -81,6 +85,20 @@ PING_RULE_V4 = [
 ]
 PING_RULE_V6 = ["INPUT", "-p", "ipv6-icmp", "--icmpv6-type", "echo-request", "-j", "DROP"]
 
+SET_PORT_BAN = "torrent_port_ban"
+PORT_BAN_PROTOCOLS = ("tcp", "udp")
+# Ядро раскладывает диапазон портов на отдельные элементы сета, по одному на порт
+# и протокол: 64 порта × tcp/udp дают 128 элементов на IP — maxelem 1 000 000
+# хватает на ~7800 одновременно забаненных адресов
+MAX_PORT_BAN_PORTS = 64
+# raw/PREROUTING видит исходный порт назначения ещё до DNAT, поэтому правило режет
+# и локальный HAProxy, и транзитный проброс; белый список исключён в самом правиле
+PORT_BAN_RULE = [
+    "PREROUTING", "-m", "set", "--match-set", SET_PORT_BAN, "src,dst",
+    "-m", "set", "!", "--match-set", SET_ALLOW, "src", "-j", "DROP",
+]
+_PORT_SPEC_RE = re.compile(r"^(\d{1,5})(?:-(\d{1,5}))?$")
+
 # Direction config: chain + match flag
 _DIR_CONFIG = {
     "in":  {"chain": "INPUT",  "match": "src", "perm": SET_PERMANENT,     "temp": SET_TEMP},
@@ -92,6 +110,30 @@ _ALLOW_CONFIG = {
     "in":  {"chain": "INPUT",  "match": "src", "set": SET_ALLOW},
     "out": {"chain": "OUTPUT", "match": "dst", "set": SET_ALLOW_OUT},
 }
+
+
+class InvalidPortSpecError(ValueError):
+    pass
+
+
+def normalize_port_specs(specs: list[str]) -> list[str]:
+    """«8443», «10000-10100» → отсортированные уникальные записи для ipset."""
+    ranges: set[tuple[int, int]] = set()
+    for spec in specs:
+        match = _PORT_SPEC_RE.match(spec.strip())
+        if not match:
+            raise InvalidPortSpecError(f"Invalid port: {spec!r}")
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if not 1 <= start <= end <= 65535:
+            raise InvalidPortSpecError(f"Invalid port range: {spec!r}")
+        ranges.add((start, end))
+    if not ranges:
+        raise InvalidPortSpecError("At least one port is required")
+    total = sum(end - start + 1 for start, end in ranges)
+    if total > MAX_PORT_BAN_PORTS:
+        raise InvalidPortSpecError(f"Too many ports: {total} > {MAX_PORT_BAN_PORTS}")
+    return [str(start) if start == end else f"{start}-{end}" for start, end in sorted(ranges)]
 
 
 @dataclass
@@ -334,6 +376,53 @@ class IpsetManager:
                 logger.info(f"Ping {'blocked' if block else 'allowed'} (except allowlist)")
         return True, message
 
+    # ── бан по портам ──
+
+    def _run_raw_iptables(self, args: list[str]) -> tuple[bool, str, str]:
+        return self._run_iptables(["-t", "raw"] + args)
+
+    def _ensure_port_ban(self) -> tuple[bool, str]:
+        """Сет и правило бана по портам: после ребута хоста их нет, ставятся заново.
+
+        `-exist create` вместо проверки через `ipset list`: листинг сета в сотни
+        тысяч записей занимает секунды на каждый бан. Таймаут сета — константа:
+        при других параметрах `-exist create` отказывает, а каждая запись всё
+        равно несёт свой таймаут бана.
+        """
+        ok, _, stderr = self._run_ipset([
+            "-exist", "create", SET_PORT_BAN, "hash:net,port", "family", "inet",
+            "hashsize", "4096", "maxelem", "1000000", "timeout", str(DEFAULT_TIMEOUT),
+        ])
+        if not ok:
+            return False, f"Failed to create {SET_PORT_BAN}: {stderr}"
+        return self._sync_rule(self._run_raw_iptables, PORT_BAN_RULE, present=True)
+
+    def port_ban(self, ips: list[str], ports: list[str], timeout: int) -> tuple[int, int, list[str]]:
+        """Временный бан IP только на портах `ports` (вывод normalize_port_specs), TCP и UDP."""
+        normalized, invalid, skipped_non_public = self._prepare_block_ips(ips)
+        errors = [f"{ip}: Invalid IP/CIDR" for ip in invalid]
+        if skipped_non_public:
+            errors.append(f"Refused to block {skipped_non_public} non-public range(s)")
+
+        with self._mutate_lock:
+            ok, message = self._ensure_port_ban()
+            if not ok:
+                logger.error(f"Port ban unavailable: {message}")
+                return 0, len(ips), errors + [message]
+            lines = [
+                f"add {SET_PORT_BAN} {ip},{protocol}:{port} timeout {timeout}"
+                for ip in sorted(normalized)
+                for protocol in PORT_BAN_PROTOCOLS
+                for port in ports
+            ]
+            success, _, stderr = self._run_ipset_restore(lines)
+            if not success:
+                logger.error(f"port_ban restore failed: {stderr}")
+                return 0, len(ips), errors + [f"ipset restore: {stderr}"]
+
+        logger.info(f"Port-banned {len(normalized)} entries on ports {','.join(ports)}")
+        return len(normalized), len(invalid) + skipped_non_public, errors
+
     # ── init ──
     
     def init_sets(self) -> tuple[bool, str]:
@@ -373,6 +462,11 @@ class IpsetManager:
         success, msg = self._apply_ping_rules(self._block_ping)
         if not success:
             logger.error(f"Failed to restore ping rule: {msg}")
+
+        # Тоже ссылается на allowlist; без него бан по портам поставит каждый бан сам
+        success, msg = self._ensure_port_ban()
+        if not success:
+            logger.error(f"Failed to set up port ban: {msg}")
 
         self._load_permanent_ips()
         self._load_allow_ips()

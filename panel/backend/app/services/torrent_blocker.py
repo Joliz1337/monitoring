@@ -21,6 +21,12 @@ from app.models import (
 from app.services.http_client import get_external_client, get_node_client, node_auth_headers
 from app.services.node_capabilities import Capability, server_allows
 from app.services.remnawave_api import RemnawaveAPI, RemnawaveAPIError
+from app.services.torrent_ban_scope import (
+    MIN_NODE_VERSION_PORT_BAN,
+    BanScope,
+    NodeBan,
+    node_supports_port_ban,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -252,47 +258,68 @@ class TorrentBlockerService:
             last_seen = last_seen.replace(tzinfo=timezone.utc)
         return last_seen >= cutoff
 
-    async def _send_to_nodes(
-        self, ips: list[str], ban_seconds: int, excluded_ids: set[int]
-    ) -> dict[int, dict]:
+    @classmethod
+    def _plan_bans(
+        cls, servers: list[Server], scope: BanScope, cutoff: datetime,
+    ) -> list[tuple[Server, NodeBan]]:
+        planned = [(s, ban) for s in servers if (ban := scope.ban_for(s.id)) is not None]
+
+        # Слать бан только на живые ноды: мёртвые лишь висят до таймаута 20с и тормозят
+        # весь цикл (gather ждёт всех). Живость — по свежести last_seen от сборщика метрик.
+        live = [(s, ban) for s, ban in planned if cls._is_node_live(s, cutoff)]
+        allowed = [(s, ban) for s, ban in live if server_allows(s, Capability.IPSET, write=True)]
+
+        # Бан всего IP вместо непонятого нодой бана по портам отрезал бы клиенту все серверы моста
+        targets: list[tuple[Server, NodeBan]] = []
+        outdated: list[str] = []
+        for server, ban in allowed:
+            if ban.whole_ip or node_supports_port_ban(server.node_version):
+                targets.append((server, ban))
+            else:
+                outdated.append(server.name)
+
+        skipped_dead = len(planned) - len(live)
+        if skipped_dead:
+            logger.info(f"Torrent blocker: skipping {skipped_dead} offline node(s)")
+        skipped_denied = len(live) - len(allowed)
+        if skipped_denied:
+            logger.info(f"Torrent blocker: skipping {skipped_denied} node(s) with IP blocking closed")
+        if outdated:
+            logger.warning(
+                f"Torrent blocker: skipping port ban on node(s) older than "
+                f"{MIN_NODE_VERSION_PORT_BAN}: {', '.join(outdated)}"
+            )
+        return targets
+
+    async def _send_to_nodes(self, ips: list[str], ban_seconds: int, scope: BanScope) -> dict[int, dict]:
         async with async_session() as db:
             result = await db.execute(
                 select(Server).where(Server.is_active == True)  # noqa: E712
             )
             servers = result.scalars().all()
 
-        # Слать бан только на живые ноды: мёртвые лишь висят до таймаута 20с и тормозят
-        # весь цикл (gather ждёт всех). Живость — по свежести last_seen от сборщика метрик.
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=LIVE_THRESHOLD_SECONDS)
-        candidates = [s for s in servers if s.id not in excluded_ids]
-        live = [s for s in candidates if self._is_node_live(s, cutoff)]
-        targets = [s for s in live if server_allows(s, Capability.IPSET, write=True)]
-
-        skipped_dead = len(candidates) - len(live)
-        if skipped_dead:
-            logger.info(f"Torrent blocker: skipping {skipped_dead} offline node(s)")
-        skipped_denied = len(live) - len(targets)
-        if skipped_denied:
-            logger.info(f"Torrent blocker: skipping {skipped_denied} node(s) with IP blocking closed")
+        targets = self._plan_bans(servers, scope, cutoff)
         if not targets:
             logger.warning("No live target nodes for torrent blocker bans")
             return {}
 
         sem = asyncio.Semaphore(SEND_CONCURRENCY)
 
-        async def _send_one(server: Server) -> dict:
+        async def _send_one(server: Server, ban: NodeBan) -> dict:
+            if ban.whole_ip:
+                path = "/api/ipset/bulk-add"
+                payload = {"ips": ips, "permanent": False, "direction": "in", "timeout": ban_seconds}
+            else:
+                path = "/api/ipset/port-ban"
+                payload = {"ips": ips, "ports": list(ban.ports), "timeout": ban_seconds}
             async with sem:
                 try:
                     client = get_node_client(server)
                     response = await client.post(
-                        f"{server.url}/api/ipset/bulk-add",
+                        f"{server.url}{path}",
                         headers=node_auth_headers(server),
-                        json={
-                            "ips": ips,
-                            "permanent": False,
-                            "direction": "in",
-                            "timeout": ban_seconds,
-                        },
+                        json=payload,
                         timeout=20.0,
                     )
                     if response.status_code == 200:
@@ -302,9 +329,8 @@ class TorrentBlockerService:
                 except Exception as e:
                     return {"success": False, "error": str(e)}
 
-        tasks = [_send_one(s) for s in targets]
-        results_list = await asyncio.gather(*tasks)
-        return {s.id: r for s, r in zip(targets, results_list)}
+        results_list = await asyncio.gather(*[_send_one(s, ban) for s, ban in targets])
+        return {s.id: r for (s, _), r in zip(targets, results_list)}
 
     async def _poll_cycle(self):
         if self._lock.locked():
@@ -333,13 +359,7 @@ class TorrentBlockerService:
                     await api.close()
                     return
 
-                excluded_ids = set()
-                if settings.excluded_server_ids:
-                    try:
-                        excluded_ids = set(json.loads(settings.excluded_server_ids))
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
+                scope = BanScope.from_settings(settings)
                 ban_seconds = settings.ban_duration_minutes * 60
                 ips = [t.ip for t in targets]
 
@@ -354,7 +374,7 @@ class TorrentBlockerService:
                     if delay_seconds > 0:
                         await asyncio.sleep(delay_seconds)
 
-                node_results = await self._send_to_nodes(ips, ban_seconds, excluded_ids)
+                node_results = await self._send_to_nodes(ips, ban_seconds, scope)
 
                 successful = sum(1 for r in node_results.values() if r.get("success"))
                 failed = len(node_results) - successful

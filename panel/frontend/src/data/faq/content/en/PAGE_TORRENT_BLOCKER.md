@@ -1,6 +1,6 @@
 # Torrent blocker
 
-The panel polls Remnawave, finds sessions with torrent traffic and bans those addresses across all nodes.
+The panel polls Remnawave, finds sessions with torrent traffic and bans those addresses on the nodes.
 
 ## Parameters
 
@@ -8,8 +8,12 @@ The panel polls Remnawave, finds sessions with torrent traffic and bans those ad
 |---|---|
 | Poll interval | How often the panel asks Remnawave for new detections. 5 minutes by default |
 | Ban duration | How long an address stays blocked |
-| Excluded servers | Nodes the ban is not distributed to. Servers are listed by folder, already excluded ones are hidden; a whole folder can be excluded at once |
+| Where to ban | «Everywhere except selected» — every node except the list; «Only on selected» — only the nodes in the list. Each mode keeps its own list; a whole folder can be added at once |
 | Webhook warning | Send a notification and give the user time to stop the client before the ban |
+
+## Ban only ports
+
+Click a server in the list to choose how it bans: the mode default («Don't ban» or «Ban the whole IP») or «Ban only ports». Useful on a bridge where each port leads to its own exit node: close only the port of the node where torrents are forbidden, and the client keeps every other server. Ports are comma-separated, ranges like `10000-10010` work, TCP and UDP are both closed. Requires node 10.35.0.
 
 ## How the warning works
 

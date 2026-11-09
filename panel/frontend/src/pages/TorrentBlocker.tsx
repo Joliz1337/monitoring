@@ -1,18 +1,16 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { nodeAllows } from '../utils/nodeCapabilities'
 import { useTranslation } from 'react-i18next'
 import ReactApexChart from 'react-apexcharts'
 import type { ApexOptions } from 'apexcharts'
 import {
   ShieldBan, Settings, Activity, BarChart3, Ban,
-  Play, Save, Loader2, Server as ServerIcon, X, Webhook, Send,
+  Play, Save, Loader2, Webhook, Send,
 } from 'lucide-react'
 import { useTorrentBlockerStore } from '../stores/torrentBlockerStore'
-import type { TorrentBlockerStatsRange } from '../api/client'
-import { Tooltip } from '../components/ui/Tooltip'
+import type { TorrentBlockerServerMode, TorrentBlockerServerRule, TorrentBlockerStatsRange } from '../api/client'
 import { SecretInput } from '../components/ui/SecretInput'
 import { FAQIcon } from '../components/FAQ'
-import { ServerAddDropdown } from '../components/servers/ServerAddDropdown'
+import { BanTargetList } from '../components/torrentBlocker/BanTargetList'
 
 function formatRelative(iso: string | null): string {
   if (!iso) return '—'
@@ -61,7 +59,9 @@ export default function TorrentBlocker() {
     enabled: false,
     poll_interval_minutes: 5,
     ban_duration_minutes: 30,
-    excluded_server_ids: [] as number[],
+    server_mode: 'exclude' as TorrentBlockerServerMode,
+    excluded_servers: [] as TorrentBlockerServerRule[],
+    included_servers: [] as TorrentBlockerServerRule[],
     webhook_enabled: false,
     webhook_url: '',
     webhook_secret: '',
@@ -96,7 +96,9 @@ export default function TorrentBlocker() {
         enabled: store.settings.enabled,
         poll_interval_minutes: store.settings.poll_interval_minutes,
         ban_duration_minutes: store.settings.ban_duration_minutes,
-        excluded_server_ids: store.settings.excluded_server_ids || [],
+        server_mode: store.settings.server_mode ?? 'exclude',
+        excluded_servers: store.settings.excluded_servers ?? [],
+        included_servers: store.settings.included_servers ?? [],
         webhook_enabled: store.settings.webhook_enabled ?? false,
         webhook_url: store.settings.webhook_url ?? '',
         webhook_secret: store.settings.webhook_secret ?? '',
@@ -121,25 +123,12 @@ export default function TorrentBlocker() {
     setTestingWebhook(false)
   }
 
-  const addExclusions = (serverIds: number[]) => {
+  const setServerRules = (mode: TorrentBlockerServerMode, rules: TorrentBlockerServerRule[]) => {
     setLocalSettings(prev => ({
       ...prev,
-      excluded_server_ids: [...new Set([...prev.excluded_server_ids, ...serverIds])],
+      [mode === 'exclude' ? 'excluded_servers' : 'included_servers']: rules,
     }))
   }
-
-  const removeExclusion = (serverId: number) => {
-    setLocalSettings(prev => ({
-      ...prev,
-      excluded_server_ids: prev.excluded_server_ids.filter(id => id !== serverId),
-    }))
-  }
-
-  const excludedServerNames = useMemo(() => {
-    const map = new Map(store.servers.map(s => [s.id, s.name]))
-    return localSettings.excluded_server_ids
-      .map(id => ({ id, name: map.get(id) || `#${id}` }))
-  }, [localSettings.excluded_server_ids, store.servers])
 
   const status = store.status
   const stats = store.internalStats
@@ -288,48 +277,16 @@ export default function TorrentBlocker() {
             />
           </div>
 
-          <div className="space-y-2">
-            <label className="text-sm text-dark-300">{t('torrent_blocker.excluded_servers')}</label>
-            <p className="text-xs text-dark-500">{t('torrent_blocker.excluded_servers_hint')}</p>
-
-            {excludedServerNames.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {excludedServerNames.map(s => (
-                  <span
-                    key={s.id}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 bg-dark-800 border border-dark-700 rounded-md text-xs text-dark-300"
-                  >
-                    <ServerIcon className="w-3.5 h-3.5 text-dark-500" />
-                    {s.name}
-                    <Tooltip label={t('common.remove_from_list')}>
-                      <button
-                        onClick={() => removeExclusion(s.id)}
-                        className="text-dark-500 hover:text-dark-300 ml-0.5"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    </Tooltip>
-                  </span>
-                ))}
-              </div>
-            )}
-
-            <ServerAddDropdown
-              servers={store.servers}
-              excludeIds={localSettings.excluded_server_ids}
-              onAdd={addExclusions}
-              storageKey="torrent_excluded_expanded_folders"
-              isRestricted={server => !nodeAllows(server, 'ipset', 'write')}
-              labels={{
-                placeholder: t('torrent_blocker.search_servers'),
-                noFolder: t('torrent_blocker.no_folder'),
-                addFolder: t('torrent_blocker.exclude_folder'),
-                allAdded: store.servers.length === 0 ? t('torrent_blocker.no_servers') : t('torrent_blocker.all_excluded'),
-                noResults: t('common.no_results'),
-                clearSearch: t('common.clear_search'),
-              }}
-            />
-          </div>
+          <BanTargetList
+            mode={localSettings.server_mode}
+            excluded={localSettings.excluded_servers}
+            included={localSettings.included_servers}
+            servers={store.servers}
+            portBanUnsupportedIds={store.settings?.port_ban_unsupported_server_ids ?? []}
+            minNodeVersion={store.settings?.port_ban_min_node_version ?? ''}
+            onModeChange={mode => setLocalSettings(prev => ({ ...prev, server_mode: mode }))}
+            onRulesChange={setServerRules}
+          />
 
           <div className="border-t border-dark-800 pt-4 space-y-3">
             <label className="flex items-center justify-between cursor-pointer">

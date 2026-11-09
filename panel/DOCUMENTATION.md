@@ -3232,7 +3232,15 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 ### Torrent Blocker
 
-Обнаружение торрент-трафика с автоматической блокировкой IP. Панель опрашивает Remnawave API, получает текущие сессии пользователей, детектирует торрент-паттерны и рассылает команду бана на все активные ноды. Опционально перед баном отправляет вебхук-предупреждение с задержкой — даёт пользователю время выключить клиент.
+Обнаружение торрент-трафика с автоматической блокировкой IP. Панель опрашивает Remnawave API, получает текущие сессии пользователей, детектирует торрент-паттерны и рассылает команду бана на ноды. Опционально перед баном отправляет вебхук-предупреждение с задержкой — даёт пользователю время выключить клиент.
+
+**Где банить (`services/torrent_ban_scope.py`):**
+
+Переключатель режима `server_mode`: `exclude` («Везде, кроме выбранных») — бан на всех активных нодах, кроме списка `excluded_servers`; `include` («Только на выбранных») — только на нодах из `included_servers`. У каждого режима свой список, переключение не переворачивает смысл списка. Запись списка — `{"id", "ports"}`: пустые `ports` — поведение режима по умолчанию (`exclude` — не банить, `include` — бан всего IP), непустые — бан только этих портов (TCP и UDP). Зачем: клиенты ходят через мост, где каждый порт ведёт на свою выходную ноду; бан всего IP на мосту отрезал бы клиенту все серверы, а бан порта, ведущего на ноду с запретом торрентов, оставляет остальные рабочими.
+
+`BanScope.ban_for(server_id)` возвращает `None` (не банить) или `NodeBan(ports)`; `TorrentBlockerService._plan_bans()` оставляет живые ноды с правом `ipset:write` и раскладывает бан: весь IP — `POST /api/ipset/bulk-add` как раньше, порты — `POST /api/ipset/port-ban` `{ips, ports, timeout}`. Бан по портам требует ноду `MIN_NODE_VERSION_PORT_BAN = 10.35.0`; более старая нода пропускается с предупреждением в логе — на бан всего IP панель не откатывается, иначе клиент потерял бы все серверы моста. Порты нормализует `normalize_port_specs()` (зеркало ноды): `1–65535`, диапазоны `A-B`, не больше `MAX_PORT_BAN_PORTS = 64` портов после раскрытия. Порты едут с каждым баном, нода их не хранит: смена настроек действует на новые баны, стоящие доживают свой срок.
+
+В UI (`components/torrentBlocker/BanTargetList.tsx`) — сегментный переключатель режима, чипы серверов текущего списка (порты — бейджем на чипе) и `ServerAddDropdown`. Клик по чипу открывает поповер: вариант по умолчанию («Не банить» / «Банить весь IP») или «Банить только порты» с полем ввода (проверка на лету, «Применить» выключена при ошибке); закрытие — клик снаружи или Esc, сохранение — общей кнопкой страницы. Для серверов из `port_ban_unsupported_server_ids` пункт портов выключен с подписью о нужной версии ноды, у чипа с уже заданными портами — значок предупреждения.
 
 **Принцип работы с вебхуком (greyperiod-бан):**
 
@@ -3248,6 +3256,9 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 | Поле | Тип | Default | Описание |
 |------|-----|---------|----------|
+| `server_mode` | String(10) | `exclude` | Где банить: `exclude` — везде, кроме списка; `include` — только на списке |
+| `excluded_servers` | Text (JSON) | — | Список режима `exclude`: `[{"id": 5, "ports": ["8443"]}]` |
+| `included_servers` | Text (JSON) | — | Список режима `include`, тот же формат |
 | `webhook_enabled` | Boolean | False | Включить вебхук-предупреждения |
 | `webhook_url` | Text | — | URL эндпоинта (только HTTPS) |
 | `webhook_secret` | Text | — | Секрет для HMAC-SHA256 подписи (опционально) |
@@ -3300,14 +3311,14 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 **Миграция БД:**
 
-`database.py` в `run_migrations()` содержит блок, добавляющий колонки `webhook_enabled`, `webhook_url`, `webhook_secret`, `webhook_delay_seconds` в таблицу `torrent_blocker_settings` для существующих установок.
+`database.py` в `run_migrations()` содержит блок, добавляющий колонки `webhook_enabled`, `webhook_url`, `webhook_secret`, `webhook_delay_seconds` в таблицу `torrent_blocker_settings` для существующих установок. `_migrate_torrent_blocker_server_mode()` добавляет `server_mode`, `excluded_servers`, `included_servers`, переносит старый список id `excluded_server_ids` в `excluded_servers` без портов и только после переноса удаляет старую колонку (проверено на PostgreSQL, повторный запуск ничего не меняет).
 
 **API:**
 
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| GET | /api/torrent-blocker/settings | Текущие настройки (включая webhook-поля) |
-| PUT | /api/torrent-blocker/settings | Обновить настройки; `webhook_url` валидируется как HTTPS; `webhook_delay_seconds` 0–1800 |
+| GET | /api/torrent-blocker/settings | Текущие настройки (включая webhook-поля, `server_mode`, `excluded_servers`, `included_servers`) + `port_ban_min_node_version` и `port_ban_unsupported_server_ids` — активные серверы, чья нода ещё не умеет бан по портам |
+| PUT | /api/torrent-blocker/settings | Обновить настройки; `webhook_url` валидируется как HTTPS; `webhook_delay_seconds` 0–1800; порты в списках серверов нормализуются, неверные — `422` |
 | POST | /api/torrent-blocker/test-webhook | Отправить тестовый вебхук `{webhook_url, webhook_secret}` → `{success, message}` |
 | GET | /api/torrent-blocker/status | Статус цикла (содержит счётчик `webhooks X/Y` при активных вебхуках) |
 
@@ -3329,16 +3340,19 @@ SSE-события: `note_update` — `{"content": "...", "version": N}`, `tasks
 
 **Ключевые файлы:**
 
-- `panel/backend/app/models.py` — модель `TorrentBlockerSettings`: колонки `webhook_*`
-- `panel/backend/app/database.py` — миграция webhook-колонок в `run_migrations()`
-- `panel/backend/app/services/torrent_blocker.py` — `BanTarget` dataclass (включая `detection`/`remnawave_block`); `_extract_ban_targets` (парсит `xrayReport`/`actionReport` из репорта Remnawave); `_enrich_targets`; `_send_webhooks` (HMAC-SHA256, `asyncio.Semaphore(WEBHOOK_CONCURRENCY)`); `send_test_webhook`; `_poll_cycle`; `_is_node_live(server, cutoff)`; `_send_to_nodes`
-- `panel/backend/app/routers/torrent_blocker.py` — `UpdateSettings` с field_validator; `_settings_to_dict`; эндпоинты `POST /test-webhook`, `GET /active-bans`
+- `panel/backend/app/models.py` — модель `TorrentBlockerSettings`: колонки `webhook_*`, `server_mode`, `excluded_servers`, `included_servers`
+- `panel/backend/app/database.py` — миграция webhook-колонок в `run_migrations()`, `_migrate_torrent_blocker_server_mode()`
+- `panel/backend/app/services/torrent_ban_scope.py` — `ServerMode`, `BanScope.ban_for`, `NodeBan`, `normalize_port_specs`, `parse_rules`/`dump_rules`, `node_supports_port_ban`, `port_ban_unsupported_server_ids`
+- `panel/backend/app/services/torrent_blocker.py` — `BanTarget` dataclass (включая `detection`/`remnawave_block`); `_extract_ban_targets` (парсит `xrayReport`/`actionReport` из репорта Remnawave); `_enrich_targets`; `_send_webhooks` (HMAC-SHA256, `asyncio.Semaphore(WEBHOOK_CONCURRENCY)`); `send_test_webhook`; `_poll_cycle`; `_is_node_live(server, cutoff)`; `_plan_bans`; `_send_to_nodes`
+- `panel/backend/app/routers/torrent_blocker.py` — `UpdateSettings` с field_validator, `ServerBanRule`; `_settings_to_dict`, `_settings_response`; эндпоинты `POST /test-webhook`, `GET /active-bans`
+- `panel/backend/tests/test_torrent_ban_scope.py` — режимы, порты, разбор списков, план рассылки, гейт версии
 - `panel/frontend/src/api/client.ts` — тип `TorrentBlockerActiveBan {ip, banned_at, expires_at}`; метод `getActiveBans`; метод `testWebhook`
 - `panel/frontend/src/stores/torrentBlockerStore.ts` — состояние `activeBans/activeBansTotal`; action `fetchActiveBans`; action `testWebhook`
-- `panel/frontend/src/pages/TorrentBlocker.tsx` — блок «Webhook-предупреждение»; таблица «Заблокированные сейчас IP» с пагинацией и авто-обновлением 5 сек; хелпер `formatRemaining`; исключённые серверы — чипы выбранных + `ServerAddDropdown`
+- `panel/frontend/src/pages/TorrentBlocker.tsx` — блок «Webhook-предупреждение»; таблица «Заблокированные сейчас IP» с пагинацией и авто-обновлением 5 сек; хелпер `formatRemaining`; блок «Где банить» — `BanTargetList`
+- `panel/frontend/src/components/torrentBlocker/BanTargetList.tsx` — переключатель режима, чипы серверов с портами, поповер способа бана (`RulePopover`, разбор портов `parsePorts`)
 - `panel/frontend/src/components/servers/FolderedServerPicker.tsx` — выбор серверов по папкам (HAProxy Configs, Remnawave nginx — одиночная привязка к профилю; блок-лист — отметки закрытого ping): поиск по имени/адресу и список по папкам дашборда (`orderFolders`), раскрытые папки — в `localStorage` по `storageKey`, при поиске раскрыты все, без папок — плоский список; строку сервера и действие по клику задаёт страница (`renderServer`), необязательный `renderFolderAction` — элемент в заголовке папки (клик по нему папку не сворачивает), `autoFocus` поиска отключаем для встроенного, а не всплывающего списка
 - `panel/frontend/src/components/servers/ServerAddDropdown.tsx` — поиск с выпадающим списком серверов по папкам для добавления в список: уже добавленные (`excludeIds`) скрыты, у папки кнопка «добавить всю папку», при поиске папки раскрыты, раскрытые папки запоминаются в `localStorage` по `storageKey`, порядок папок — из `dashboard_folder_order`; `isRestricted` помечает замком ноды, которые действие не примут
-- `panel/frontend/src/locales/ru.json`, `en.json` — ключи `torrent_blocker.active_bans`, `no_active_bans`, `col_banned_at`, `col_expires_in`, `webhook_*`
+- `panel/frontend/src/locales/ru.json`, `en.json` — ключи `torrent_blocker.active_bans`, `no_active_bans`, `col_banned_at`, `col_expires_in`, `webhook_*`, `ban_targets`, `mode_*`, `rule_*`, `ports_*`, `add_folder_*`, `all_added`
 - `panel/frontend/src/data/faq/content/ru/PAGE_TORRENT_BLOCKER.md` — краткое описание вебхука в общем FAQ страницы
 - `panel/frontend/src/data/faq/content/ru/TORRENT_BLOCKER_WEBHOOK.md`, `faq.types.ts` (`FAQ_SCREENS.TORRENT_BLOCKER_WEBHOOK`) — отдельная статья с полным форматом payload и разбором полей; значок `<FAQIcon screen="TORRENT_BLOCKER_WEBHOOK" size="sm" />` рядом с тумблером «Webhook-предупреждение»
 
