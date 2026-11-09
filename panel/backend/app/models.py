@@ -657,11 +657,14 @@ class TorrentBlockerSettings(Base):
     poll_interval_minutes = Column(Integer, default=5)
     ban_duration_minutes = Column(Integer, default=30)
     # Где банить (services/torrent_ban_scope): exclude — везде, кроме excluded_servers,
-    # include — только на included_servers. Списки — JSON [{"id": 5, "ports": ["8443"]}],
-    # у каждого режима свой, чтобы переключение не переворачивало смысл списка
+    # include — только на included_servers. Серверы — JSON [{"id": 5, "ports": ["8443"], "override": true}],
+    # порты папок — [{"name": "Мосты", "ports": ["8443"]}]; у каждого режима свои списки,
+    # чтобы переключение не переворачивало их смысл
     server_mode = Column(String(10), default="exclude")
     excluded_servers = Column(Text, nullable=True)
     included_servers = Column(Text, nullable=True)
+    excluded_folders = Column(Text, nullable=True)
+    included_folders = Column(Text, nullable=True)
 
     # Вебхук-предупреждение: панель уведомляет внешний сервис (бота) о грядущем бане,
     # ждёт webhook_delay_seconds (грейс-период для пользователя), затем банит IP.

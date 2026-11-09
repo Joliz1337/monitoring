@@ -3,6 +3,8 @@
 Режим exclude — бан на всех нодах, кроме списка; include — только на нодах из
 списка. У сервера в списке могут быть порты: тогда клиенту на нём закрываются
 только они (мост, где порт ведёт на ноду с запретом торрентов), остальное работает.
+Порты можно задать и папке — их получают серверы этой папки из списка, у которых
+нет своей настройки; своя настройка сервера главнее папки.
 """
 
 import json
@@ -25,7 +27,7 @@ MIN_NODE_VERSION_PORT_BAN = "10.35.0"
 MAX_PORT_BAN_PORTS = 64
 _PORT_SPEC_RE = re.compile(r"^(\d{1,5})(?:-(\d{1,5}))?$")
 
-ServerRules = dict[int, tuple[str, ...]]
+Ports = tuple[str, ...]
 
 
 class ServerMode(str, Enum):
@@ -39,7 +41,7 @@ class InvalidPortSpecError(ValueError):
 
 @dataclass(frozen=True)
 class NodeBan:
-    ports: tuple[str, ...] = ()
+    ports: Ports = ()
 
     @property
     def whole_ip(self) -> bool:
@@ -47,18 +49,48 @@ class NodeBan:
 
 
 @dataclass(frozen=True)
+class ServerRule:
+    ports: Ports = ()
+    # Способ режима по умолчанию, выбранный самому серверу вопреки портам его папки
+    override: bool = False
+
+    @property
+    def own(self) -> bool:
+        return self.override or bool(self.ports)
+
+
+ServerRules = dict[int, ServerRule]
+FolderRules = dict[str, Ports]
+
+
+@dataclass(frozen=True)
+class ServerList:
+    """Список одного режима: серверы и порты их папок."""
+    servers: ServerRules = field(default_factory=dict)
+    folders: FolderRules = field(default_factory=dict)
+
+    def ports_for(self, server_id: int, folder: Optional[str]) -> Optional[Ports]:
+        """None — сервера нет в списке; пустые порты — способ режима по умолчанию."""
+        rule = self.servers.get(server_id)
+        if rule is None:
+            return None
+        if rule.own or not folder:
+            return rule.ports
+        return self.folders.get(folder, ())
+
+
+@dataclass(frozen=True)
 class BanScope:
     mode: ServerMode = ServerMode.EXCLUDE
-    excluded: ServerRules = field(default_factory=dict)
-    included: ServerRules = field(default_factory=dict)
+    excluded: ServerList = field(default_factory=ServerList)
+    included: ServerList = field(default_factory=ServerList)
 
-    def ban_for(self, server_id: int) -> Optional[NodeBan]:
+    def ban_for(self, server_id: int, folder: Optional[str]) -> Optional[NodeBan]:
         """None — на этой ноде не банить; пустые порты — бан всего IP."""
         if self.mode == ServerMode.INCLUDE:
-            if server_id not in self.included:
-                return None
-            return NodeBan(self.included[server_id])
-        ports = self.excluded.get(server_id)
+            ports = self.included.ports_for(server_id, folder)
+            return None if ports is None else NodeBan(ports)
+        ports = self.excluded.ports_for(server_id, folder)
         if ports is None:
             return NodeBan()
         return NodeBan(ports) if ports else None
@@ -67,8 +99,14 @@ class BanScope:
     def from_settings(cls, settings: TorrentBlockerSettings) -> "BanScope":
         return cls(
             mode=parse_mode(settings.server_mode),
-            excluded=parse_rules(settings.excluded_servers),
-            included=parse_rules(settings.included_servers),
+            excluded=ServerList(
+                parse_server_rules(settings.excluded_servers),
+                parse_folder_rules(settings.excluded_folders),
+            ),
+            included=ServerList(
+                parse_server_rules(settings.included_servers),
+                parse_folder_rules(settings.included_folders),
+            ),
         )
 
 
@@ -98,29 +136,61 @@ def normalize_port_specs(specs: list[str]) -> list[str]:
     return [str(start) if start == end else f"{start}-{end}" for start, end in sorted(ranges)]
 
 
-def parse_rules(raw: Optional[str]) -> ServerRules:
-    """JSON `[{"id": 5, "ports": ["8443"]}]` → {5: ("8443",)}; битые записи пропускаются."""
+def _load_list(raw: Optional[str]) -> list:
     if not raw:
-        return {}
+        return []
     try:
         items = json.loads(raw)
     except ValueError as e:
-        logger.error(f"Invalid torrent blocker server list, ignoring it: {e}")
-        return {}
-    if not isinstance(items, list):
-        return {}
+        logger.error(f"Invalid torrent blocker list, ignoring it: {e}")
+        return []
+    return items if isinstance(items, list) else []
+
+
+def parse_server_rules(raw: Optional[str]) -> ServerRules:
+    """JSON `[{"id": 5, "ports": ["8443"], "override": false}]`; битые записи пропускаются."""
     rules: ServerRules = {}
-    for item in items:
+    for item in _load_list(raw):
         try:
-            ports = item.get("ports") or []
-            rules[int(item["id"])] = tuple(normalize_port_specs(ports))
+            ports = tuple(normalize_port_specs(item.get("ports") or []))
+            rules[int(item["id"])] = ServerRule(ports, bool(item.get("override")))
         except (AttributeError, KeyError, TypeError, ValueError) as e:
             logger.error(f"Skipping invalid torrent blocker server entry {item!r}: {e}")
     return rules
 
 
-def dump_rules(rules: ServerRules) -> str:
-    return json.dumps([{"id": server_id, "ports": list(ports)} for server_id, ports in rules.items()])
+def parse_folder_rules(raw: Optional[str]) -> FolderRules:
+    """JSON `[{"name": "Мосты", "ports": ["8443"]}]`; папка без портов — правила нет."""
+    rules: FolderRules = {}
+    for item in _load_list(raw):
+        try:
+            name = item["name"]
+            ports = tuple(normalize_port_specs(item.get("ports") or []))
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
+            logger.error(f"Skipping invalid torrent blocker folder entry {item!r}: {e}")
+            continue
+        if isinstance(name, str) and name and ports:
+            rules[name] = ports
+    return rules
+
+
+def server_rules_to_list(rules: ServerRules) -> list[dict]:
+    return [
+        {"id": server_id, "ports": list(rule.ports), "override": rule.own}
+        for server_id, rule in rules.items()
+    ]
+
+
+def folder_rules_to_list(rules: FolderRules) -> list[dict]:
+    return [{"name": name, "ports": list(ports)} for name, ports in rules.items()]
+
+
+def dump_server_rules(rules: ServerRules) -> str:
+    return json.dumps(server_rules_to_list(rules))
+
+
+def dump_folder_rules(rules: FolderRules) -> str:
+    return json.dumps(folder_rules_to_list(rules))
 
 
 def node_supports_port_ban(node_version: Optional[str]) -> bool:

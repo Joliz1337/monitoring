@@ -11,24 +11,31 @@ from app.database import get_db
 from app.models import TorrentBlockerBan, TorrentBlockerSettings
 from app.services.torrent_ban_scope import (
     MIN_NODE_VERSION_PORT_BAN,
+    FolderRules,
     ServerMode,
+    ServerRule,
     ServerRules,
-    dump_rules,
+    dump_folder_rules,
+    dump_server_rules,
+    folder_rules_to_list,
     normalize_port_specs,
+    parse_folder_rules,
     parse_mode,
-    parse_rules,
+    parse_server_rules,
     port_ban_unsupported_server_ids,
+    server_rules_to_list,
 )
 from app.services.torrent_blocker import get_torrent_blocker_service
 
 router = APIRouter(prefix="/torrent-blocker", tags=["torrent-blocker"])
 
 MAX_LISTED_SERVERS = 5000
+MAX_PORT_SPECS = 500
+FOLDER_NAME_MAX_LENGTH = 200  # Server.folder
 
 
-class ServerBanRule(BaseModel):
-    id: int
-    ports: list[str] = Field(default_factory=list, max_length=500)
+class _PortsRule(BaseModel):
+    ports: list[str] = Field(default_factory=list, max_length=MAX_PORT_SPECS)
 
     @field_validator("ports")
     @classmethod
@@ -36,8 +43,21 @@ class ServerBanRule(BaseModel):
         return normalize_port_specs(value)
 
 
-def _rules_from_request(rules: list[ServerBanRule]) -> ServerRules:
-    return {rule.id: tuple(rule.ports) for rule in rules}
+class ServerBanRule(_PortsRule):
+    id: int
+    override: bool = False
+
+
+class FolderBanRule(_PortsRule):
+    name: str = Field(..., min_length=1, max_length=FOLDER_NAME_MAX_LENGTH)
+
+
+def _server_rules_from_request(rules: list[ServerBanRule]) -> ServerRules:
+    return {rule.id: ServerRule(tuple(rule.ports), rule.override) for rule in rules}
+
+
+def _folder_rules_from_request(rules: list[FolderBanRule]) -> FolderRules:
+    return {rule.name: tuple(rule.ports) for rule in rules if rule.ports}
 
 
 class UpdateSettings(BaseModel):
@@ -47,6 +67,8 @@ class UpdateSettings(BaseModel):
     server_mode: Optional[ServerMode] = None
     excluded_servers: Optional[list[ServerBanRule]] = Field(None, max_length=MAX_LISTED_SERVERS)
     included_servers: Optional[list[ServerBanRule]] = Field(None, max_length=MAX_LISTED_SERVERS)
+    excluded_folders: Optional[list[FolderBanRule]] = Field(None, max_length=MAX_LISTED_SERVERS)
+    included_folders: Optional[list[FolderBanRule]] = Field(None, max_length=MAX_LISTED_SERVERS)
     webhook_enabled: Optional[bool] = None
     webhook_url: Optional[str] = Field(None, max_length=2000)
     webhook_secret: Optional[str] = Field(None, max_length=500)
@@ -63,18 +85,16 @@ class UpdateSettings(BaseModel):
         return value
 
 
-def _rules_to_list(rules: ServerRules) -> list[dict]:
-    return [{"id": server_id, "ports": list(ports)} for server_id, ports in rules.items()]
-
-
 def _settings_to_dict(s: TorrentBlockerSettings) -> dict:
     return {
         "enabled": s.enabled,
         "poll_interval_minutes": s.poll_interval_minutes,
         "ban_duration_minutes": s.ban_duration_minutes,
         "server_mode": parse_mode(s.server_mode).value,
-        "excluded_servers": _rules_to_list(parse_rules(s.excluded_servers)),
-        "included_servers": _rules_to_list(parse_rules(s.included_servers)),
+        "excluded_servers": server_rules_to_list(parse_server_rules(s.excluded_servers)),
+        "included_servers": server_rules_to_list(parse_server_rules(s.included_servers)),
+        "excluded_folders": folder_rules_to_list(parse_folder_rules(s.excluded_folders)),
+        "included_folders": folder_rules_to_list(parse_folder_rules(s.included_folders)),
         "webhook_enabled": s.webhook_enabled,
         "webhook_url": s.webhook_url or "",
         "webhook_secret": s.webhook_secret or "",
@@ -89,6 +109,8 @@ DEFAULTS = {
     "server_mode": ServerMode.EXCLUDE.value,
     "excluded_servers": [],
     "included_servers": [],
+    "excluded_folders": [],
+    "included_folders": [],
     "webhook_enabled": False,
     "webhook_url": "",
     "webhook_secret": "",
@@ -134,9 +156,13 @@ async def update_settings(
     if body.server_mode is not None:
         settings.server_mode = body.server_mode.value
     if body.excluded_servers is not None:
-        settings.excluded_servers = dump_rules(_rules_from_request(body.excluded_servers))
+        settings.excluded_servers = dump_server_rules(_server_rules_from_request(body.excluded_servers))
     if body.included_servers is not None:
-        settings.included_servers = dump_rules(_rules_from_request(body.included_servers))
+        settings.included_servers = dump_server_rules(_server_rules_from_request(body.included_servers))
+    if body.excluded_folders is not None:
+        settings.excluded_folders = dump_folder_rules(_folder_rules_from_request(body.excluded_folders))
+    if body.included_folders is not None:
+        settings.included_folders = dump_folder_rules(_folder_rules_from_request(body.included_folders))
     if body.webhook_enabled is not None:
         settings.webhook_enabled = body.webhook_enabled
     if body.webhook_url is not None:

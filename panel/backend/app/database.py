@@ -2282,7 +2282,7 @@ async def _migrate_source_pool_manual(conn):
 
 
 async def _migrate_torrent_blocker_server_mode(conn):
-    """Режимы «кроме выбранных / только выбранные» и порты у серверов блокировщика торрентов.
+    """Режимы «кроме выбранных / только выбранные» и порты у серверов и папок блокировщика торрентов.
 
     Старый список id исключений переносится в записи режима exclude без портов;
     колонка удаляется только после переноса, иначе исключения пропали бы.
@@ -2298,6 +2298,8 @@ async def _migrate_torrent_blocker_server_mode(conn):
         ("server_mode", "VARCHAR(10) DEFAULT 'exclude'"),
         ("excluded_servers", "TEXT"),
         ("included_servers", "TEXT"),
+        ("excluded_folders", "TEXT"),
+        ("included_folders", "TEXT"),
     ):
         if col_name in columns:
             continue

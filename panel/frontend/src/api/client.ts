@@ -3772,9 +3772,20 @@ export const portUsageApi = {
 
 export type TorrentBlockerServerMode = 'exclude' | 'include'
 
-/** Сервер в списке режима; пустые ports — режим по умолчанию (exclude: не банить, include: весь IP) */
+/**
+ * Сервер в списке режима. Пустые ports без override — порты папки, а без них способ
+ * режима по умолчанию (exclude: не банить, include: весь IP); override — своя настройка
+ * сервера главнее папки (с непустыми ports всегда true).
+ */
 export interface TorrentBlockerServerRule {
   id: number
+  ports: string[]
+  override: boolean
+}
+
+/** Порты для серверов папки из списка, у которых нет своей настройки */
+export interface TorrentBlockerFolderRule {
+  name: string
   ports: string[]
 }
 
@@ -3785,6 +3796,8 @@ export interface TorrentBlockerSettings {
   server_mode: TorrentBlockerServerMode
   excluded_servers: TorrentBlockerServerRule[]
   included_servers: TorrentBlockerServerRule[]
+  excluded_folders: TorrentBlockerFolderRule[]
+  included_folders: TorrentBlockerFolderRule[]
   webhook_enabled: boolean
   webhook_url: string
   webhook_secret: string

@@ -7,10 +7,12 @@ import {
   Play, Save, Loader2, Webhook, Send,
 } from 'lucide-react'
 import { useTorrentBlockerStore } from '../stores/torrentBlockerStore'
-import type { TorrentBlockerServerMode, TorrentBlockerServerRule, TorrentBlockerStatsRange } from '../api/client'
+import type {
+  TorrentBlockerFolderRule, TorrentBlockerServerMode, TorrentBlockerServerRule, TorrentBlockerStatsRange,
+} from '../api/client'
 import { SecretInput } from '../components/ui/SecretInput'
 import { FAQIcon } from '../components/FAQ'
-import { BanTargetList } from '../components/torrentBlocker/BanTargetList'
+import { BanTargetList, type BanList } from '../components/torrentBlocker/BanTargetList'
 
 function formatRelative(iso: string | null): string {
   if (!iso) return '—'
@@ -62,6 +64,8 @@ export default function TorrentBlocker() {
     server_mode: 'exclude' as TorrentBlockerServerMode,
     excluded_servers: [] as TorrentBlockerServerRule[],
     included_servers: [] as TorrentBlockerServerRule[],
+    excluded_folders: [] as TorrentBlockerFolderRule[],
+    included_folders: [] as TorrentBlockerFolderRule[],
     webhook_enabled: false,
     webhook_url: '',
     webhook_secret: '',
@@ -99,6 +103,8 @@ export default function TorrentBlocker() {
         server_mode: store.settings.server_mode ?? 'exclude',
         excluded_servers: store.settings.excluded_servers ?? [],
         included_servers: store.settings.included_servers ?? [],
+        excluded_folders: store.settings.excluded_folders ?? [],
+        included_folders: store.settings.included_folders ?? [],
         webhook_enabled: store.settings.webhook_enabled ?? false,
         webhook_url: store.settings.webhook_url ?? '',
         webhook_secret: store.settings.webhook_secret ?? '',
@@ -123,11 +129,14 @@ export default function TorrentBlocker() {
     setTestingWebhook(false)
   }
 
-  const setServerRules = (mode: TorrentBlockerServerMode, rules: TorrentBlockerServerRule[]) => {
-    setLocalSettings(prev => ({
-      ...prev,
-      [mode === 'exclude' ? 'excluded_servers' : 'included_servers']: rules,
-    }))
+  const banList: BanList = localSettings.server_mode === 'exclude'
+    ? { servers: localSettings.excluded_servers, folders: localSettings.excluded_folders }
+    : { servers: localSettings.included_servers, folders: localSettings.included_folders }
+
+  const setBanList = (list: BanList) => {
+    setLocalSettings(prev => (prev.server_mode === 'exclude'
+      ? { ...prev, excluded_servers: list.servers, excluded_folders: list.folders }
+      : { ...prev, included_servers: list.servers, included_folders: list.folders }))
   }
 
   const status = store.status
@@ -279,13 +288,12 @@ export default function TorrentBlocker() {
 
           <BanTargetList
             mode={localSettings.server_mode}
-            excluded={localSettings.excluded_servers}
-            included={localSettings.included_servers}
+            list={banList}
             servers={store.servers}
             portBanUnsupportedIds={store.settings?.port_ban_unsupported_server_ids ?? []}
             minNodeVersion={store.settings?.port_ban_min_node_version ?? ''}
             onModeChange={mode => setLocalSettings(prev => ({ ...prev, server_mode: mode }))}
-            onRulesChange={setServerRules}
+            onListChange={setBanList}
           />
 
           <div className="border-t border-dark-800 pt-4 space-y-3">

@@ -262,7 +262,7 @@ class TorrentBlockerService:
     def _plan_bans(
         cls, servers: list[Server], scope: BanScope, cutoff: datetime,
     ) -> list[tuple[Server, NodeBan]]:
-        planned = [(s, ban) for s in servers if (ban := scope.ban_for(s.id)) is not None]
+        planned = [(s, ban) for s in servers if (ban := scope.ban_for(s.id, s.folder)) is not None]
 
         # Слать бан только на живые ноды: мёртвые лишь висят до таймаута 20с и тормозят
         # весь цикл (gather ждёт всех). Живость — по свежести last_seen от сборщика метрик.
