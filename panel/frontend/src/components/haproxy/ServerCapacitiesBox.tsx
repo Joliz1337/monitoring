@@ -22,7 +22,7 @@ export default function ServerCapacitiesBox({
   if (groups.length === 0 && foreign.length === 0) return null
 
   return (
-    <div className="p-3 mt-2 bg-dark-900/40 rounded-lg border border-dark-700/40 space-y-2">
+    <div className="p-3 bg-dark-900/40 rounded-lg border border-dark-700/40 space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
           <span className="flex items-center gap-1.5 text-xs text-dark-200 font-medium">

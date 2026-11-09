@@ -912,6 +912,18 @@ function RuleForm({
               t={t}
             />
 
+            {loadMode && (
+              <ServerCapacitiesBox
+                groups={backendGroups.groups}
+                foreign={backendGroups.foreign}
+                nodes={nodes}
+                draft={capacityDraft}
+                onDraftChange={(serverId, value) => setCapacityDraft(draft => ({ ...draft, [serverId]: value }))}
+                onFillWeights={() => { if (fallbackWeights) setForm(f => ({ ...f, servers: fallbackWeights })) }}
+                canFillWeights={fallbackWeights !== null}
+              />
+            )}
+
             {/* Servers */}
             <div>
               <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -973,17 +985,6 @@ function RuleForm({
                     onRemove={removeServer} canRemove={form.servers.length > 1} t={t} />
                 ))}
               </div>
-              {loadMode && (
-                <ServerCapacitiesBox
-                  groups={backendGroups.groups}
-                  foreign={backendGroups.foreign}
-                  nodes={nodes}
-                  draft={capacityDraft}
-                  onDraftChange={(serverId, value) => setCapacityDraft(draft => ({ ...draft, [serverId]: value }))}
-                  onFillWeights={() => { if (fallbackWeights) setForm(f => ({ ...f, servers: fallbackWeights })) }}
-                  canFillWeights={fallbackWeights !== null}
-                />
-              )}
             </div>
           </>
         )}
