@@ -8,7 +8,13 @@ import json
 from dataclasses import dataclass
 from typing import Mapping, Optional, Sequence
 
-from app.services.haproxy_config import BackendServer
+from app.services.haproxy_config import (
+    DYNAMIC_ALGORITHMS,
+    BackendServer,
+    HAProxyRule,
+    get_config_generator,
+    rule_backend_name,
+)
 
 # До LOAD_SOFT сервер получает долю по каналу целиком, дальше доля линейно
 # уходит в ноль к LOAD_HARD: забитому серверу новых клиентов не шлём
@@ -19,6 +25,15 @@ MAX_WEIGHT = 100
 
 BITS_PER_BYTE = 8
 BITS_PER_MBIT = 1_000_000
+
+# Мелкие колебания не шлём: каждый цикл метрик засыпал бы релеи командами
+WEIGHT_PUSH_STEP = 5
+# Полная повторная отправка лечит reload HAProxy, о котором панель не знает
+WEIGHT_RESEND_SECONDS = 60
+# Срок, после которого нода сама вернёт веса из конфига, если панель замолчала
+WEIGHT_TTL_SECONDS = 3 * WEIGHT_RESEND_SECONDS
+
+WeightKey = tuple[str, str]
 
 
 @dataclass(frozen=True)
@@ -104,6 +119,62 @@ def rule_line_weights(
         share = 0 if weight == 0 else max(1, _round(weight / len(targets[server_id])))
         result.append(LineWeight(line.name, server_id, share, util.get(server_id), capacities[server_id]))
     return result
+
+
+def load_weight_rules(config: str) -> list[HAProxyRule]:
+    """Правила с весами по нагрузке. Алгоритм проверяется и здесь: маркер могли
+    вписать руками в бэкенд со static-rr, где смена веса на лету невозможна."""
+    return [
+        rule for rule in get_config_generator().parse_rules_from_config(config)
+        if rule.is_balancer and rule.balancer_options
+        and rule.balancer_options.load_weights
+        and (rule.balancer_options.algorithm or "roundrobin") in DYNAMIC_ALGORITHMS
+    ]
+
+
+def relay_weights(
+    rendered_config: str,
+    owners: Mapping[str, int],
+    capacities: Mapping[int, int],
+    loads: Mapping[int, NodeLoad],
+) -> dict[WeightKey, int]:
+    """Что отправить релею: по конфигу, собранному именно под него (с копиями _oN)."""
+    return {
+        (rule_backend_name(rule), weight.server_name): weight.weight
+        for rule in load_weight_rules(rendered_config)
+        for weight in rule_line_weights(rule.servers, owners, capacities, loads)
+    }
+
+
+def rule_views(
+    config: str,
+    owners: Mapping[str, int],
+    capacities: Mapping[int, int],
+    loads: Mapping[int, NodeLoad],
+) -> dict[str, list[LineWeight]]:
+    """Текущие веса по правилам профиля — для формы правила, без копий релеев."""
+    return {
+        rule.name: rule_line_weights(rule.servers, owners, capacities, loads)
+        for rule in load_weight_rules(config)
+    }
+
+
+def should_push(
+    previous: Optional[Mapping[WeightKey, int]],
+    current: Mapping[WeightKey, int],
+    seconds_since_push: Optional[float],
+    forced: bool,
+) -> bool:
+    if not current:
+        return False
+    if forced or previous is None or previous.keys() != current.keys():
+        return True
+    if seconds_since_push is None or seconds_since_push >= WEIGHT_RESEND_SECONDS:
+        return True
+    return any(
+        abs(current[key] - previous[key]) >= WEIGHT_PUSH_STEP or (current[key] == 0) != (previous[key] == 0)
+        for key in current
+    )
 
 
 def nic_speed_mbps(last_metrics: Optional[str]) -> Optional[int]:

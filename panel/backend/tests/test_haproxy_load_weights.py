@@ -13,11 +13,21 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.services.haproxy_config import BackendServer  # noqa: E402
+from app.services.haproxy_addresses import ServerAddresses, render_for_server  # noqa: E402
+from app.services.haproxy_config import (  # noqa: E402
+    BackendServer,
+    BalancerOptions,
+    HAProxyRule,
+    ProfileOptions,
+    get_config_generator,
+)
 from app.services.haproxy_load_weights import (  # noqa: E402
     NodeLoad,
     load_factor,
+    relay_weights,
     rule_line_weights,
+    rule_views,
+    should_push,
     utilization,
 )
 
@@ -99,6 +109,60 @@ class FormulaTests(unittest.TestCase):
     def test_domain_lookup_is_case_insensitive(self):
         [w] = rule_line_weights([line("d", "ND1.Example.com")], {"nd1.example.com": 2}, CAPS, {})
         self.assertEqual((w.panel_server_id, w.capacity_mbit, w.weight), (2, 10000, 100))
+
+
+def profile_config(algorithm="leastconn", load_weights=True) -> str:
+    rule = HAProxyRule(name="lb", rule_type="tcp", listen_port=443, target_ip="", target_port=0,
+                       is_balancer=True, servers=[line(s.name, s.address) for s in NL],
+                       balancer_options=BalancerOptions(algorithm=algorithm, load_weights=load_weights))
+    return get_config_generator().generate_full_config([rule], ProfileOptions())
+
+
+class RelayWeightsTests(unittest.TestCase):
+    def test_source_copies_get_same_weight(self):
+        rendered = render_for_server(profile_config(), ServerAddresses(source=("192.0.2.1", "192.0.2.2")))
+        self.assertEqual(relay_weights(rendered, OWNERS, CAPS, {}), {
+            ("backend_tcp_lb", "srv1"): 30, ("backend_tcp_lb", "srv1_o2"): 30,
+            ("backend_tcp_lb", "srv2"): 100, ("backend_tcp_lb", "srv2_o2"): 100,
+            ("backend_tcp_lb", "srv3"): 100, ("backend_tcp_lb", "srv3_o2"): 100,
+        })
+
+    def test_rule_without_flag_ignored(self):
+        self.assertEqual(relay_weights(profile_config(load_weights=False), OWNERS, CAPS, {}), {})
+
+    def test_hand_written_marker_on_static_algorithm_ignored(self):
+        config = profile_config().replace("balance leastconn", "balance static-rr")
+        self.assertEqual(relay_weights(config, OWNERS, CAPS, {}), {})
+
+    def test_rule_views_keyed_by_rule_name(self):
+        views = rule_views(profile_config(), OWNERS, CAPS, {})
+        self.assertEqual([w.weight for w in views["lb"]], [30, 100, 100])
+
+
+class ShouldPushTests(unittest.TestCase):
+    K1, K2 = ("b", "s1"), ("b", "s2")
+
+    def test_small_change_is_quiet(self):
+        self.assertFalse(should_push({self.K1: 100, self.K2: 30}, {self.K1: 97, self.K2: 30}, 10, False))
+
+    def test_step_change_pushes(self):
+        self.assertTrue(should_push({self.K1: 100, self.K2: 30}, {self.K1: 95, self.K2: 30}, 10, False))
+
+    def test_zero_crossing_pushes(self):
+        self.assertTrue(should_push({self.K1: 1}, {self.K1: 0}, 10, False))
+        self.assertTrue(should_push({self.K1: 0}, {self.K1: 1}, 10, False))
+
+    def test_changed_keys_push(self):
+        self.assertTrue(should_push({self.K1: 100, self.K2: 30}, {self.K1: 100}, 10, False))
+
+    def test_resend_and_force_and_first_push(self):
+        prev = {self.K1: 100}
+        self.assertTrue(should_push(prev, prev, 60, False))
+        self.assertTrue(should_push(prev, prev, 10, True))
+        self.assertTrue(should_push(None, prev, None, False))
+
+    def test_nothing_to_send(self):
+        self.assertFalse(should_push({self.K1: 100}, {}, 10, True))
 
 
 if __name__ == "__main__":
