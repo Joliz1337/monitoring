@@ -79,6 +79,19 @@ class ApplyTests(RuntimeWeightsTestCase):
         self.assertIn(f"set server {BACKEND}/srv3 weight 100%", self.commands)
         self.assertNotIn(f"set server {BACKEND}/srv2 weight 100%", self.commands)
 
+    def test_guard_checks_before_zeroing_the_last_live_server(self):
+        self.proxies[:] = proxy(("srv1", "UP", 100), ("srv2", "DOWN", 100))
+        result = self.rw.apply([WeightItem(BACKEND, "srv1", 0)], 180)
+        self.assertEqual(result.guarded_backends, [BACKEND])
+        self.assertNotIn(f"set server {BACKEND}/srv1 weight 0", self.commands)
+        self.assertFalse(result.results[0].ok)
+
+    def test_drained_server_getting_weight_counts_as_live(self):
+        self.proxies[:] = proxy(("srv1", "DRAIN", 0), ("srv2", "DOWN", 100))
+        result = self.rw.apply([WeightItem(BACKEND, "srv1", 50)], 180)
+        self.assertEqual(result.guarded_backends, [])
+        self.assertIn(f"set server {BACKEND}/srv1 weight 50", self.commands)
+
     def test_guard_quiet_with_live_weighted_server(self):
         self.proxies[:] = proxy(("srv1", "DRAIN", 0), ("srv2", "no check", 100))
         self.assertEqual(self.rw.apply([WeightItem(BACKEND, "srv1", 0)], 180).guarded_backends, [])
@@ -121,6 +134,13 @@ class LeaseTests(RuntimeWeightsTestCase):
         self.clock.now += 11
         self.assertEqual(self.rw.expire_due(), [])
 
+    def test_hung_socket_stops_the_round(self):
+        self.rw.apply([WeightItem(BACKEND, "srv1", 6), WeightItem(BACKEND, "srv2", 6)], 10)
+        self.rw._run_command = mock.Mock(side_effect=TimeoutError("socket timed out"))
+        self.clock.now += 11
+        self.assertEqual(self.rw.expire_due(), [])
+        self.assertEqual(self.rw._run_command.call_count, 1)
+
     def test_unavailable_socket_keeps_lease(self):
         self.rw.apply([WeightItem(BACKEND, "srv1", 6)], 10)
         self.rw._run_command = mock.Mock(side_effect=StatsSocketUnavailableError("gone"))
@@ -128,6 +148,27 @@ class LeaseTests(RuntimeWeightsTestCase):
         self.assertEqual(self.rw.expire_due(), [])
         self.rw._run_command = lambda command: "\n"
         self.assertEqual(self.rw.expire_due(), [(BACKEND, "srv1")])
+
+
+class PeriodicGuardTests(RuntimeWeightsTestCase):
+    def test_restores_when_the_live_server_goes_down_later(self):
+        self.proxies[:] = proxy(("srv1", "UP", 100), ("srv2", "UP", 100))
+        self.rw.apply([WeightItem(BACKEND, "srv1", 0)], 180)
+        self.proxies[:] = proxy(("srv1", "DRAIN", 0), ("srv2", "DOWN", 100))
+        self.assertEqual(self.rw.check_guard(), [BACKEND])
+        self.assertEqual(self.commands[-1], f"set server {BACKEND}/srv1 weight 100%")
+
+    def test_quiet_while_a_live_server_has_weight(self):
+        self.proxies[:] = proxy(("srv1", "UP", 100), ("srv2", "UP", 100))
+        self.rw.apply([WeightItem(BACKEND, "srv1", 0)], 180)
+        self.proxies[:] = proxy(("srv1", "DRAIN", 0), ("srv2", "UP", 100))
+        self.assertEqual(self.rw.check_guard(), [])
+
+    def test_no_stat_read_without_panel_weights(self):
+        reads = mock.Mock(return_value=[])
+        self.rw._read_proxies = reads
+        self.assertEqual(self.rw.check_guard(), [])
+        reads.assert_not_called()
 
 
 SHOW_STAT = (
