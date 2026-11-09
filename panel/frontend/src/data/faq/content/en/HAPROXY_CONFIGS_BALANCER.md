@@ -14,6 +14,8 @@ The algorithm decides which pool server takes the next connection.
 
 - Weight sets the share of traffic: a server with weight 2 gets twice as much as one with weight 1. That's how you level out nodes of different capacity.
 - A backup server only receives traffic when every primary is down.
+- "Load-based weights" (roundrobin, leastconn, random) — the panel adjusts weights every 10 seconds: while a server's link and CPU load stay under 70% its weight follows its link, by 95% it drops to zero and new clients go to free servers. Connected clients stay on their server, nothing is dropped.
+- The link is entered once per server in the "Server links" block above the backend list — shared by all its IPs and all rules. With sticky sessions the weights only spread new clients.
 
 ## Good to know
 

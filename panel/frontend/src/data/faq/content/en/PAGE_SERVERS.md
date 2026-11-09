@@ -54,10 +54,10 @@ If a server is behind heavy DPI (e.g. Russia's TSPU) and cannot pull the node im
 
 The same blocked-mode command fixes a node with an old or missing `.env`: the installer rewrites the config and certificates, then deliver the image. The order is such because a bare server first needs the installer (Docker, certificates, `.env`), and only then the image.
 
-The installer pulls the node code from GitHub, and if that's unreachable it automatically falls back to a mirror (`ghfast.top`). If even the installer address is blocked, run it via the mirror by prefixing `https://ghfast.top/` before `https://raw...`:
+The installer pulls the node code from GitHub. It falls back to the mirror (`ghfast.top`) only when it knows which commit to expect: the panel passes it during auto-install, for a manual run add `MON_EXPECTED_COMMIT=<SHA>` — the latest commit of the branch (`main` or `dev`), shown on GitHub or by `git ls-remote https://github.com/Joliz1337/monitoring.git main` from a machine that can reach GitHub. If even the installer address is blocked, run it via the mirror by prefixing `https://ghfast.top/` before `https://raw...` (the installer itself is not verified then — "Download everything through the panel" is safer):
 
 ```
-MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
+MON_BRANCH=main MON_ALLOW_LOCAL_BUILD=0 MON_EXPECTED_COMMIT=<SHA> bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Joliz1337/monitoring/main/install.sh) <NODE_SECRET>
 ```
 
 ## What the node hands over

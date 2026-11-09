@@ -123,6 +123,7 @@ export interface Server {
   position: number
   is_active: boolean
   folder?: string | null
+  note?: string | null
   last_seen?: string | null
   last_error?: string | null
   error_code?: number | null
@@ -461,6 +462,12 @@ export interface TrafficSummary {
     rx_bytes: number
     tx_bytes: number
   }>
+  // Трафик соединений, открытых клиентами к адресу ноды; свои исходящие не входят
+  by_ip: Array<{
+    ip: string
+    rx_bytes: number
+    tx_bytes: number
+  }>
   tracked_ports: number[]
 }
 
@@ -476,6 +483,8 @@ export interface TrafficStatus {
   supported: boolean
   node_version: string | null
   min_version: string
+  ips_supported: boolean
+  min_ip_version: string
   import: {
     status: TrafficImportStatus
     imported_at: string | null
@@ -483,7 +492,38 @@ export interface TrafficStatus {
   first_data_at: string | null
 }
 
-export type TrafficScope = 'total' | 'iface' | 'port'
+export type TrafficScope = 'total' | 'iface' | 'port' | 'ip'
+
+// Скорость сейчас (null — нода её сейчас не отдаёт) и средняя скорость по часам
+// за сутки, последняя точка — текущий час
+export interface TrafficSpeedView {
+  rx_bytes_per_sec: number | null
+  tx_bytes_per_sec: number | null
+  sparkline: Array<number | null>
+}
+
+export interface TrafficBreakdownRow extends TrafficSpeedView {
+  key: string
+}
+
+// ratio = во сколько раз упал против того же времени вчера; null — трафик пропал совсем
+export interface TrafficDrop {
+  ratio: number | null
+}
+
+// Строка адреса — весь его трафик; clients — только соединения, открытые клиентами к адресу
+export interface TrafficBreakdownIpRow extends TrafficBreakdownRow {
+  clients: TrafficSpeedView & { drop: TrafficDrop | null }
+}
+
+export interface TrafficBreakdown {
+  ips_supported: boolean
+  node_version: string | null
+  min_ip_version: string
+  ips: TrafficBreakdownIpRow[]
+  interfaces: TrafficBreakdownRow[]
+  ports: TrafficBreakdownRow[]
+}
 
 // rx/tx = null означает бакет без покрытия — нода была недоступна, разрыв в ряду
 export interface TrafficSeriesPoint {
@@ -942,9 +982,9 @@ export const serversApi = {
     }),
   deleteRemnawaveCert: (id: number) =>
     api.delete<{ success: boolean }>(`/servers/remnawave-certs/${id}`),
-  // Сводная история всего парка под плитками дашборда
-  getFleetHistory: (period: string) =>
-    api.get<FleetHistoryResponse>('/servers/fleet/history', { params: { period } }),
+  // Сводная история всего парка под плитками дашборда, с folder — одной папки
+  getFleetHistory: (period: string, folder?: string) =>
+    api.get<FleetHistoryResponse>('/servers/fleet/history', { params: { period, folder } }),
 }
 
 // Точка сводки по парку: CPU и память — средневзвешенные по ёмкости нод,
@@ -1159,6 +1199,8 @@ export const trafficApi = {
     api.get<TrafficSummary>(`/traffic/${serverId}/summary`, { params: { days } }),
   getSeries: (serverId: number, params: { period: string; scope?: TrafficScope; key?: string }) =>
     api.get<TrafficSeries>(`/traffic/${serverId}/series`, { params }),
+  getBreakdown: (serverId: number) =>
+    api.get<TrafficBreakdown>(`/traffic/${serverId}/breakdown`),
 }
 
 export interface ExecuteResponse {
@@ -1746,6 +1788,7 @@ export interface RemnawaveSettings {
   cookie_secret: string | null
   enabled: boolean
   collection_interval: number
+  ip_history_days: number
   ignored_user_ids: number[]
   anomaly_enabled: boolean
   anomaly_ip_enabled: boolean
@@ -1817,6 +1860,156 @@ export interface RemnawaveSummary {
   unique_users: number
   unique_ips: number
   total_devices: number
+  cities_online: number
+  ips_history: number
+  history_days: number
+  relay_users: number
+}
+
+export interface RemnawaveGeoLocation {
+  key: string
+  country_code: string
+  place: string
+  lat: number
+  lon: number
+  ips: number
+  users: number
+  prev: number | null
+}
+
+export interface RemnawaveGeoCountry {
+  country_code: string
+  lat: number
+  lon: number
+  ips: number
+  prev: number | null
+}
+
+export interface RemnawaveGeoNode {
+  uuid: string
+  name: string | null
+  country_code: string | null
+  ips: number
+}
+
+export interface RemnawaveGeoMap {
+  locations: RemnawaveGeoLocation[]
+  countries: RemnawaveGeoCountry[]
+  nodes: RemnawaveGeoNode[]
+  compare_available: boolean
+  relay_users: number
+  unlocated_ips: number
+  geo_ready: boolean
+  geo_error: string | null
+}
+
+export interface RemnawaveNodeBrief {
+  uuid: string
+  name: string | null
+  country_code: string | null
+}
+
+export interface RemnawaveGeoIpRow {
+  ip: string
+  last_seen: string | null
+  online: boolean
+  users: { id: number; username: string | null }[]
+  users_total: number
+  nodes: RemnawaveNodeBrief[]
+  country_code: string | null
+  place: string | null
+  asn: number | null
+  as_org: string | null
+  lat: number | null
+  lon: number | null
+  relay: string | null
+}
+
+export interface RemnawaveGeoIpsParams {
+  bbox?: string
+  place?: string
+  node?: string
+  search?: string
+  active_only?: boolean
+  sort?: 'last_seen' | 'ip' | 'city' | 'provider'
+  dir?: 'asc' | 'desc'
+  offset?: number
+  limit?: number
+}
+
+export interface RemnawaveUserHistoryIp {
+  source_ip: string
+  first_seen: string | null
+  last_seen: string | null
+  online: boolean
+  nodes: string[]
+  country_code: string | null
+  place: string | null
+  lat: number | null
+  lon: number | null
+  asn: number | null
+  as_org: string | null
+  relay: string | null
+}
+
+export interface RemnawaveUserNode extends RemnawaveNodeBrief {
+  lat: number | null
+  lon: number | null
+}
+
+export interface RemnawaveGeoStatus {
+  ready: boolean
+  month: string | null
+  build: string | null
+  updating: boolean
+  error: string | null
+  checked_at: string | null
+}
+
+export type ClientRouteHiddenReason = 'silent' | 'private' | 'no_geo' | 'impossible'
+
+export interface ClientRouteHop {
+  hop: number
+  host: string | null
+  asn: string | null
+  as_name: string | null
+  avg_ms: number | null
+  loss_pct: number | null
+  reason: ClientRouteHiddenReason | null
+}
+
+export interface ClientRouteStop {
+  kind: 'client' | 'router' | 'node'
+  lat: number
+  lon: number
+  place: string | null
+  country_code: string | null
+  rtt_ms: number | null
+  hops: ClientRouteHop[]
+}
+
+export interface ClientRouteLeg {
+  coords: [number, number][]
+  km: number
+  added_ms: number | null
+  expected_ms: number
+  status: 'ok' | 'warn' | 'bad' | null
+  hidden: ClientRouteHop[]
+  last_mile: boolean
+}
+
+export interface ClientRoute {
+  ip: string
+  state: 'running' | 'done' | 'failed'
+  error: string | null
+  rounds_done: number
+  rounds_total: number
+  client_reached: boolean
+  client_located: boolean
+  stops: ClientRouteStop[]
+  legs: ClientRouteLeg[]
+  hidden_tail: ClientRouteHop[]
+  totals: { rtt_ms: number | null; km: number; direct_km: number }
 }
 
 export interface RemnawaveUser {
@@ -1850,6 +2043,10 @@ export interface RemnawaveUserDetails {
   unique_ips: number
   ips: RemnawaveUserIp[]
   devices: RemnawaveHwidDevice[]
+  history: RemnawaveUserHistoryIp[]
+  history_days: number
+  nodes: RemnawaveUserNode[]
+  summary: { cities: number; providers: number; nodes: number; ips_history: number }
 }
 
 export interface RemnawaveAnomaly {
@@ -1904,6 +2101,18 @@ export const remnawaveApi = {
     api.get<{ users: RemnawaveUser[]; total: number; offset: number; limit: number }>('/remnawave/stats/top-users', { params }),
   getUserStats: (email: number) =>
     api.get<RemnawaveUserDetails>(`/remnawave/stats/user/${email}`),
+  getUserTraffic: (email: number) =>
+    api.get<{ bytes: number | null }>(`/remnawave/stats/user/${email}/traffic`),
+  getGeoMap: (node?: string) =>
+    api.get<RemnawaveGeoMap>('/remnawave/geo/map', { params: { node } }),
+  getGeoIps: (params: RemnawaveGeoIpsParams) =>
+    api.get<{ rows: RemnawaveGeoIpRow[]; total: number }>('/remnawave/geo/ips', { params }),
+  getGeoStatus: () => api.get<RemnawaveGeoStatus>('/remnawave/geo/status'),
+  updateGeoDb: () => api.post<{ started: boolean }>('/remnawave/geo/update'),
+  startClientRoute: (ip: string, nodeUuid: string) =>
+    api.post<{ server_id: number; server_name: string; trace_id: string }>('/remnawave/geo/route', { ip, node_uuid: nodeUuid }),
+  getClientRoute: (serverId: number, traceId: string, nodeUuid: string) =>
+    api.get<ClientRoute>(`/remnawave/geo/route/${serverId}/${traceId}`, { params: { node_uuid: nodeUuid } }),
   clearStats: () =>
     api.delete<{ success: boolean; deleted: { xray_stats: number }; message: string }>('/remnawave/stats/clear'),
   clearUserIp: (email: number, sourceIp: string) =>
@@ -2721,6 +2930,25 @@ export interface HAProxyAvailableServer {
   active_profile_id: number | null
   sync_status: string | null
   folder: string | null
+  /** Канал по тарифу, Мбит/с — общий для всех IP сервера и всех правил */
+  link_capacity_mbit?: number | null
+  /** Скорость карты с трафиком — только подсказка к каналу, на VPS часто врёт */
+  nic_speed_mbps?: number | null
+}
+
+/** Строка бэкенда в последнем расчёте весов по нагрузке */
+export interface HAProxyLoadWeightLine {
+  server_name: string
+  panel_server_id: number
+  weight: number
+  /** null — свежих данных о нагрузке нет, стоит вес по каналу */
+  utilization: number | null
+  capacity_mbit: number
+}
+
+export interface HAProxyLoadWeights {
+  rules: Record<string, HAProxyLoadWeightLine[]>
+  updated_at: string | null
 }
 
 export interface HAProxyIpOwner {
@@ -2798,6 +3026,7 @@ export interface BalancerOptions {
   allbackups?: boolean
   fullconn?: number | null
   timeout_queue?: string | null
+  load_weights?: boolean
 }
 
 export interface HAProxyProfileRule {
@@ -2852,6 +3081,10 @@ export const haproxyProfilesApi = {
     api.get<HAProxyAvailableServer[]>('/haproxy-profiles/available-servers'),
   getIpOwners: () =>
     api.get<HAProxyIpOwners>('/haproxy-profiles/ip-owners'),
+  getLoadWeights: (profileId: number) =>
+    api.get<HAProxyLoadWeights>(`/haproxy-profiles/${profileId}/load-weights`),
+  setServerCapacities: (capacities: Record<number, number | null>) =>
+    api.put<{ updated: number }>('/haproxy-profiles/server-capacities', { capacities }),
   getServersStatus: (profileId: number) =>
     api.get<HAProxyServerStatus[]>(`/haproxy-profiles/${profileId}/servers-status`),
   getRules: (profileId: number) =>
@@ -3515,17 +3748,62 @@ export const dnatProfilesApi = {
   getAvailableServers: () => api.get<DnatAvailableServer[]>('/dnat-profiles/available-servers'),
 }
 
+// ==================== Порты HAProxy и DNAT ====================
+
+export type PortRange = [number, number]
+
+export interface ServerPortUsage {
+  // Правила на ноде при запущенном HAProxy + правила привязанного HAProxy-профиля
+  haproxy_ports: number[]
+  // Включённые правила DNAT-профиля, ловящие TCP
+  dnat_ranges: PortRange[]
+  dnat_profile_id: number | null
+}
+
+// Ключ — id сервера; серверов без HAProxy и DNAT в ответе нет
+export type PortUsageMap = Record<number, ServerPortUsage>
+
+export const portUsageApi = {
+  get: (serverId?: number) =>
+    api.get<PortUsageMap>('/port-usage', { params: serverId === undefined ? undefined : { server_id: serverId } }),
+}
+
 // ==================== Torrent Blocker ====================
+
+export type TorrentBlockerServerMode = 'exclude' | 'include'
+
+/**
+ * Сервер в списке режима. Пустые ports без override — порты папки, а без них способ
+ * режима по умолчанию (exclude: не банить, include: весь IP); override — своя настройка
+ * сервера главнее папки (с непустыми ports всегда true).
+ */
+export interface TorrentBlockerServerRule {
+  id: number
+  ports: string[]
+  override: boolean
+}
+
+/** Порты для серверов папки из списка, у которых нет своей настройки */
+export interface TorrentBlockerFolderRule {
+  name: string
+  ports: string[]
+}
 
 export interface TorrentBlockerSettings {
   enabled: boolean
   poll_interval_minutes: number
   ban_duration_minutes: number
-  excluded_server_ids: number[]
+  server_mode: TorrentBlockerServerMode
+  excluded_servers: TorrentBlockerServerRule[]
+  included_servers: TorrentBlockerServerRule[]
+  excluded_folders: TorrentBlockerFolderRule[]
+  included_folders: TorrentBlockerFolderRule[]
   webhook_enabled: boolean
   webhook_url: string
   webhook_secret: string
   webhook_delay_seconds: number
+  port_ban_min_node_version: string
+  port_ban_unsupported_server_ids: number[]
 }
 
 export interface TorrentBlockerStatus {
@@ -3828,6 +4106,86 @@ export const sourcePoolApi = {
   refreshNode: (serverId: number) =>
     api.post<SourcePoolNodeView>(`/source-pool/nodes/${serverId}/refresh`, undefined, { timeout: SOURCE_POOL_NODE_TIMEOUT_MS }),
   getSnippet: () => api.get<SourcePoolSnippet>('/source-pool/snippet'),
+}
+
+// ── GRE-туннели DDoS-Guard ──
+
+export type GreInstallStatus = 'off' | 'pending' | 'active' | 'drift' | 'failed' | 'denied' | 'unsupported'
+
+/** ok — поднят как задан; drift — расходится, нода вернёт сама; no_local — GRE SRC нет на интерфейсах;
+ * conflict — на сервере уже есть чужой туннель с теми же адресами */
+export type GreLinkState = 'ok' | 'drift' | 'missing' | 'no_local' | 'conflict'
+
+/** alive — пакеты идут; waiting — туннель только появился; silent — пакетов нет дольше порога */
+export type GreActivity = 'alive' | 'waiting' | 'silent'
+
+export interface GreTunnelInput {
+  slot?: number | null
+  local: string
+  remote: string
+  pe?: string | null
+  ce: string
+  health_net: string
+}
+
+export interface GreTunnelView {
+  slot: number
+  name: string
+  local: string
+  remote: string
+  pe: string
+  ce: string
+  health_net: string
+  link: GreLinkState | null
+  mtu: number | null
+  conflict_with: string | null
+  rx_bytes: number
+  tx_bytes: number
+  rx_packets: number
+  tx_packets: number
+  activity: GreActivity
+  last_rx_at: string | null
+}
+
+export interface GreNodeView {
+  server_id: number
+  name: string
+  online: boolean
+  node_version: string | null
+  min_node_version: string
+  supported_by_node: boolean
+  install_status: GreInstallStatus
+  sync_error: string | null
+  node_error: string | null
+  notify: boolean
+  tunnels: GreTunnelView[]
+  max_tunnels: number
+  default_remote: string
+  default_health_net: string
+  silent_after_seconds: number
+  last_state_at: string | null
+}
+
+export interface GreCheckResult {
+  slot: number
+  ping_sent: number
+  ping_received: number
+  rtt_ms: number | null
+  https_ok: boolean
+  external_ip: string | null
+  https_error: string | null
+}
+
+const GRE_NODE_TIMEOUT_MS = 40000
+
+export const greApi = {
+  getNode: (serverId: number) => api.get<GreNodeView>(`/gre/nodes/${serverId}`),
+  updateNode: (serverId: number, patch: { tunnels?: GreTunnelInput[]; notify?: boolean }) =>
+    api.put<GreNodeView>(`/gre/nodes/${serverId}`, patch, { timeout: GRE_NODE_TIMEOUT_MS }),
+  refreshNode: (serverId: number) =>
+    api.post<GreNodeView>(`/gre/nodes/${serverId}/refresh`, undefined, { timeout: GRE_NODE_TIMEOUT_MS }),
+  checkTunnel: (serverId: number, slot: number) =>
+    api.post<GreCheckResult>(`/gre/nodes/${serverId}/check`, { slot }, { timeout: GRE_NODE_TIMEOUT_MS }),
 }
 
 export default api

@@ -30,11 +30,9 @@ MAX_WINDOW_SEC = 330
 # Если фоновый замер замолчал, нода лучше не отдаст скорость вовсе, чем
 # будет отдавать одну и ту же стухшую цифру
 STALE_AFTER_SEC = 5.0
-# Минимум натиканного счётчиками /proc/stat, при котором замер осмыслен.
-# Тик ядра — 10 мс, и на дельте в единицы тиков доля busy вырождается
-# в 0 или 100 («одно ядро 100%, остальные 0»).
-CPU_MIN_TICKS_SECONDS = 0.2
-# Два чтения ближе этого по часам не образуют окна — см. advance()
+# Два чтения ближе этого по часам не образуют окна — см. advance(). Простой
+# ядро отдаёт с шагом тика (10 мс), и на окне в пару тиков доля busy
+# вырождается в 0 или 100 («одно ядро 100%, остальные 0»).
 MIN_WINDOW_SEC = 0.2
 # Длительность стартового замера — с запасом над порогами выше
 CPU_PRIME_SECONDS = 0.3
@@ -64,9 +62,8 @@ class RateSample:
     # Доля времени всех ядер, которую гипервизор отдал другим машинам (steal).
     # В per_cpu_percent она тоже сидит — как занятость
     steal_percent: float = 0.0
-    # False — проценты унаследованы от прошлого замера (дельта тиков была
-    # слишком короткой) или обнулены после смены числа ядер: в сводке за окно
-    # такой сэмпл не учитывается, иначе одна секунда весила бы дважды
+    # False — проценты обнулены после смены числа ядер (ресайз VPS): в сводке
+    # за окно такой сэмпл не учитывается, иначе нули занизили бы среднее
     cpu_measured: bool = True
     net: dict[str, Pair] = field(default_factory=dict)
     disk: dict[str, Pair] = field(default_factory=dict)
@@ -156,35 +153,31 @@ def summarize_window(samples: Sequence[RateSample], physical_ifaces: Collection[
     )
 
 
-def per_cpu_percent(before: list, after: list) -> Optional[list[float]]:
-    """Занятость каждого ядра по дельте счётчиков, либо None при слишком
-    короткой дельте — тогда считать нечего и звать не за чем."""
+def _clamped_percent(part: float, whole: float) -> float:
+    return round(min(max(part / whole * 100, 0.0), 100.0), 1)
+
+
+def per_cpu_percent(before: list, after: list, elapsed: float) -> Optional[list[float]]:
+    """Занятость каждого ядра за `elapsed` секунд по часам: всё, кроме простоя.
+
+    Делить на сумму колонок `/proc/stat` нельзя: ядро без
+    IRQ_TIME_ACCOUNTING (generic Ubuntu) не пишет короткие всплески softirq
+    между простоями ни в одну колонку, и сетевое ядро одноочередного VPS
+    показывалось бы на 26% при реальных 40%. Простой же ядро меряет по часам
+    точно. None — число ядер сменилось, сравнивать нечего.
+    """
     if not after or len(after) != len(before):
         return None
-
-    percents = []
-    for prev, cur in zip(before, after):
-        total = sum(cur) - sum(prev)
-        if total < CPU_MIN_TICKS_SECONDS:
-            return None
-        busy = total - (cur.idle - prev.idle)
-        percents.append(round(min(max(busy, 0.0) / total * 100, 100.0), 1))
-    return percents
+    return [
+        _clamped_percent(elapsed - (cur.idle - prev.idle), elapsed)
+        for prev, cur in zip(before, after)
+    ]
 
 
-def host_steal_percent(before: list, after: list) -> float:
-    """Доля времени всех ядер, отнятая гипервизором, в процентах.
-
-    Зовётся только для пары, которую уже принял `per_cpu_percent`, — дельта
-    тиков там достаточная, повторно её не проверяем."""
-    total = 0.0
-    steal = 0.0
-    for prev, cur in zip(before, after):
-        total += sum(cur) - sum(prev)
-        steal += cur.steal - prev.steal
-    if total <= 0:
-        return 0.0
-    return round(min(max(steal, 0.0) / total * 100, 100.0), 1)
+def host_steal_percent(before: list, after: list, elapsed: float) -> float:
+    """Доля времени всех ядер за `elapsed` секунд, отнятая гипервизором."""
+    steal = sum(cur.steal - prev.steal for prev, cur in zip(before, after))
+    return _clamped_percent(steal, elapsed * len(after))
 
 
 def counter_rates(before: Counters, after: Counters, dt: float) -> dict[str, Pair]:
@@ -347,7 +340,7 @@ class RateSampler:
 
         self._prev = current
         disk = counter_rates(prev.disk, current.disk, dt)
-        per_cpu, steal, cpu_measured = self._cpu_usage(prev.cpu_times, current.cpu_times)
+        per_cpu, steal, cpu_measured = self._cpu_usage(prev.cpu_times, current.cpu_times, dt)
         self._sample = RateSample(
             sampled_at=current.wall_time,
             window_sec=dt,
@@ -360,18 +353,14 @@ class RateSampler:
         )
         self._buffer.append(self._sample)
 
-    def _cpu_usage(self, before: list, after: list) -> tuple[list[float], float, bool]:
-        """Проценты по ядрам, steal хоста и признак, что они измерены именно в этом окне."""
-        percents = per_cpu_percent(before, after)
-        if percents is not None:
-            return percents, host_steal_percent(before, after), True
-        last = self._sample
-        last_percents = last.per_cpu_percent if last else []
-        if len(last_percents) == len(after):
-            # Слишком короткое окно — отдаём последний валидный замер
-            return last_percents, last.steal_percent if last else 0.0, False
-        # Число ядер сменилось (ресайз VPS): старые проценты несопоставимы
-        return [0.0] * len(after), 0.0, False
+    @staticmethod
+    def _cpu_usage(before: list, after: list, elapsed: float) -> tuple[list[float], float, bool]:
+        """Проценты по ядрам, steal хоста и признак, что они измерены в этом окне."""
+        percents = per_cpu_percent(before, after, elapsed)
+        if percents is None:
+            # Число ядер сменилось (ресайз VPS): старые проценты несопоставимы
+            return [0.0] * len(after), 0.0, False
+        return percents, host_steal_percent(before, after, elapsed), True
 
     def _disk_total(self, disk: dict[str, Pair]) -> Pair:
         whole = [rate for name, rate in disk.items() if self._is_whole_disk(name)]

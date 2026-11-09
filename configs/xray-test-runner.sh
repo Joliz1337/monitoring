@@ -13,7 +13,7 @@
 #         xray-test-runner.sh version
 set -uo pipefail
 
-RUNNER_VERSION="2.13.0"
+RUNNER_VERSION="2.14.0"
 
 TOOLS_DIR="/opt/monitoring-node/tools"
 CORES_DIR="$TOOLS_DIR/cores"
@@ -186,8 +186,20 @@ kill_stale_cores() {
     done < <(ps -eo pid=,etimes=,args= 2>/dev/null)
 }
 
+# Ссылку на ядро панель строит как https://<хост>[:порт]/api/xray-test/bundle/<токен>;
+# проверка отсекает чужие схемы, userinfo, query и пути мимо /bundle/. От
+# подмены задания защищает порядок строк в main, а не эта проверка.
+CORE_NAME_RE='^(xray|sing-box)$'
+CORE_VERSION_RE='^[0-9][0-9A-Za-z.-]*$'
+CORE_SHA_RE='^[0-9a-f]{64}$'
+CORE_URL_RE='^https://[][A-Za-z0-9.:_-]+(/[A-Za-z0-9._~%-]+)*/bundle/[A-Za-z0-9._~%-]+$'
+
 ensure_core() {
     local name="$1" version="$2" url="$3" want_sha="$4"
+    [[ "$name" =~ $CORE_NAME_RE ]] || return 1
+    [[ "$version" =~ $CORE_VERSION_RE ]] || return 1
+    [[ "$want_sha" =~ $CORE_SHA_RE ]] || return 1
+    [[ "$url" =~ $CORE_URL_RE ]] || return 1
     local path="$CORES_DIR/${name}-${version}"
 
     if [ -x "$path" ] && [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$want_sha" ]; then
@@ -258,13 +270,15 @@ stop_core() {
 
 # ── пробы ───────────────────────────────────────────────────────────────────
 
-# Печатает «min avg jitter»; пусто, если сервер не ответил ни разу
+# Печатает «min avg jitter»; пусто, если сервер не ответил ни разу.
+# Адрес и порт уходят во вложенную оболочку аргументами, а не текстом команды:
+# адрес пришёл из чужой ссылки, и внутри строки bash -c он исполнился бы как код.
 tcp_ping_ms() {
     local host="$1" port="$2" i start elapsed
     local best="" worst="" total=0 count=0
     for i in 1 2 3; do
         start=$(now_ms)
-        if timeout 3 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
+        if timeout 3 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$host" "$port" 2>/dev/null; then
             elapsed=$(( $(now_ms) - start ))
             count=$((count + 1))
             total=$((total + elapsed))
@@ -647,13 +661,25 @@ run_cell() {
         "$J_SPEED_SERVER"
 }
 
+# Адрес и SNI приходят в base64, чтобы ни одно значение из ссылки не могло
+# вмешаться в разбор строк задания. Управляющий символ в результате — отказ:
+# он разорвал бы строку проверки на поля заново.
+DECODED=""
+decode_b64_field() {
+    DECODED=""
+    [ -n "$1" ] || return 0
+    DECODED=$(printf '%s' "$1" | base64 -d 2>/dev/null) || return 1
+    [[ "$DECODED" != *[[:cntrl:]]* ]]
+}
+
 main() {
     [ "${1:-}" = "version" ] && { printf '%s
 ' "$RUNNER_VERSION"; return 0; }
     [ -n "${1:-}" ] || { log "нет полезной нагрузки"; return 2; }
 
     kill_stale_cores
-    declare -A CORE_PATHS=()
+    declare -A CORE_PATHS=() CORE_SEEN=()
+    local cells_seen=0 conf_seen=0
     OPT_TCP=1; OPT_HTTP=1; OPT_EXIT=1; OPT_SPEED=0
     local batch_core="" batch_conf="" ports=""
     local cells=()
@@ -662,8 +688,32 @@ main() {
     payload=$(printf '%s' "$1" | base64 -d 2>/dev/null) || { log "не разобрать payload"; return 2; }
 
     while IFS=$'	' read -r kind a b c d e f g; do
+        # Проверки панель ставит в конец задания. Строка другого вида после них
+        # могла прийти только из значения, вклеенного в легаси-CELL, и не должна
+        # переопределять уже принятые ядро, опции, конфиг и серверы замера
+        case "$kind" in
+            CELL|CELL64) cells_seen=1 ;;
+            *)
+                if [ "$cells_seen" = 1 ]; then
+                    log "строка $kind после проверок проигнорирована"
+                    continue
+                fi
+                ;;
+        esac
+
         case "$kind" in
             CORE)
+                # Один раз на имя: повторная строка не должна подменять уже
+                # принятый бинарник
+                if [[ ! "$a" =~ $CORE_NAME_RE ]]; then
+                    log "неизвестное ядро в строке CORE проигнорировано"
+                    continue
+                fi
+                if [ -n "${CORE_SEEN[$a]:-}" ]; then
+                    log "повторная строка CORE $a проигнорирована"
+                    continue
+                fi
+                CORE_SEEN[$a]=1
                 local path
                 if path=$(ensure_core "$a" "$b" "$c" "$d"); then
                     CORE_PATHS[$a]="$path"
@@ -675,6 +725,12 @@ main() {
                 OPT_TCP="$a"; OPT_HTTP="$b"; OPT_EXIT="$c"; OPT_SPEED="$d"
                 ;;
             CONF)
+                # Ядро и его конфиг одни на всю пачку
+                if [ "$conf_seen" = 1 ]; then
+                    log "повторная строка CONF проигнорирована"
+                    continue
+                fi
+                conf_seen=1
                 batch_core="$a"; batch_conf="$b"
                 ;;
             SPEED)
@@ -697,6 +753,19 @@ main() {
                 ;;
             CELL)
                 cells+=("$a"$'	'"$b"$'	'"$c"$'	'"$d"$'	'"$e"$'	'"$f"$'	'"$g")
+                ports="$ports $f"
+                ;;
+            CELL64)
+                local address="" sni=""
+                if decode_b64_field "$c" && [ -n "$DECODED" ]; then
+                    address=$DECODED
+                    decode_b64_field "$g" && sni=$DECODED || address=""
+                fi
+                if [ -z "$address" ]; then
+                    emit_cell "$a" "fail" '"INTERNAL"' "адрес или SNI проверки не разобрать"
+                    continue
+                fi
+                cells+=("$a"$'	'"$b"$'	'"$address"$'	'"$d"$'	'"$e"$'	'"$f"$'	'"$sni")
                 ports="$ports $f"
                 ;;
         esac

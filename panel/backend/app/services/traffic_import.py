@@ -28,6 +28,8 @@ from app.services.node_capabilities import Capability, server_allows
 logger = logging.getLogger(__name__)
 
 MIN_NODE_VERSION_FOR_TRAFFIC_V2 = "10.13.0"
+# С этой версии нода ведёт счётчики трафика по своим IP (network.ips в метриках)
+MIN_NODE_VERSION_FOR_IP_TRAFFIC = "10.35.0"
 
 SCAN_INTERVAL_SECONDS = 300
 STARTUP_DELAY_SECONDS = 90       # дать коллектору проставить Server.node_version
@@ -114,9 +116,17 @@ def _version_tuple(value: str) -> tuple[int, ...]:
 
 
 def node_supports_traffic_v2(node_version: Optional[str]) -> bool:
+    return _version_at_least(node_version, MIN_NODE_VERSION_FOR_TRAFFIC_V2)
+
+
+def node_supports_ip_traffic(node_version: Optional[str]) -> bool:
+    return _version_at_least(node_version, MIN_NODE_VERSION_FOR_IP_TRAFFIC)
+
+
+def _version_at_least(node_version: Optional[str], minimum: str) -> bool:
     if not node_version:
         return False
-    return _version_tuple(node_version) >= _version_tuple(MIN_NODE_VERSION_FOR_TRAFFIC_V2)
+    return _version_tuple(node_version) >= _version_tuple(minimum)
 
 
 def is_virtual_interface(name: str) -> bool:

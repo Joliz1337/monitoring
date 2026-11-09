@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
@@ -10,16 +9,66 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import get_db
 from app.models import TorrentBlockerBan, TorrentBlockerSettings
+from app.services.torrent_ban_scope import (
+    MIN_NODE_VERSION_PORT_BAN,
+    FolderRules,
+    ServerMode,
+    ServerRule,
+    ServerRules,
+    dump_folder_rules,
+    dump_server_rules,
+    folder_rules_to_list,
+    normalize_port_specs,
+    parse_folder_rules,
+    parse_mode,
+    parse_server_rules,
+    port_ban_unsupported_server_ids,
+    server_rules_to_list,
+)
 from app.services.torrent_blocker import get_torrent_blocker_service
 
 router = APIRouter(prefix="/torrent-blocker", tags=["torrent-blocker"])
+
+MAX_LISTED_SERVERS = 5000
+MAX_PORT_SPECS = 500
+FOLDER_NAME_MAX_LENGTH = 200  # Server.folder
+
+
+class _PortsRule(BaseModel):
+    ports: list[str] = Field(default_factory=list, max_length=MAX_PORT_SPECS)
+
+    @field_validator("ports")
+    @classmethod
+    def _normalize_ports(cls, value: list[str]) -> list[str]:
+        return normalize_port_specs(value)
+
+
+class ServerBanRule(_PortsRule):
+    id: int
+    override: bool = False
+
+
+class FolderBanRule(_PortsRule):
+    name: str = Field(..., min_length=1, max_length=FOLDER_NAME_MAX_LENGTH)
+
+
+def _server_rules_from_request(rules: list[ServerBanRule]) -> ServerRules:
+    return {rule.id: ServerRule(tuple(rule.ports), rule.override) for rule in rules}
+
+
+def _folder_rules_from_request(rules: list[FolderBanRule]) -> FolderRules:
+    return {rule.name: tuple(rule.ports) for rule in rules if rule.ports}
 
 
 class UpdateSettings(BaseModel):
     enabled: Optional[bool] = None
     poll_interval_minutes: Optional[int] = Field(None, ge=1, le=60)
     ban_duration_minutes: Optional[int] = Field(None, ge=1, le=43200)
-    excluded_server_ids: Optional[list[int]] = None
+    server_mode: Optional[ServerMode] = None
+    excluded_servers: Optional[list[ServerBanRule]] = Field(None, max_length=MAX_LISTED_SERVERS)
+    included_servers: Optional[list[ServerBanRule]] = Field(None, max_length=MAX_LISTED_SERVERS)
+    excluded_folders: Optional[list[FolderBanRule]] = Field(None, max_length=MAX_LISTED_SERVERS)
+    included_folders: Optional[list[FolderBanRule]] = Field(None, max_length=MAX_LISTED_SERVERS)
     webhook_enabled: Optional[bool] = None
     webhook_url: Optional[str] = Field(None, max_length=2000)
     webhook_secret: Optional[str] = Field(None, max_length=500)
@@ -37,17 +86,15 @@ class UpdateSettings(BaseModel):
 
 
 def _settings_to_dict(s: TorrentBlockerSettings) -> dict:
-    excluded = []
-    if s.excluded_server_ids:
-        try:
-            excluded = json.loads(s.excluded_server_ids)
-        except (json.JSONDecodeError, TypeError):
-            pass
     return {
         "enabled": s.enabled,
         "poll_interval_minutes": s.poll_interval_minutes,
         "ban_duration_minutes": s.ban_duration_minutes,
-        "excluded_server_ids": excluded,
+        "server_mode": parse_mode(s.server_mode).value,
+        "excluded_servers": server_rules_to_list(parse_server_rules(s.excluded_servers)),
+        "included_servers": server_rules_to_list(parse_server_rules(s.included_servers)),
+        "excluded_folders": folder_rules_to_list(parse_folder_rules(s.excluded_folders)),
+        "included_folders": folder_rules_to_list(parse_folder_rules(s.included_folders)),
         "webhook_enabled": s.webhook_enabled,
         "webhook_url": s.webhook_url or "",
         "webhook_secret": s.webhook_secret or "",
@@ -59,12 +106,23 @@ DEFAULTS = {
     "enabled": False,
     "poll_interval_minutes": 5,
     "ban_duration_minutes": 30,
-    "excluded_server_ids": [],
+    "server_mode": ServerMode.EXCLUDE.value,
+    "excluded_servers": [],
+    "included_servers": [],
+    "excluded_folders": [],
+    "included_folders": [],
     "webhook_enabled": False,
     "webhook_url": "",
     "webhook_secret": "",
     "webhook_delay_seconds": 60,
 }
+
+
+async def _settings_response(db: AsyncSession, settings: Optional[TorrentBlockerSettings]) -> dict:
+    body = _settings_to_dict(settings) if settings else dict(DEFAULTS)
+    body["port_ban_min_node_version"] = MIN_NODE_VERSION_PORT_BAN
+    body["port_ban_unsupported_server_ids"] = await port_ban_unsupported_server_ids(db)
+    return body
 
 
 @router.get("/settings")
@@ -73,10 +131,7 @@ async def get_settings(
     _: dict = Depends(verify_auth),
 ):
     result = await db.execute(select(TorrentBlockerSettings).limit(1))
-    settings = result.scalar_one_or_none()
-    if not settings:
-        return DEFAULTS
-    return _settings_to_dict(settings)
+    return await _settings_response(db, result.scalar_one_or_none())
 
 
 @router.put("/settings")
@@ -98,8 +153,16 @@ async def update_settings(
         settings.poll_interval_minutes = body.poll_interval_minutes
     if body.ban_duration_minutes is not None:
         settings.ban_duration_minutes = body.ban_duration_minutes
-    if body.excluded_server_ids is not None:
-        settings.excluded_server_ids = json.dumps(body.excluded_server_ids)
+    if body.server_mode is not None:
+        settings.server_mode = body.server_mode.value
+    if body.excluded_servers is not None:
+        settings.excluded_servers = dump_server_rules(_server_rules_from_request(body.excluded_servers))
+    if body.included_servers is not None:
+        settings.included_servers = dump_server_rules(_server_rules_from_request(body.included_servers))
+    if body.excluded_folders is not None:
+        settings.excluded_folders = dump_folder_rules(_folder_rules_from_request(body.excluded_folders))
+    if body.included_folders is not None:
+        settings.included_folders = dump_folder_rules(_folder_rules_from_request(body.included_folders))
     if body.webhook_enabled is not None:
         settings.webhook_enabled = body.webhook_enabled
     if body.webhook_url is not None:
@@ -111,7 +174,7 @@ async def update_settings(
 
     await db.commit()
     await db.refresh(settings)
-    return _settings_to_dict(settings)
+    return await _settings_response(db, settings)
 
 
 @router.get("/status")

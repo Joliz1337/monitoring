@@ -555,9 +555,7 @@ The backup contains every node access key — keep it as carefully as the panel 
 
 ## What's new
 
-A plain-language change history is in [CHANGES.md](CHANGES.md) (in Russian): what changed, what it gives you and whether you need to do anything after updating.
-
-Ask questions, chat and follow update announcements in the [Telegram community](https://t.me/+IClul20AJ7Y5MTFi). Ideas and bug reports are also welcome in [Issues](https://github.com/Joliz1337/monitoring/issues).
+Update announcements — what changed and whether you need to do anything after updating — are posted in the [Telegram community](https://t.me/+IClul20AJ7Y5MTFi) (in Russian). You can also ask questions and chat there. Ideas and bug reports are also welcome in [Issues](https://github.com/Joliz1337/monitoring/issues).
 
 ## Documentation
 

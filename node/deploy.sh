@@ -26,9 +26,9 @@ TIMEOUT_DOCKER_COMPOSE_DOWN=120
 TIMEOUT_SYSTEMCTL=60
 TIMEOUT_HEALTH_CHECK=5
 
-# Агент слушает только петлю (network_mode: host), снаружи ноду закрывает
-# nginx с mTLS — самопроверки установщика идут напрямую во внутренний API.
-INTERNAL_API="http://127.0.0.1:7500"
+# Агент слушает только локальный сокет (command сервиса api в docker-compose.yml),
+# снаружи ноду закрывает nginx с mTLS — самопроверки установщика идут через сокет.
+AGENT_SOCKET="/run/monitoring-node/api.sock"
 
 MAX_RETRIES=3
 RETRY_DELAY=5
@@ -865,6 +865,11 @@ pull_and_start() {
     docker builder prune -f --keep-storage=500MB >/dev/null 2>&1 || true
 }
 
+# GET во внутренний API агента, $1 — путь
+agent_get() {
+    timeout "$TIMEOUT_HEALTH_CHECK" curl -sf --unix-socket "$AGENT_SOCKET" "http://localhost$1"
+}
+
 wait_for_services() {
     log_info "Waiting for services to start..."
     
@@ -872,7 +877,7 @@ wait_for_services() {
     local attempt=1
 
     while [ $attempt -le $max_attempts ]; do
-        if timeout "$TIMEOUT_HEALTH_CHECK" curl -sf "$INTERNAL_API/health" > /dev/null 2>&1; then
+        if agent_get /health > /dev/null 2>&1; then
             log_success "Services are ready"
             return 0
         fi
@@ -891,7 +896,7 @@ check_endpoints() {
 
     echo -n "  /health: "
     local response
-    response=$(timeout "$TIMEOUT_HEALTH_CHECK" curl -sf "$INTERNAL_API/health" 2>/dev/null || echo "")
+    response=$(agent_get /health 2>/dev/null || echo "")
     if echo "$response" | grep -q '"status":"ok"'; then
         echo -e "${GREEN}OK${NC}"
     else
@@ -899,7 +904,7 @@ check_endpoints() {
     fi
 
     echo -n "  /api/metrics: "
-    response=$(timeout "$TIMEOUT_HEALTH_CHECK" curl -sf "$INTERNAL_API/api/metrics" 2>/dev/null || echo "")
+    response=$(agent_get /api/metrics 2>/dev/null || echo "")
     if echo "$response" | grep -q '"cpu"'; then
         echo -e "${GREEN}OK${NC}"
     else
@@ -907,7 +912,7 @@ check_endpoints() {
     fi
 
     echo -n "  /api/haproxy/status: "
-    response=$(timeout "$TIMEOUT_HEALTH_CHECK" curl -sf "$INTERNAL_API/api/haproxy/status" 2>/dev/null || echo "")
+    response=$(agent_get /api/haproxy/status 2>/dev/null || echo "")
     if echo "$response" | grep -q '"running":true'; then
         echo -e "${GREEN}OK (running)${NC}"
     elif echo "$response" | grep -q '"running":false'; then

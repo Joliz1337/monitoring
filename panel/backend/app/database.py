@@ -1,5 +1,6 @@
 """Database module with PostgreSQL support."""
 
+import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -88,6 +89,7 @@ async def run_migrations(conn):
             ("has_xray_node", "BOOLEAN DEFAULT FALSE"),
             ("proxy_url", "VARCHAR(255)"),
             ("reserved_ports", "TEXT"),
+            ("note", "VARCHAR(40)"),
         ]
         
         for col_name, col_type in migrations:
@@ -536,6 +538,7 @@ async def run_migrations(conn):
             ("haproxy_sync_status", "VARCHAR(20)"),
             ("haproxy_listen_ips", "TEXT"),
             ("haproxy_source_ips", "TEXT"),
+            ("link_capacity_mbit", "INTEGER"),
         ]
         for col_name, col_type in haproxy_profile_columns:
             if col_name not in columns:
@@ -2278,6 +2281,56 @@ async def _migrate_source_pool_manual(conn):
                 logger.warning(f"Could not add source_pool_nodes.{col_name}: {e}")
 
 
+async def _migrate_torrent_blocker_server_mode(conn):
+    """Режимы «кроме выбранных / только выбранные» и порты у серверов и папок блокировщика торрентов.
+
+    Старый список id исключений переносится в записи режима exclude без портов;
+    колонка удаляется только после переноса, иначе исключения пропали бы.
+    """
+    result = await conn.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'torrent_blocker_settings'
+    """))
+    columns = {row[0] for row in result.fetchall()}
+    if not columns:
+        return
+    for col_name, col_type in (
+        ("server_mode", "VARCHAR(10) DEFAULT 'exclude'"),
+        ("excluded_servers", "TEXT"),
+        ("included_servers", "TEXT"),
+        ("excluded_folders", "TEXT"),
+        ("included_folders", "TEXT"),
+    ):
+        if col_name in columns:
+            continue
+        try:
+            await conn.execute(text(f'ALTER TABLE torrent_blocker_settings ADD COLUMN "{col_name}" {col_type}'))
+            logger.info(f"Added column: torrent_blocker_settings.{col_name}")
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.warning(f"Could not add torrent_blocker_settings.{col_name}: {e}")
+    if "excluded_server_ids" not in columns:
+        return
+    try:
+        rows = (await conn.execute(text(
+            "SELECT id, excluded_server_ids FROM torrent_blocker_settings WHERE excluded_servers IS NULL"
+        ))).all()
+        for row_id, raw in rows:
+            try:
+                server_ids = [int(server_id) for server_id in json.loads(raw or "[]")]
+            except (ValueError, TypeError):
+                logger.warning(f"Unreadable torrent_blocker_settings.excluded_server_ids {raw!r}, dropping it")
+                server_ids = []
+            await conn.execute(
+                text("UPDATE torrent_blocker_settings SET excluded_servers = :value WHERE id = :id"),
+                {"value": json.dumps([{"id": server_id, "ports": []} for server_id in server_ids]), "id": row_id},
+            )
+        await conn.execute(text('ALTER TABLE torrent_blocker_settings DROP COLUMN "excluded_server_ids"'))
+        logger.info("Moved torrent_blocker_settings.excluded_server_ids to excluded_servers")
+    except Exception as e:
+        logger.warning(f"Could not migrate torrent_blocker_settings.excluded_server_ids: {e}")
+
+
 async def _migrate_node_update_step(conn):
     """Этап обновления ноды для статуса на «Обновлениях» — таблица старше колонки."""
     try:
@@ -2324,6 +2377,28 @@ async def _migrate_encrypt_secrets(conn) -> None:
             )
 
 
+async def _migrate_remnawave_geo(conn):
+    """Карта клиентов Remnawave: ноды в текущем снимке IP и срок истории.
+
+    Таблицы истории, гео и присутствия создаёт create_all; здесь — только новые
+    колонки существующих таблиц и автовакуум для истории, которую каждый цикл
+    сбора обновляет upsert'ом.
+    """
+    statements = [
+        "ALTER TABLE xray_stats ADD COLUMN IF NOT EXISTS node_uuids VARCHAR(64)[] NOT NULL DEFAULT '{}'",
+        "ALTER TABLE remnawave_settings ADD COLUMN IF NOT EXISTS ip_history_days INTEGER DEFAULT 30",
+        "ALTER TABLE remnawave_ip_history SET ("
+        " autovacuum_vacuum_scale_factor = 0.02,"
+        " autovacuum_vacuum_threshold = 1000,"
+        " autovacuum_analyze_scale_factor = 0.05)",
+    ]
+    for sql in statements:
+        try:
+            await conn.execute(text(sql))
+        except Exception as e:
+            logger.warning(f"Remnawave geo DDL skipped ({sql}): {e}")
+
+
 async def init_db():
     """Initialize database: create tables, run migrations."""
     async with engine.begin() as conn:
@@ -2354,8 +2429,10 @@ async def init_db():
         await _migrate_metrics_window_columns(conn)
         await _migrate_haproxy_profile_options(conn)
         await _migrate_source_pool_manual(conn)
+        await _migrate_torrent_blocker_server_mode(conn)
         await _migrate_node_update_step(conn)
         await _migrate_encrypt_secrets(conn)
+        await _migrate_remnawave_geo(conn)
 
     await _warmup_pool()
 

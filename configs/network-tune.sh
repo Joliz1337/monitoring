@@ -39,6 +39,9 @@ configure_flow_limit() {
     echo "$mask" > /proc/sys/net/core/flow_limit_cpu_bitmap 2>/dev/null || true
 }
 
+# CPU masks are built as comma-separated 32-bit groups ("ffff,ffffffff"): past
+# CPU 31 the kernel rejects a solid hex string with EOVERFLOW, and the write
+# would fail silently behind `|| true`.
 get_cpu_mask() {
     local cpu_count
     cpu_count=$(nproc)
@@ -50,6 +53,7 @@ get_cpu_mask() {
             if (i+1 < c) val += 2
             if (i+2 < c) val += 4
             if (i+3 < c) val += 8
+            if (i > 0 && i % 32 == 0) hex = "," hex
             hex = sprintf("%x", val) hex
         }
         print hex
@@ -60,15 +64,11 @@ cpu_index_mask() {
     local cpu_idx=$1
     awk -v idx="$cpu_idx" 'BEGIN {
         hex=""
-        block = int(idx / 4)
-        bit  = idx % 4
-        val  = 0
-        if (bit == 0) val = 1
-        if (bit == 1) val = 2
-        if (bit == 2) val = 4
-        if (bit == 3) val = 8
-        for (i=0; i<block; i++) hex = "0" hex
-        hex = sprintf("%x", val) hex
+        for (i=0; i<=idx; i+=4) {
+            val = (idx < i+4) ? 2^(idx-i) : 0
+            if (i > 0 && i % 32 == 0) hex = "," hex
+            hex = sprintf("%x", val) hex
+        }
         print hex
     }'
 }
@@ -159,12 +159,25 @@ configure_xps() {
     done
 }
 
+# Vector names in /proc/interrupts are fixed when the driver opens the device.
+# After a rename while UP (netplan set-name: eno1 -> eth0) they still read
+# "eno1-TxRx-N", and a grep by the current name finds only the misc vector.
+# A PCI NIC lists its vectors in msi_irqs regardless of the name; virtio has no
+# such directory next to the interface and keeps the lookup by name.
+nic_irqs() {
+    local iface=$1 irqs=""
+    local msi_dir="/sys/class/net/$iface/device/msi_irqs"
+    [ -d "$msi_dir" ] && irqs=$(ls "$msi_dir" 2>/dev/null | sort -n)
+    [ -z "$irqs" ] && irqs=$(grep "$iface" /proc/interrupts 2>/dev/null | awk -F: '{print $1}' | tr -d ' ')
+    echo "$irqs"
+}
+
 configure_irq_affinity() {
     local iface=$1
     pgrep -x irqbalance &>/dev/null && return 0
 
     local irqs
-    irqs=$(grep "$iface" /proc/interrupts 2>/dev/null | awk -F: '{print $1}' | tr -d ' ')
+    irqs=$(nic_irqs "$iface")
     [ -z "$irqs" ] && return 0
 
     local cpu_count

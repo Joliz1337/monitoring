@@ -18,12 +18,13 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
 } from 'lucide-react'
-import { proxyApi, dnatProfilesApi, DnatNodeState, DnatRuleCounters } from '../api/client'
+import { proxyApi, dnatProfilesApi, portUsageApi, DnatNodeState, DnatRuleCounters } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatBitsPerSecLocalized } from '../utils/format'
 import { formatListen, formatTarget, protocolLabel } from '../utils/dnat'
+import { dnatTcpRanges, rangesCover } from '../utils/portConflicts'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useModuleEnabled } from '../hooks/useModuleEnabled'
 import { Tooltip } from '../components/ui/Tooltip'
@@ -102,6 +103,14 @@ export default function Dnat() {
     }).catch(() => {})
   }, [serverId])
 
+  const [haproxyPorts, setHaproxyPorts] = useState<number[]>([])
+  useEffect(() => {
+    if (!serverId) return
+    portUsageApi.get(Number(serverId))
+      .then(res => setHaproxyPorts(res.data[Number(serverId)]?.haproxy_ports ?? []))
+      .catch(() => { /* предупреждение не критично */ })
+  }, [serverId])
+
   const fetchState = useCallback(async () => {
     if (!serverId || !dnatReadable) {
       setIsLoading(false)
@@ -175,6 +184,10 @@ export default function Dnat() {
     [state],
   )
   const activeRules = state?.rules.filter(r => r.enabled).length ?? 0
+  const interceptedHaproxyPorts = useMemo(() => {
+    const ranges = dnatTcpRanges(state?.rules ?? [])
+    return haproxyPorts.filter(port => rangesCover(ranges, port))
+  }, [state, haproxyPorts])
   const totals = useMemo(() => {
     const list = state?.counters ?? []
     return {
@@ -332,6 +345,18 @@ export default function Dnat() {
           <motion.div key="content" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
             {!dnatWritable && <div className="mb-4"><NodeRestrictedNotice server={server} variant="readonly" compact /></div>}
 
+            {interceptedHaproxyPorts.length > 0 && (
+              <div className="mb-4 flex items-start justify-between gap-3 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
+                  <div className="text-sm">{t('dnat.haproxy_conflict', { ports: interceptedHaproxyPorts.join(', ') })}</div>
+                </div>
+                <Link to={`/${uid}/server/${serverId}/haproxy`} className="shrink-0 text-xs text-red-300 hover:text-red-200 transition-colors">
+                  {t('dnat.open_haproxy')} →
+                </Link>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
               <div className={`card border ${healthCard.color}`}>
                 <div className="flex items-center gap-3">
@@ -374,6 +399,16 @@ export default function Dnat() {
                   <RouteIcon className="w-5 h-5 text-accent-500" />
                   {t('dnat.rules')}
                   <span className="text-sm text-dark-500">({activeRules}/{state.rules.length})</span>
+                  {haproxyPorts.length > 0 && interceptedHaproxyPorts.length === 0 && (
+                    <Tooltip label={t('dnat.haproxy_present', { ports: haproxyPorts.join(', ') })} maxWidth={360}>
+                      <Link
+                        to={`/${uid}/server/${serverId}/haproxy`}
+                        className="px-1.5 py-0.5 rounded text-2xs font-normal bg-dark-700/50 text-dark-400 border border-dark-600/40 hover:text-dark-200 transition-colors"
+                      >
+                        HAProxy
+                      </Link>
+                    </Tooltip>
+                  )}
                 </h2>
                 {state.applied_at && (
                   <span className="text-xs text-dark-500">
@@ -412,6 +447,8 @@ export default function Dnat() {
                         const rate = rates[rule.name]
                         const targetRows = (counters?.targets ?? []).length > 1 ? counters.targets : []
                         const singleTarget = counters?.targets.length === 1 ? counters.targets[0] : null
+                        const ruleRanges = dnatTcpRanges([rule])
+                        const ruleInterceptsHaproxy = interceptedHaproxyPorts.filter(port => rangesCover(ruleRanges, port))
                         return (
                           <Fragment key={rule.name}>
                           <tr className={`border-t border-dark-800/40 hover:bg-dark-800/30 transition-colors ${rule.enabled ? '' : 'opacity-50'}`}>
@@ -426,6 +463,13 @@ export default function Dnat() {
                                 <span className="ml-2 px-1.5 py-0.5 rounded text-2xs bg-warning/10 text-warning border border-warning/20">
                                   {t('dnat_profiles.no_masq_badge')}
                                 </span>
+                              )}
+                              {ruleInterceptsHaproxy.length > 0 && (
+                                <Tooltip label={t('dnat.haproxy_rule_hint', { ports: ruleInterceptsHaproxy.join(', ') })} maxWidth={360}>
+                                  <span className="ml-2 px-1.5 py-0.5 rounded text-2xs font-sans bg-red-500/10 text-red-400 border border-red-500/30">
+                                    HAProxy
+                                  </span>
+                                </Tooltip>
                               )}
                             </td>
                             <td className="px-3 py-2">

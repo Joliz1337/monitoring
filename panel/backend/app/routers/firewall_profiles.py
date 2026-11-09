@@ -15,6 +15,8 @@ from app.auth import verify_auth
 from app.database import async_session_maker, get_db
 from app.models import FirewallProfile, FirewallSyncLog, Server
 from app.services.firewall_profile_sync import compute_rules_hash, sync_profile_to_servers
+from app.services.firewall_proxy_guard import NODE_API_DEFAULT_PORT
+from app.services.net_utils import PanelIpSource, panel_ip_info
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +111,7 @@ class SyncRequest(BaseModel):
 
 # ==================== Helpers ====================
 
-NODE_API_PORT = 9100
+NODE_API_PORT = NODE_API_DEFAULT_PORT
 SSH_DEFAULT_PORT = 22
 
 DEFAULT_RULES: list[dict] = [
@@ -118,6 +120,22 @@ DEFAULT_RULES: list[dict] = [
     {"port": SSH_DEFAULT_PORT, "protocol": "tcp", "action": "allow",
      "from_ip": None, "direction": "in", "comment": "SSH"},
 ]
+
+
+async def build_default_rules() -> list[dict]:
+    """Правила нового профиля: API ноды открыт только адресу панели.
+
+    Подставляется только адрес, который назвал внешний сервис, — его и видят ноды.
+    Адрес интерфейса за NAT и A-запись домена за Cloudflare могут оказаться чужими,
+    а такое правило при раскатке отрезало бы ноды от панели. Поэтому без ответа
+    сервиса правило остаётся «откуда угодно».
+    """
+    found = await panel_ip_info()
+    panel_ip = found.ip if found and found.source is PanelIpSource.EXTERNAL else None
+    return [
+        {**rule, "from_ip": panel_ip} if rule["port"] == NODE_API_PORT and panel_ip else dict(rule)
+        for rule in DEFAULT_RULES
+    ]
 
 
 def _serialize_rules(profile: FirewallProfile) -> list[dict]:
@@ -386,7 +404,7 @@ async def create_profile(data: ProfileCreate, db: AsyncSession = Depends(get_db)
     position = (max_pos.scalar() or 0) + 1
 
     if data.rules is None:
-        rules = list(DEFAULT_RULES)
+        rules = await build_default_rules()
     else:
         rules = [r.model_dump() for r in data.rules]
 

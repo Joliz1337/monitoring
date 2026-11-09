@@ -20,7 +20,7 @@ from app.services.node_capabilities import (
 )
 
 from app.database import get_db
-from app.models import Server, MetricsSnapshot, ServerTraffic
+from app.models import SERVER_NOTE_MAX_LENGTH, Server, MetricsSnapshot, ServerTraffic
 from app.auth import verify_auth
 from app.services import ping_block
 from app.services.blocklist_manager import get_blocklist_manager
@@ -190,11 +190,14 @@ def _clean_url(v: str) -> str:
     return v
 
 
+FOLDER_MAX_LENGTH = 200  # длина колонки servers.folder
+
+
 class ServerCreate(BaseModel):
     name: str
     url: str
     proxy_url: Optional[str] = None
-    folder: Optional[str] = Field(None, max_length=200)
+    folder: Optional[str] = Field(None, max_length=FOLDER_MAX_LENGTH)
 
     @field_validator('url')
     @classmethod
@@ -214,6 +217,7 @@ class ServerUpdate(BaseModel):
     is_active: Optional[bool] = None
     folder: Optional[str] = None
     proxy_url: Optional[str] = None
+    note: Optional[str] = None
 
     @field_validator('url')
     @classmethod
@@ -226,6 +230,18 @@ class ServerUpdate(BaseModel):
     @classmethod
     def validate_proxy(cls, v: str | None) -> str | None:
         return validate_proxy_input(v)
+
+    @field_validator('note')
+    @classmethod
+    def validate_note(cls, v: str | None) -> str | None:
+        return clean_server_note(v)
+
+
+def clean_server_note(note: Optional[str]) -> Optional[str]:
+    note = (note or "").strip()
+    if len(note) > SERVER_NOTE_MAX_LENGTH:
+        raise ValueError(f"Note is longer than {SERVER_NOTE_MAX_LENGTH} characters")
+    return note or None
 
 
 def clean_folder_name(folder: Optional[str]) -> Optional[str]:
@@ -329,6 +345,7 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
             "position": s.position,
             "is_active": s.is_active,
             "folder": s.folder,
+            "note": s.note,
             "last_seen": to_iso_utc(s.last_seen),
             "last_error": s.last_error,
             "error_code": s.error_code,
@@ -407,11 +424,12 @@ async def get_migration_status(
 @router.get("/fleet/history")
 async def get_fleet_history(
     period: FleetPeriod = Query(default="24h"),
+    folder: Optional[str] = Query(default=None, min_length=1, max_length=FOLDER_MAX_LENGTH),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth),
 ):
-    """Сводная история парка под плитками дашборда: CPU, память и скорости сети."""
-    return await load_fleet_history(db, period)
+    """Сводная история парка или одной папки: CPU, память и скорости сети."""
+    return await load_fleet_history(db, period, folder)
 
 
 @router.post("")
@@ -572,7 +590,7 @@ async def migrate_all_servers(
     keygen = request.app.state.pki
 
     # Ноды на осознанном персональном сертификате (dedicated_cert) не трогаем —
-    # заливка shared cert с clientAuth уничтожила бы их изоляцию от парка
+    # заливка общего cert вернула бы на них ключ, общий для всего парка
     candidates = [s for s in servers if not s.uses_shared_cert and not s.dedicated_cert]
     auto_targets = [s for s in candidates if s.pki_enabled]
     manual_targets = [s for s in candidates if not s.pki_enabled]

@@ -1,7 +1,14 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, BigInteger, Index, ForeignKey, UniqueConstraint
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.sql import func
 from app.database import Base
 from app.crypto import EncryptedString
+
+SERVER_NOTE_MAX_LENGTH = 40
+
+# Потолок полосы сервера по тарифу, Мбит/с — знаменатель загрузки для весов балансировщика
+LINK_CAPACITY_MIN_MBIT = 10
+LINK_CAPACITY_MAX_MBIT = 400_000
 
 
 class PKIKeygen(Base):
@@ -78,9 +85,11 @@ class Server(Base):
     position = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
     folder = Column(String(200), nullable=True)
+    # Короткая подпись оператора рядом с IP на дашборде
+    note = Column(String(SERVER_NOTE_MAX_LENGTH), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    
+
     # Error tracking
     last_seen = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(String(500), nullable=True)
@@ -126,6 +135,8 @@ class Server(Base):
     # выходные — source к бэкендам; пусто = все адреса / выбор системы
     haproxy_listen_ips = Column(Text, nullable=True)
     haproxy_source_ips = Column(Text, nullable=True)
+    # Канал по тарифу, Мбит/с: общий для всех IP сервера и всех правил с весами по нагрузке
+    link_capacity_mbit = Column(Integer, nullable=True)
 
     # Firewall (UFW) profile binding
     active_firewall_profile_id = Column(Integer, ForeignKey("firewall_profiles.id", ondelete="SET NULL"), nullable=True)
@@ -465,6 +476,7 @@ class RemnawaveSettings(Base):
     enabled = Column(Boolean, default=False)
     collection_interval = Column(Integer, default=300)
     ignored_user_ids = Column(Text, nullable=True)  # JSON array of user IDs
+    ip_history_days = Column(Integer, default=30)    # сколько дней хранить историю IP клиентов
 
     # Anomaly detection
     anomaly_enabled = Column(Boolean, default=False)
@@ -520,9 +532,71 @@ class XrayStats(Base):
     email = Column(Integer, primary_key=True, nullable=False)
     source_ip = Column(String(45), primary_key=True, nullable=False)
     last_seen = Column(DateTime(timezone=True), server_default=func.now())
+    node_uuids = Column(ARRAY(String(64)), nullable=False, server_default='{}')
 
     # email — ведущая колонка составного PK (email, source_ip), поэтому отдельный
     # индекс на email избыточен: PK-индекс уже покрывает фильтр WHERE email = ...
+
+
+class RemnawaveIpHistory(Base):
+    """С каких IP и через какие ноды пользователь подключался за срок истории."""
+    __tablename__ = "remnawave_ip_history"
+
+    user_id = Column(Integer, primary_key=True)
+    source_ip = Column(String(45), primary_key=True)
+    node_uuid = Column(String(64), primary_key=True)
+    first_seen = Column(DateTime(timezone=True), nullable=False)
+    last_seen = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index('idx_rw_ip_history_last_seen', 'last_seen'),
+        Index('idx_rw_ip_history_ip', 'source_ip'),
+    )
+
+
+class IpGeo(Base):
+    """Место и провайдер IP по локальной базе DB-IP; чистится при смене месяца базы."""
+    __tablename__ = "ip_geo"
+
+    ip = Column(String(45), primary_key=True)
+    country_code = Column(String(2), nullable=True)
+    region = Column(String(120), nullable=True)
+    place = Column(String(120), nullable=False, server_default='')
+    lat = Column(Float, nullable=True)
+    lon = Column(Float, nullable=True)
+    asn = Column(Integer, nullable=True)
+    as_org = Column(String(200), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index('idx_ip_geo_place', 'country_code', 'place'),
+    )
+
+
+class RemnawaveGeoPresence(Base):
+    """Почасовые суммы онлайн-IP по местам — для сравнения карты «к вчера»."""
+    __tablename__ = "remnawave_geo_presence"
+
+    bucket = Column(DateTime(timezone=True), primary_key=True)
+    country_code = Column(String(2), primary_key=True)
+    place = Column(String(120), primary_key=True)
+    lat = Column(Float, nullable=False)
+    lon = Column(Float, nullable=False)
+    ips_sum = Column(BigInteger, nullable=False, default=0)
+    samples = Column(Integer, nullable=False, default=0)
+
+
+class RemnawaveNodeCache(Base):
+    """Ноды Remnawave с координатами: имя ноды в истории переживает её удаление."""
+    __tablename__ = "remnawave_node_cache"
+
+    uuid = Column(String(64), primary_key=True)
+    name = Column(String(200), nullable=True)
+    country_code = Column(String(8), nullable=True)
+    address = Column(String(255), nullable=True)
+    lat = Column(Float, nullable=True)
+    lon = Column(Float, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class RemnawaveIpAnomalyState(Base):
@@ -582,7 +656,15 @@ class TorrentBlockerSettings(Base):
     enabled = Column(Boolean, default=False)
     poll_interval_minutes = Column(Integer, default=5)
     ban_duration_minutes = Column(Integer, default=30)
-    excluded_server_ids = Column(Text, nullable=True)
+    # Где банить (services/torrent_ban_scope): exclude — везде, кроме excluded_servers,
+    # include — только на included_servers. Серверы — JSON [{"id": 5, "ports": ["8443"], "override": true}],
+    # порты папок — [{"name": "Мосты", "ports": ["8443"]}]; у каждого режима свои списки,
+    # чтобы переключение не переворачивало их смысл
+    server_mode = Column(String(10), default="exclude")
+    excluded_servers = Column(Text, nullable=True)
+    included_servers = Column(Text, nullable=True)
+    excluded_folders = Column(Text, nullable=True)
+    included_folders = Column(Text, nullable=True)
 
     # Вебхук-предупреждение: панель уведомляет внешний сервис (бота) о грядущем бане,
     # ждёт webhook_delay_seconds (грейс-период для пользователя), затем банит IP.
@@ -1377,6 +1459,26 @@ class SourcePoolNode(Base):
     mode = Column(String(10), default="auto")  # auto — по кругу | manual — по assignments
     excluded = Column(Text, nullable=True)     # JSON list адресов
     assignments = Column(Text, nullable=True)  # JSON {метка: адрес}; хранится и в авто — не теряется при переключении
+    node_state = Column(Text, nullable=True)   # JSON — последний ответ /state ноды
+    config_hash = Column(String(64), nullable=True)
+    sync_status = Column(String(20), default="pending")  # pending | synced | failed | denied | unsupported
+    sync_error = Column(Text, nullable=True)
+    last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    last_state_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# ==================== GRE-туннели DDoS-Guard ====================
+
+class GreNode(Base):
+    """GRE-туннели DDoS-Guard сервера: список туннелей, последнее состояние с ноды
+    и наблюдение за входящими пакетами (по ним видно, жив ли туннель со стороны
+    DDoS-Guard). Строка остаётся и с пустым списком — так ноде доезжает снятие."""
+    __tablename__ = "gre_nodes"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    tunnels = Column(Text, nullable=True)      # JSON list {slot, local, remote, pe, ce, health_net}
+    notify = Column(Boolean, default=True)     # Telegram, когда туннель замолчал и когда ожил
+    activity = Column(Text, nullable=True)     # JSON {интерфейс: {rx_packets, changed_at, first_seen_at, silent}}
     node_state = Column(Text, nullable=True)   # JSON — последний ответ /state ноды
     config_hash = Column(String(64), nullable=True)
     sync_status = Column(String(20), default="pending")  # pending | synced | failed | denied | unsupported

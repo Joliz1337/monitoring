@@ -150,7 +150,11 @@ declare -A MSG_RU
 MSG_EN[downloading_repo]="Downloading repository..."
 MSG_EN[downloading_mirror]="Downloading via mirror"
 MSG_EN[github_mirror]="GitHub is unreachable, trying the mirror (ghfast.top)..."
-MSG_EN[download_failed]="Failed to download the repository (direct and via mirror)"
+MSG_EN[mirror_disabled]="GitHub is unreachable. The mirror (ghfast.top) is used only with MON_EXPECTED_COMMIT=<full commit SHA> (the download is checked against it) or MON_ALLOW_UNVERIFIED_MIRROR=1 (without any check). Or download via a proxy: MON_PROXY_URL"
+MSG_EN[mirror_bad_commit]="MON_EXPECTED_COMMIT must be a full 40-character commit SHA in lowercase — the mirror is not used"
+MSG_EN[mirror_unverified]="MON_ALLOW_UNVERIFIED_MIRROR=1: code from the mirror is NOT verified and will run as root"
+MSG_EN[mirror_commit_mismatch]="The mirror returned a different commit than MON_EXPECTED_COMMIT — the download is discarded"
+MSG_EN[download_failed]="Failed to download the repository"
 MSG_EN[git_install_failed]="Failed to install git"
 MSG_EN[cli_install_failed]="Could not install the mon command"
 MSG_EN[copy_failed]="Failed to copy files to"
@@ -330,7 +334,11 @@ MSG_EN[rescue_rebooting]="Rebooting into the new system in 5 seconds..."
 MSG_RU[downloading_repo]="Скачивание репозитория..."
 MSG_RU[downloading_mirror]="Скачивание через зеркало"
 MSG_RU[github_mirror]="GitHub недоступен, пробую зеркало (ghfast.top)..."
-MSG_RU[download_failed]="Не удалось скачать репозиторий (напрямую и через зеркало)"
+MSG_RU[mirror_disabled]="GitHub недоступен. Зеркало (ghfast.top) используется только с MON_EXPECTED_COMMIT=<полный SHA коммита> (скачанное сверяется с ним) или MON_ALLOW_UNVERIFIED_MIRROR=1 (без проверки). Либо качайте через прокси: MON_PROXY_URL"
+MSG_RU[mirror_bad_commit]="MON_EXPECTED_COMMIT должен быть полным SHA коммита из 40 символов строчными — зеркало не используется"
+MSG_RU[mirror_unverified]="MON_ALLOW_UNVERIFIED_MIRROR=1: код с зеркала НЕ проверяется и будет запущен от root"
+MSG_RU[mirror_commit_mismatch]="Зеркало отдало не тот коммит, что в MON_EXPECTED_COMMIT — скачанное удалено"
+MSG_RU[download_failed]="Не удалось скачать репозиторий"
 MSG_RU[git_install_failed]="Не удалось установить git"
 MSG_RU[cli_install_failed]="Не удалось установить команду mon"
 MSG_RU[copy_failed]="Не удалось скопировать файлы в"
@@ -709,6 +717,34 @@ check_requirements() {
 
 # ==================== Git Clone with Retry ====================
 
+# Зеркало — чужой сервер, а скачанный код дальше исполняется от root. Поэтому
+# без явного разрешения оно не используется: MON_EXPECTED_COMMIT (клон сверяется
+# с ним, панель узнаёт SHA у самого GitHub) или MON_ALLOW_UNVERIFIED_MIRROR=1
+mirror_allowed() {
+    if [ -n "${MON_EXPECTED_COMMIT:-}" ]; then
+        [[ "$MON_EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] && return 0
+        log_error "$(msg mirror_bad_commit)"
+        return 1
+    fi
+    if [ "${MON_ALLOW_UNVERIFIED_MIRROR:-0}" = "1" ]; then
+        log_warn "$(msg mirror_unverified)"
+        return 0
+    fi
+    log_error "$(msg mirror_disabled)"
+    return 1
+}
+
+mirror_commit_verified() {
+    local target_dir="$1"
+    [ -n "${MON_EXPECTED_COMMIT:-}" ] || return 0
+
+    local cloned
+    cloned=$(git -C "$target_dir" rev-parse HEAD 2>/dev/null || true)
+    [ "$cloned" = "$MON_EXPECTED_COMMIT" ] && return 0
+    log_error "$(msg mirror_commit_mismatch): ${cloned:-?} != $MON_EXPECTED_COMMIT"
+    return 1
+}
+
 clone_repo_with_fallback() {
     local target_dir="$1"
     local branch="${2:-main}"
@@ -724,12 +760,19 @@ clone_repo_with_fallback() {
     fi
 
     rm -rf "$target_dir" 2>/dev/null || true
+    if ! mirror_allowed; then
+        log_error "$(msg download_failed)"
+        return 1
+    fi
+
     log_warn "$(msg github_mirror)"
     if spin_retry "$TIMEOUT_GIT_CLONE" 2 "$RETRY_DELAY" "$(msg downloading_mirror)" \
-        git clone --depth 1 --branch "$branch" "$mirror_url" "$target_dir"; then
+        git clone --depth 1 --branch "$branch" "$mirror_url" "$target_dir" && \
+        mirror_commit_verified "$target_dir"; then
         return 0
     fi
 
+    rm -rf "$target_dir" 2>/dev/null || true
     log_error "$(msg download_failed)"
     return 1
 }

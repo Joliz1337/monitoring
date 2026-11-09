@@ -14,6 +14,7 @@ import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -409,6 +410,120 @@ class RateGuardTests(unittest.TestCase):
         self.assertTrue(rate_is_sane(UNKNOWN_LINK_BYTES_PER_SEC, 0, 1.0, speed_mbps=None))
         self.assertFalse(rate_is_sane(UNKNOWN_LINK_BYTES_PER_SEC + 1, 0, 1.0, speed_mbps=None))
         self.assertTrue(rate_is_sane(0, 0, 0.0, speed_mbps=None))
+
+
+BANNED_IP = "203.0.113.10"
+
+
+def with_ips(metrics: dict, rx: int, tx: int, sampled_at: float, own: Optional[tuple[int, int]] = None) -> dict:
+    entry = {"ip": BANNED_IP, "rx_bytes": rx, "tx_bytes": tx}
+    if own is not None:
+        entry.update({"own_rx_bytes": own[0], "own_tx_bytes": own[1]})
+    metrics["network"].update({
+        "ips": [entry],
+        "ips_available": True,
+        "ips_sampled_at": sampled_at,
+    })
+    return metrics
+
+
+class IpCounterTests(unittest.TestCase):
+    def observe_twice(self, second_rx: int, second_sampled_at: float, second_at: datetime):
+        ingest = TrafficIngest()
+        ingest.observe(
+            SERVER_ID, with_ips(one_iface(0, 0, uptime=3600), 1_000, 2_000, 100.0),
+            epoch_of(naive(3, 1, 12)),
+        )
+        second_tx = 2_000 + 2 * (second_rx - 1_000)
+        ingest.observe(
+            SERVER_ID, with_ips(one_iface(0, 0, uptime=3640), second_rx, second_tx, second_sampled_at),
+            epoch_of(second_at),
+        )
+        return ingest
+
+    def test_ip_counters_land_in_their_own_scope(self):
+        ingest = self.observe_twice(31_000, 130.0, naive(3, 1, 12, 0, 40))
+
+        slot = buckets(ingest, "ip", scope_key=BANNED_IP)[naive(3, 1, 12)]
+        self.assertEqual((slot.rx_bytes, slot.tx_bytes), (30_000, 60_000))
+
+    def test_repeated_sample_is_not_counted_twice(self):
+        # Нода снимает iptables раз в 30 с, панель опрашивает чаще и видит тот же снимок
+        ingest = self.observe_twice(31_000, 100.0, naive(3, 1, 12, 0, 10))
+
+        self.assertEqual(buckets(ingest, "ip"), {})
+
+    def test_ip_rate_uses_the_node_sampling_window(self):
+        # Снимки на ноде через 30 с, панель забрала второй на 10 с позже: делить на
+        # 40 с интервала опросов значило бы занизить скорость на четверть
+        ingest = self.observe_twice(31_000, 130.0, naive(3, 1, 12, 0, 40))
+
+        rates = ingest.live_rates(SERVER_ID, naive(3, 1, 12, 0, 40))
+        self.assertEqual(rates["ip"][BANNED_IP], ObservedSpeeds(1_000.0, 2_000.0))
+
+    def test_counter_going_backwards_credits_nothing(self):
+        # Адрес сняли и вернули — правила пересозданы с нуля
+        ingest = self.observe_twice(500, 130.0, naive(3, 1, 12, 0, 40))
+
+        self.assertEqual(buckets(ingest, "ip"), {})
+        self.assertEqual(ingest._counters[(SERVER_ID, "ip", BANNED_IP)].rx_value, 500)
+
+    def test_own_connections_land_next_to_client_ones(self):
+        # Свои соединения сервера с адреса — отдельный ряд: из него и клиентов
+        # складывается весь трафик адреса, а клиенты остаются видны сами по себе
+        ingest = TrafficIngest()
+        ingest.observe(
+            SERVER_ID, with_ips(one_iface(0, 0, uptime=3600), 1_000, 2_000, 100.0, own=(5_000, 500)),
+            epoch_of(naive(3, 1, 12)),
+        )
+        ingest.observe(
+            SERVER_ID, with_ips(one_iface(0, 0, uptime=3640), 31_000, 62_000, 130.0, own=(905_000, 90_500)),
+            epoch_of(naive(3, 1, 12, 0, 40)),
+        )
+
+        own = buckets(ingest, "ip_own", scope_key=BANNED_IP)[naive(3, 1, 12)]
+        clients = buckets(ingest, "ip", scope_key=BANNED_IP)[naive(3, 1, 12)]
+        self.assertEqual((own.rx_bytes, own.tx_bytes), (900_000, 90_000))
+        self.assertEqual((clients.rx_bytes, clients.tx_bytes), (30_000, 60_000))
+        rates = ingest.live_rates(SERVER_ID, naive(3, 1, 12, 0, 40))
+        self.assertEqual(rates["ip_own"][BANNED_IP], ObservedSpeeds(30_000.0, 3_000.0))
+
+    def test_node_without_own_counters_leaves_their_scope_empty(self):
+        # Прежняя сборка ноды полей своих соединений не шлёт: нули вместо них
+        # выглядели бы как адрес, с которого сервер никуда не ходит
+        ingest = self.observe_twice(31_000, 130.0, naive(3, 1, 12, 0, 40))
+
+        self.assertEqual(buckets(ingest, "ip_own"), {})
+        self.assertNotIn((SERVER_ID, "ip_own", BANNED_IP), ingest._counters)
+
+
+class LiveRateTests(unittest.TestCase):
+    def test_interface_rate_comes_from_the_node_when_fresh(self):
+        # Посекундная скорость ноды — та же, из которой собрана цифра на карточке
+        metrics = one_iface(1_000, 2_000, uptime=3600)
+        metrics["live_rates"] = {"window_sec": 1.0, "sampled_at": 0.0}
+        metrics["network"]["interfaces"][0].update({"rx_bytes_per_sec": 5_000.0, "tx_bytes_per_sec": 7_000.0})
+        ingest = TrafficIngest()
+
+        ingest.observe(SERVER_ID, metrics, epoch_of(naive(3, 1, 12)))
+
+        rates = ingest.live_rates(SERVER_ID, naive(3, 1, 12))
+        self.assertEqual(rates["iface"][IFACE], ObservedSpeeds(5_000.0, 7_000.0))
+
+    def test_without_marker_interface_rate_is_the_counter_delta(self):
+        ingest = TrafficIngest()
+        ingest.observe(SERVER_ID, one_iface(0, 0, uptime=3600), epoch_of(naive(3, 1, 12)))
+        ingest.observe(SERVER_ID, one_iface(10_000, 20_000, uptime=3610), epoch_of(naive(3, 1, 12, 0, 10)))
+
+        rates = ingest.live_rates(SERVER_ID, naive(3, 1, 12, 0, 10))
+        self.assertEqual(rates["iface"][IFACE], ObservedSpeeds(1_000.0, 2_000.0))
+
+    def test_stale_rates_are_not_reported(self):
+        ingest = TrafficIngest()
+        ingest.observe(SERVER_ID, one_iface(0, 0, uptime=3600), epoch_of(naive(3, 1, 12)))
+        ingest.observe(SERVER_ID, one_iface(10_000, 20_000, uptime=3610), epoch_of(naive(3, 1, 12, 0, 10)))
+
+        self.assertEqual(ingest.live_rates(SERVER_ID, naive(3, 1, 12, 5)), {})
 
 
 if __name__ == "__main__":

@@ -32,8 +32,12 @@ from app.models.haproxy import (
     HAProxyStatsResponse,
     HAProxyStatusResponse,
     HAProxyValidateResponse,
+    RuntimeWeightResult,
+    RuntimeWeightsRequest,
+    RuntimeWeightsResponse,
 )
-from app.services.haproxy_manager import HAProxyRule, get_haproxy_manager
+from app.services.haproxy_manager import HAProxyRule, StatsSocketUnavailableError, get_haproxy_manager
+from app.services.haproxy_runtime_weights import SocketPermissionError, WeightItem, get_runtime_weights
 from app.models.haproxy import BackendServerModel, BalancerOptionsModel
 from app.services.firewall_manager import get_firewall_manager
 from app.services.dnat_manager import get_dnat_manager
@@ -101,6 +105,22 @@ async def get_haproxy_stats():
     # Менеджер отдаёт свой кэш словарём: модель — свежая копия, разметка его не трогает
     stats = HAProxyStatsResponse.model_validate(await asyncio.to_thread(manager.get_stats))
     return get_loss_probe().annotate_haproxy(stats)
+
+
+@router.put("/runtime/weights", response_model=RuntimeWeightsResponse)
+async def set_runtime_weights(request: RuntimeWeightsRequest):
+    """Веса серверов по нагрузке от панели: на лету, без reload, с ограниченным сроком"""
+    items = [WeightItem(w.backend, w.server, w.weight) for w in request.weights]
+    try:
+        result = await asyncio.to_thread(get_runtime_weights().apply, items, request.ttl_seconds)
+    except StatsSocketUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except SocketPermissionError:
+        raise HTTPException(status_code=409, detail="HAProxy stats socket is not admin level")
+    return RuntimeWeightsResponse(
+        results=[RuntimeWeightResult(backend=r.backend, server=r.server, ok=r.ok, error=r.error) for r in result.results],
+        guarded_backends=result.guarded_backends,
+    )
 
 
 @router.get("/rules", response_model=HAProxyRulesListResponse)

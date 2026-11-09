@@ -57,6 +57,7 @@ from app.services.update_state import (
     resolve_orphaned,
     status_payload,
 )
+from app.services.update_source import COMMIT_SHA_PATTERN, render_clone_step
 from app.services.updater_image import UPDATER_IMAGE, UpdaterImageUnavailable, ensure_updater_image
 
 NGINX_SSL_DIR = Path("/opt/monitoring-node/nginx/ssl")
@@ -67,6 +68,7 @@ logger = logging.getLogger(__name__)
 
 VERSION_FILE = Path("/app/VERSION")
 UPDATER_CONTAINER_NAME = "monitoring-updater"
+UPDATER_CLONE_DIR = "/tmp/monitoring-fresh"
 # apply-update.sh качает образы ДО рестарта контейнеров: на медленной сети pull
 # занимает десятки минут (наблюдалось 755с на слой) — ждём до 2 часов
 UPDATER_WAIT_TIMEOUT = 7200
@@ -302,6 +304,7 @@ async def run_update_in_container(
     target_ref: str | None = None,
     proxy: str | None = None,
     allow_local_build: bool = True,
+    expected_commit: str | None = None,
 ):
     """
     Run update in separate Docker container.
@@ -310,6 +313,7 @@ async def run_update_in_container(
         attempt_id: попытка из файла состояния — ей принадлежит итог
         target_ref: Git reference (commit hash, tag, or branch). Default: 'main'
         proxy: HTTP proxy for git (e.g., http://127.0.0.1:3128)
+        expected_commit: коммит ветки, который панель узнала у GitHub; без него зеркало не используется
 
     Каждый вызов docker-SDK синхронный и уходит в поток: pull образа на медленной
     сети занимает десятки минут, а вставший event loop уронил бы и /health —
@@ -336,12 +340,8 @@ async def run_update_in_container(
         allow_build_val = "1" if allow_local_build else "0"
         proxy_info = f" (via proxy: {proxy})" if proxy else ""
         logger.info(f"Starting update to: {ref_arg}{proxy_info}")
-        
-        # Build git proxy args
-        git_proxy_args = ""
-        if proxy:
-            git_proxy_args = f'-c http.proxy={proxy} -c https.proxy={proxy}'
-        
+        clone_step = render_clone_step(ref_arg, UPDATER_CLONE_DIR, expected_commit, proxy)
+
         # Updater script:
         # 1. Install dependencies (git for clone, nsenter for host access)
         # 2. Clone repo inside Alpine container
@@ -362,37 +362,8 @@ echo "[INFO] Docker Compose version:"
 docker compose version
 
 echo "[INFO] Cloning repository..."
-
-GIT_PROXY_ARGS="{git_proxy_args}"
-GITHUB_MIRROR="https://ghfast.top"
-
-TMP_CLONE=/tmp/monitoring-fresh
-rm -rf $TMP_CLONE
-CLONE_SUCCESS=0
-
-if [ -n "$GIT_PROXY_ARGS" ]; then
-    echo "[INFO] Using proxy for git: {proxy}"
-    echo "[INFO] Trying GitHub via proxy (60s timeout)..."
-    if timeout 60 git $GIT_PROXY_ARGS clone --depth 1 --branch "{ref_arg}" "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
-        CLONE_SUCCESS=1
-    fi
-else
-    echo "[INFO] Trying GitHub (30s timeout)..."
-    if timeout 30 git clone --depth 1 --branch "{ref_arg}" "https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
-        CLONE_SUCCESS=1
-    else
-        rm -rf $TMP_CLONE
-        echo "[WARN] GitHub timeout/error, trying mirror (ghfast.top)..."
-        if timeout 120 git clone --depth 1 --branch "{ref_arg}" "$GITHUB_MIRROR/https://github.com/Joliz1337/monitoring.git" $TMP_CLONE 2>&1; then
-            CLONE_SUCCESS=1
-        fi
-    fi
-fi
-
-if [ $CLONE_SUCCESS -eq 0 ]; then
-    echo "[ERROR] Failed to clone repository"
-    exit 1
-fi
+TMP_CLONE={UPDATER_CLONE_DIR}
+{clone_step}
 
 echo "[INFO] Staging update files..."
 STAGING=/opt/monitoring-node/.update-staging
@@ -523,6 +494,11 @@ class UpdateRequest(BaseModel):
         True,
         description="Собирать образ на ноде при недоступном реестре. False — быстрый фейл (image_unavailable) для доставки образа с панели",
     )
+    expected_commit: Optional[str] = Field(
+        None,
+        pattern=COMMIT_SHA_PATTERN,
+        description="Коммит target_version по данным GitHub; клон через зеркало обязан совпасть с ним. Без поля зеркало не используется",
+    )
 
 
 @router.post("/update")
@@ -538,12 +514,14 @@ async def trigger_update(data: UpdateRequest = None):
     Request body:
         target_version: Git reference (branch/tag/commit). Default: 'main' (latest)
         proxy: HTTP proxy for git clone (e.g., http://127.0.0.1:3128)
+        expected_commit: полный SHA target_version с GitHub — разрешает клон через зеркало со сверкой
     """
     global _update_task
 
     target_ref = data.target_version if data else None
     proxy = data.proxy if data else None
     allow_local_build = data.allow_local_build if data else True
+    expected_commit = data.expected_commit if data else None
 
     async with _update_lock:
         if _update_running_here():
@@ -563,7 +541,9 @@ async def trigger_update(data: UpdateRequest = None):
         attempt = new_attempt(target_ref or "main", get_current_version())
         await asyncio.to_thread(_update_state.save, attempt)
         _update_task = asyncio.create_task(
-            run_update_in_container(attempt.attempt_id, target_ref, proxy, allow_local_build)
+            run_update_in_container(
+                attempt.attempt_id, target_ref, proxy, allow_local_build, expected_commit=expected_commit,
+            )
         )
 
     return {

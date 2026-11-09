@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.services.node_ips import collect_node_ips, public_interface_ipv4  # noqa: E402
+from app.services.node_ips import MAX_METRIC_ADDRESSES_PER_NODE, collect_node_ips, public_interface_ipv4  # noqa: E402
 
 
 def metrics_with(*interfaces: list[dict]) -> str:
@@ -46,6 +46,20 @@ class PublicInterfaceIpv4Test(unittest.TestCase):
 
         self.assertEqual(public_interface_ipv4(metrics), [])
 
+    def test_public_address_behind_nat_of_a_private_address(self):
+        metrics = metrics_with(
+            [{**ipv4("192.168.0.106"), "public_address": "89.232.163.73"}],
+            [{**ipv4("192.168.0.127"), "public_address": "87.242.95.121"}, ipv4("5.9.0.10")],
+        )
+
+        self.assertEqual(public_interface_ipv4(metrics), ["89.232.163.73", "87.242.95.121", "5.9.0.10"])
+
+    def test_non_public_or_broken_nat_address_is_skipped(self):
+        for public_address in (None, "10.0.0.1", "127.0.0.1", "garbage", 42, ["89.232.163.73"]):
+            with self.subTest(public_address=public_address):
+                metrics = metrics_with([{**ipv4("192.168.0.106"), "public_address": public_address}])
+                self.assertEqual(public_interface_ipv4(metrics), [])
+
     def test_broken_metrics_give_nothing(self):
         for raw in (None, "", "{not json", json.dumps(["x"]), json.dumps({"network": None}),
                     json.dumps({"network": {"interfaces": ["eth0", {"addresses": ["5.9.0.10"]}]}})):
@@ -56,16 +70,16 @@ class PublicInterfaceIpv4Test(unittest.TestCase):
 class CollectNodeIpsTest(unittest.IsolatedAsyncioTestCase):
     async def test_url_host_and_every_public_interface_address(self):
         ips = await collect_node_ips([
-            ("https://5.9.0.10:9100", metrics_with([ipv4("5.9.0.10"), ipv4("5.9.0.11")], [ipv4("95.216.0.7")])),
-            ("https://10.0.0.5:9100", metrics_with([ipv4("10.0.0.5")])),
-            ("https://1.2.3.4:9100", None),
+            ("https://5.9.0.10:9100", metrics_with([ipv4("5.9.0.10"), ipv4("5.9.0.11")], [ipv4("95.216.0.7")]), False),
+            ("https://10.0.0.5:9100", metrics_with([ipv4("10.0.0.5")]), False),
+            ("https://1.2.3.4:9100", None, False),
         ])
 
         self.assertEqual(ips, {"5.9.0.10", "5.9.0.11", "95.216.0.7", "10.0.0.5", "1.2.3.4"})
 
     async def test_floating_ip_in_url_with_only_private_address_on_interface(self):
         ips = await collect_node_ips([
-            ("https://89.208.0.10:9100", metrics_with([ipv4("10.0.1.15")], [ipv4("172.17.0.1")])),
+            ("https://89.208.0.10:9100", metrics_with([ipv4("10.0.1.15")], [ipv4("172.17.0.1")]), False),
         ])
 
         self.assertEqual(ips, {"89.208.0.10"})
@@ -74,16 +88,50 @@ class CollectNodeIpsTest(unittest.IsolatedAsyncioTestCase):
         resolve = AsyncMock(side_effect=lambda host: {"node.example.com": "95.216.0.7"}.get(host))
         with patch("app.services.node_ips.host_to_ip", resolve):
             ips = await collect_node_ips([
-                ("https://node.example.com:9100", metrics_with([ipv4("95.216.0.8")])),
-                ("https://gone.example.com:9100", None),
+                ("https://node.example.com:9100", metrics_with([ipv4("95.216.0.8")]), False),
+                ("https://gone.example.com:9100", None, False),
             ])
 
         self.assertEqual(ips, {"95.216.0.7", "95.216.0.8"})
 
     async def test_malformed_url_keeps_interface_addresses(self):
-        ips = await collect_node_ips([("https://[::1:9100", metrics_with([ipv4("5.9.0.10")]))])
+        ips = await collect_node_ips([("https://[::1:9100", metrics_with([ipv4("5.9.0.10")]), False)])
 
         self.assertEqual(ips, {"5.9.0.10"})
+
+    async def test_dedicated_node_contributes_only_url_host(self):
+        foreign = metrics_with(
+            [ipv4("8.8.8.8"), {**ipv4("192.168.0.5"), "public_address": "1.1.1.1"}],
+        )
+
+        ips = await collect_node_ips([("https://5.9.0.10:9100", foreign, True)])
+
+        self.assertEqual(ips, {"5.9.0.10"})
+
+    async def test_dedicated_node_does_not_affect_shared_ones(self):
+        ips = await collect_node_ips([
+            ("https://5.9.0.10:9100", metrics_with([ipv4("8.8.8.8")]), True),
+            ("https://95.216.0.7:9100", metrics_with([ipv4("95.216.0.8")]), False),
+        ])
+
+        self.assertEqual(ips, {"5.9.0.10", "95.216.0.7", "95.216.0.8"})
+
+    async def test_shared_node_metric_addresses_are_capped_in_first_seen_order(self):
+        total = MAX_METRIC_ADDRESSES_PER_NODE + 50
+        flood = [ipv4(f"8.{i // 250}.{i % 250}.1") for i in range(total)]
+
+        ips = await collect_node_ips([("https://5.9.0.10:9100", metrics_with(flood), False)])
+
+        expected = {entry["address"] for entry in flood[:MAX_METRIC_ADDRESSES_PER_NODE]}
+        self.assertEqual(ips, expected | {"5.9.0.10"})
+        self.assertEqual(len(ips), MAX_METRIC_ADDRESSES_PER_NODE + 1)
+
+    async def test_shared_node_nat_public_address_within_cap_passes(self):
+        metrics = metrics_with([{**ipv4("192.168.0.106"), "public_address": "89.232.163.73"}])
+
+        ips = await collect_node_ips([("https://192.168.0.106:9100", metrics, False)])
+
+        self.assertEqual(ips, {"192.168.0.106", "89.232.163.73"})
 
 
 if __name__ == "__main__":

@@ -239,19 +239,15 @@ def generate_node_cert(
     node_name: str,
     san_hosts: list[str] | None = None,
     validity_days: int = 1095,
-    allow_client_auth: bool = True,
 ) -> tuple[str, str]:
-    """Серверный сертификат ноды (serverAuth + SAN с IP/DNS)."""
-    eku = [ExtendedKeyUsageOID.SERVER_AUTH]
-    if allow_client_auth:
-        eku.append(ExtendedKeyUsageOID.CLIENT_AUTH)
+    """Серверный сертификат ноды: только serverAuth + SAN с IP/DNS."""
     san = _build_san(node_name, san_hosts)
     return _sign_leaf(
         ca_cert_pem,
         ca_key_pem,
         node_name,
         validity_days,
-        eku,
+        [ExtendedKeyUsageOID.SERVER_AUTH],
         san=san,
     )
 
@@ -263,10 +259,9 @@ def generate_dedicated_node_cert(
 ) -> tuple[str, str, str]:
     """Сертификат под один конкретный сервер: свой CN и никакого clientAuth.
 
-    nginx ноды принимает любой клиентский сертификат, подписанный нашим CA, так что
-    сертификат с clientAuth годился бы и на то, чтобы представиться панелью для всех
-    остальных нод. Ключ, который отдают владельцу чужого сервера, такого права иметь
-    не должен — отсюда serverAuth в одиночку.
+    Ключ, который отдают владельцу чужого сервера, не должен годиться как клиентский
+    сертификат — отсюда serverAuth в одиночку. Тем же свойством обладает и общий
+    сертификат ноды; отличие персонального — собственный CN: утечка касается одного сервера.
     """
     common_name = f"{DEDICATED_NODE_CN_PREFIX}{secrets.token_hex(6)}"
     cert_pem, key_pem = generate_node_cert(
@@ -275,7 +270,6 @@ def generate_dedicated_node_cert(
         common_name,
         san_hosts=None,
         validity_days=validity_days,
-        allow_client_auth=False,
     )
     return common_name, cert_pem, key_pem
 

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, forwardRef, type ForwardedRef, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, useCallback, useRef, forwardRef, type ForwardedRef, type ReactNode } from 'react'
 import { useOpenIds } from '../hooks/useOpenIds'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
@@ -24,10 +24,17 @@ import {
   HAProxyAvailableServer,
   HAProxyIpOwner,
   HAProxyIpOwners,
+  HAProxyLoadWeightLine,
+  HAProxyLoadWeights,
   HAProxyServerStatus,
   BackendServer,
   BalancerOptions,
+  PortRange,
+  PortUsageMap,
+  portUsageApi,
 } from '../api/client'
+import { DYNAMIC_ALGORITHMS, capacityWeights, groupBackendsByServer, isCapacityInvalid, parseCapacity } from '../utils/loadWeights'
+import { formatPortRanges, formatServerPorts, portsInterceptedOnServers, rangesCover, ServerRanges } from '../utils/portConflicts'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import FolderedServerPicker from '../components/servers/FolderedServerPicker'
@@ -35,6 +42,7 @@ import ServerAddressesEditor from '../components/haproxy/ServerAddressesEditor'
 import ServersPasteBox, { type ServersMergeMode } from '../components/haproxy/ServersPasteBox'
 import ServersFromNodesBox from '../components/haproxy/ServersFromNodesBox'
 import ServersPortBox from '../components/haproxy/ServersPortBox'
+import ServerCapacitiesBox from '../components/haproxy/ServerCapacitiesBox'
 
 
 function SyncStatusBadge({ status, online }: { status: string | null; online?: boolean }) {
@@ -140,6 +148,7 @@ const DEFAULT_BALANCER_OPTIONS: BalancerOptions = {
 // ==================== Target owners ====================
 
 const BALANCER_TARGETS_SHOWN = 2
+const LOAD_WEIGHTS_POLL_MS = 10_000
 
 type AddressRole = (owner: HAProxyIpOwner) => string
 
@@ -188,6 +197,29 @@ function describeTarget(target: BalancerTarget): string {
   return target.roles.length > 0 ? `${target.label} — ${target.roles.join(', ')}` : target.label
 }
 
+// Серая метка — на сервере есть DNAT, красная — он перехватывает порты правил профиля
+function DnatChip({ ranges, rulePorts }: { ranges: PortRange[]; rulePorts: number[] }) {
+  const { t } = useTranslation()
+  if (ranges.length === 0) return null
+  const intercepted = rulePorts.filter(port => rangesCover(ranges, port))
+  if (intercepted.length > 0) {
+    return (
+      <Tooltip label={t('haproxy_configs.dnat_chip_conflict', { ports: intercepted.join(', ') })} maxWidth={360}>
+        <span className="shrink-0 px-1.5 py-0.5 rounded text-2xs font-mono bg-red-500/10 text-red-400 border border-red-500/30">
+          DNAT {intercepted.map(port => `:${port}`).join(' ')}
+        </span>
+      </Tooltip>
+    )
+  }
+  return (
+    <Tooltip label={t('haproxy_configs.dnat_chip', { ports: formatPortRanges(ranges) })} maxWidth={360}>
+      <span className="shrink-0 px-1.5 py-0.5 rounded text-2xs bg-dark-700/50 text-dark-400 border border-dark-600/40">
+        DNAT
+      </span>
+    </Tooltip>
+  )
+}
+
 // ==================== Toggle Component ====================
 
 function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label?: string }) {
@@ -204,11 +236,26 @@ function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: bool
 
 // ==================== Backend Server Row ====================
 
+function BackendLoadLine({ load }: { load: HAProxyLoadWeightLine }) {
+  const { t } = useTranslation()
+  return (
+    <p className="text-2xs text-dark-400">
+      {t('balancer.load_line', {
+        capacity: load.capacity_mbit,
+        load: load.utilization === null ? '—' : `${Math.round(load.utilization * 100)}%`,
+        weight: load.weight,
+      })}
+    </p>
+  )
+}
+
 function BackendServerRow({
-  srv, index, owner, onChange, onRemove, canRemove, t,
+  srv, index, owner, load, loadMode, onChange, onRemove, canRemove, t,
 }: {
   srv: BackendServer; index: number
   owner?: string
+  load?: HAProxyLoadWeightLine
+  loadMode?: boolean
   onChange: (i: number, s: BackendServer) => void
   onRemove: (i: number) => void
   canRemove: boolean
@@ -261,9 +308,11 @@ function BackendServerRow({
             ? <span className="text-2xs text-accent-400 truncate" title={owner}>{owner}</span>
             : <span className="text-2xs text-dark-500">{t('balancer.address')}</span>}
           <span className="text-2xs text-dark-500">{t('haproxy.target_port')}</span>
-          <span className="text-2xs text-dark-500">{t('balancer.weight')}</span>
+          <span className="text-2xs text-dark-500">{t(loadMode ? 'balancer.weight_fallback' : 'balancer.weight')}</span>
         </div>
       )}
+
+      {loadMode && load && <BackendLoadLine load={load} />}
 
       {expanded && (
         <div className="space-y-2 pt-1 border-t border-dark-700/30">
@@ -331,13 +380,25 @@ function BalancerSettingsSection({
           {t('balancer.algorithm')}
           <FAQIcon screen="HAPROXY_CONFIGS_BALANCER" size="sm" />
         </label>
-        <select value={opts.algorithm} onChange={e => upd({ algorithm: e.target.value })} className={inp}>
+        <select value={opts.algorithm}
+          onChange={e => upd({ algorithm: e.target.value, ...(DYNAMIC_ALGORITHMS.has(e.target.value) ? {} : { load_weights: false }) })}
+          className={inp}>
           {ALGORITHMS.map(a => (
             <option key={a} value={a}>{t(`balancer.alg.${a.replace('-', '_')}`)}</option>
           ))}
         </select>
         <p className="text-2xs text-dark-500 mt-0.5">{t(`balancer.alg.${opts.algorithm.replace('-', '_')}_hint`)}</p>
       </div>
+
+      {DYNAMIC_ALGORITHMS.has(opts.algorithm) && (
+        <div className="space-y-1">
+          <Toggle value={opts.load_weights ?? false} onChange={v => upd({ load_weights: v })} label={t('balancer.load_weights')} />
+          <p className="text-2xs text-dark-500">{t('balancer.load_weights_hint')}</p>
+          {opts.load_weights && opts.sticky_type && (
+            <p className="text-2xs text-amber-400">{t('balancer.load_weights_sticky_hint')}</p>
+          )}
+        </div>
+      )}
 
       {ALGO_NEEDS_HASH.has(opts.algorithm) && (
         <div>
@@ -594,6 +655,9 @@ function RuleForm({
   profileOptions,
   ipOwners,
   nodes,
+  dnatServers,
+  loadLines,
+  onCapacitiesSaved,
 }: {
   initial: RuleFormData
   isEdit: boolean
@@ -601,16 +665,71 @@ function RuleForm({
   saving: boolean
   onSave: (data: RuleFormData) => void
   onCancel: () => void
+  /** Правились только каналы: правило не отправляется, форма закрывается */
+  onCapacitiesSaved?: () => void
   profileId: number
   profileOptions: HAProxyProfileOptions
   ipOwners: HAProxyIpOwners
   nodes: HAProxyAvailableServer[]
+  dnatServers: ServerRanges[]
+  /** Последний расчёт весов по нагрузке для этого правила */
+  loadLines?: HAProxyLoadWeightLine[]
 }) {
   const { t } = useTranslation()
   const [form, setForm] = useState(initial)
   const [toolbox, setToolbox] = useState<ServersToolbox | null>(null)
   const addressRole = useAddressRole()
   const singleTargetLabel = ownerLabel(findOwner(ipOwners, form.target_ip), addressRole)
+  const interceptedByDnat = portsInterceptedOnServers(dnatServers, [parseInt(form.listen_port) || 0])
+
+  // Канал — свойство сервера панели: черновик правится здесь, а уходит на бэкенд при сохранении правила.
+  // Сравнение — со снимком на открытии формы, а не со свежими nodes: иначе вторая открытая
+  // форма при сохранении откатила бы канал, только что сохранённый в первой
+  const [initialCapacities] = useState<Record<number, string>>(() => Object.fromEntries(
+    nodes.filter(node => node.link_capacity_mbit != null).map(node => [node.id, String(node.link_capacity_mbit)]),
+  ))
+  const [capacityDraft, setCapacityDraft] = useState<Record<number, string>>(initialCapacities)
+  const loadMode = form.is_balancer && (form.balancer_options?.load_weights ?? false)
+  const ownerOf = (address: string) => findOwner(ipOwners, address)?.id
+  const capacityOf = (serverId: number) => parseCapacity(capacityDraft[serverId])
+  const backendGroups = groupBackendsByServer(form.servers, ownerOf)
+  const fallbackWeights = capacityWeights(form.servers, ownerOf, capacityOf)
+
+  const changeBalancerOptions = (options: BalancerOptions) => {
+    const turnedOn = (options.load_weights ?? false) && !(form.balancer_options?.load_weights ?? false)
+    setForm(f => ({ ...f, balancer_options: options, servers: turnedOn && fallbackWeights ? fallbackWeights : f.servers }))
+  }
+
+  const changedCapacities = (): Record<number, number | null> => Object.fromEntries(backendGroups.groups
+    .map(({ serverId }) => [serverId, parseCapacity(capacityDraft[serverId])] as const)
+    .filter(([serverId, mbit]) => mbit !== parseCapacity(initialCapacities[serverId])))
+
+  const save = async () => {
+    if (loadMode) {
+      if (backendGroups.groups.some(({ serverId }) => isCapacityInvalid(capacityDraft[serverId]))) {
+        toast.error(t('balancer.capacities_invalid'))
+        return
+      }
+      const changed = changedCapacities()
+      if (Object.keys(changed).length > 0) {
+        try {
+          await haproxyProfilesApi.setServerCapacities(changed)
+        } catch {
+          toast.error(t('balancer.capacities_save_failed'))
+          return
+        }
+        // Канал не попадает в конфиг: сохранение правила без правок запустило бы
+        // синхронизацию, и релеи перезагрузили бы HAProxy впустую
+        if (onCapacitiesSaved && JSON.stringify(form) === JSON.stringify(initial)) {
+          toast.success(t('balancer.capacities_saved'))
+          onCancel()
+          onCapacitiesSaved()
+          return
+        }
+      }
+    }
+    onSave(form)
+  }
 
   const toggleBalancer = (enabled: boolean) => {
     if (enabled && form.servers.length === 0) {
@@ -750,6 +869,13 @@ function RuleForm({
           </div>
         </div>
 
+        {interceptedByDnat.length > 0 && (
+          <div className="flex items-start gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{t('haproxy_configs.dnat_conflict_form', { servers: formatServerPorts(interceptedByDnat) })}</span>
+          </div>
+        )}
+
         {/* Balancer toggle */}
         <div className="flex items-center gap-2">
           <span className="text-xs text-dark-300">{t('balancer.enable')}</span>
@@ -793,9 +919,21 @@ function RuleForm({
             {/* Algorithm + Settings */}
             <BalancerSettingsSection
               opts={form.balancer_options || { ...DEFAULT_BALANCER_OPTIONS }}
-              onChange={o => setForm(f => ({ ...f, balancer_options: o }))}
+              onChange={changeBalancerOptions}
               t={t}
             />
+
+            {loadMode && (
+              <ServerCapacitiesBox
+                groups={backendGroups.groups}
+                foreign={backendGroups.foreign}
+                nodes={nodes}
+                draft={capacityDraft}
+                onDraftChange={(serverId, value) => setCapacityDraft(draft => ({ ...draft, [serverId]: value }))}
+                onFillWeights={() => { if (fallbackWeights) setForm(f => ({ ...f, servers: fallbackWeights })) }}
+                canFillWeights={fallbackWeights !== null}
+              />
+            )}
 
             {/* Servers */}
             <div>
@@ -851,7 +989,10 @@ function RuleForm({
               )}
               <div className="space-y-2">
                 {form.servers.map((srv, i) => (
-                  <BackendServerRow key={i} srv={srv} index={i} owner={ownerLabel(findOwner(ipOwners, srv.address), addressRole)} onChange={updateServer}
+                  <BackendServerRow key={i} srv={srv} index={i} owner={ownerLabel(findOwner(ipOwners, srv.address), addressRole)}
+                    load={loadLines?.find(line => line.server_name === srv.name)}
+                    loadMode={loadMode}
+                    onChange={updateServer}
                     onRemove={removeServer} canRemove={form.servers.length > 1} t={t} />
                 ))}
               </div>
@@ -883,7 +1024,7 @@ function RuleForm({
           <button onClick={onCancel} className="px-3 py-1.5 rounded-lg text-xs text-dark-300 hover:text-dark-100 bg-dark-800 hover:bg-dark-700 border border-dark-700 transition-colors">
             {t('common.cancel')}
           </button>
-          <button onClick={() => onSave(form)} disabled={saving}
+          <button onClick={save} disabled={saving}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5">
             {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             {isEdit ? t('common.save') : t('haproxy_configs.add_rule')}
@@ -990,12 +1131,13 @@ const SortableProfileItem = forwardRef(function SortableProfileItem(
 
 // ==================== Profile Detail Panel (with rules GUI) ====================
 
-function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; onRefreshList: () => void }) {
+function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId: number; portUsage: PortUsageMap; onRefreshList: () => void }) {
   const { t } = useTranslation()
   const [detail, setDetail] = useState<HAProxyProfileDetail | null>(null)
   const [rules, setRules] = useState<HAProxyProfileRule[]>([])
   const [availableServers, setAvailableServers] = useState<HAProxyAvailableServer[]>([])
   const [ipOwners, setIpOwners] = useState<HAProxyIpOwners>({})
+  const [loadWeights, setLoadWeights] = useState<HAProxyLoadWeights | null>(null)
   const addressRole = useAddressRole()
   const [serversStatus, setServersStatus] = useState<HAProxyServerStatus[]>([])
   const [syncLog, setSyncLog] = useState<HAProxySyncLogEntry[]>([])
@@ -1059,6 +1201,17 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   useEffect(() => {
     haproxyProfilesApi.getIpOwners().then(res => setIpOwners(res.data)).catch(() => {})
   }, [])
+
+  // Расчёт весов панель обновляет раз в цикл метрик — чаще спрашивать незачем
+  useEffect(() => {
+    const load = () => {
+      if (document.hidden) return
+      haproxyProfilesApi.getLoadWeights(profileId).then(res => setLoadWeights(res.data)).catch(() => {})
+    }
+    load()
+    const timer = setInterval(load, LOAD_WEIGHTS_POLL_MS)
+    return () => clearInterval(timer)
+  }, [profileId])
 
   // Автообновление статусов серверов каждые 3 секунды
   // (пропускаем, когда вкладка скрыта — не долбим бэкенд в фоне)
@@ -1152,8 +1305,8 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
       toast.success(t('haproxy_configs.rule_deleted'))
       fetchDetail()
       onRefreshList()
-    } catch {
-      toast.error(t('haproxy_configs.rule_error'))
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || t('haproxy_configs.rule_error'))
     }
   }
 
@@ -1302,11 +1455,22 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const toggleLog = () => { if (!showLog) fetchLog(); setShowLog(!showLog) }
 
   const unlinkedServers = availableServers.filter(s => s.active_profile_id !== profileId)
+  const rulePorts = rules.map(r => r.listen_port)
+  const dnatServers = useMemo<ServerRanges[]>(
+    () => serversStatus
+      .map(s => ({ name: s.server_name, ranges: portUsage[s.server_id]?.dnat_ranges ?? [] }))
+      .filter(s => s.ranges.length > 0),
+    [serversStatus, portUsage],
+  )
+  const interceptedByDnat = portsInterceptedOnServers(dnatServers, rulePorts)
+  const dnatChip = (serverId: number) => (
+    <DnatChip ranges={portUsage[serverId]?.dnat_ranges ?? []} rulePorts={rulePorts} />
+  )
 
   const renderCandidate = (s: HAProxyAvailableServer) => (
     <button key={s.id} onClick={() => handleLinkServer(s.id)}
       className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm text-dark-200 hover:bg-dark-700/50 transition-colors">
-      <span className="flex items-center gap-2"><Server className="w-3.5 h-3.5 text-dark-400" />{s.name}</span>
+      <span className="flex items-center gap-2"><Server className="w-3.5 h-3.5 text-dark-400" />{s.name}{dnatChip(s.id)}</span>
       {s.active_profile_id && <span className="text-xs text-dark-500">{t('haproxy_configs.has_other_profile')}</span>}
     </button>
   )
@@ -1341,6 +1505,13 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
             </div>
           </div>
 
+          {interceptedByDnat.length > 0 && (
+            <div className="flex items-start gap-3 p-3 mb-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300">
+              <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
+              <div className="text-sm">{t('haproxy_configs.dnat_conflict_banner', { servers: formatServerPorts(interceptedByDnat) })}</div>
+            </div>
+          )}
+
           {/* Profile-wide SNI filter */}
           <AnimatePresence>
             {showSni && (
@@ -1368,6 +1539,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                   profileOptions={detail.options}
                   ipOwners={ipOwners}
                   nodes={availableServers}
+                  dnatServers={dnatServers}
                 />
               </div>
             )}
@@ -1386,6 +1558,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                 const targets = r.is_balancer ? balancerTargets(ipOwners, r.servers ?? [], addressRole) : []
                 const targetsTooltip = targets.length > BALANCER_TARGETS_SHOWN || targets.some(target => target.roles.length > 0)
                 const singleTargetLabel = r.is_balancer ? undefined : ownerLabel(findOwner(ipOwners, r.target_ip), addressRole)
+                const ruleInterceptedByDnat = portsInterceptedOnServers(dnatServers, [r.listen_port])
                 return (
                   <div key={r.name}>
                     <div
@@ -1410,6 +1583,9 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                               </span>
                             </Tooltip>
                             <span className="text-2xs text-dark-500 hidden sm:block">{r.balancer_options?.algorithm}</span>
+                            {r.balancer_options?.load_weights && (
+                              <span className="text-2xs text-accent-400/80 hidden sm:block">{t('balancer.load_weights_badge')}</span>
+                            )}
                             {r.accept_proxy && <span className="text-2xs text-cyan-400/60 hidden sm:block">ACCEPT</span>}
                           </>
                         ) : (
@@ -1422,6 +1598,13 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                           </>
                         )}
                         {sniActive && <span className="text-2xs text-green-400/60 hidden sm:block">SNI</span>}
+                        {ruleInterceptedByDnat.length > 0 && (
+                          <Tooltip label={t('haproxy_configs.dnat_rule_hint', { servers: formatServerPorts(ruleInterceptedByDnat) })} maxWidth={380}>
+                            <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-2xs font-medium bg-red-500/10 text-red-400 border border-red-500/30">
+                              <AlertTriangle className="w-3 h-3" /> DNAT
+                            </span>
+                          </Tooltip>
+                        )}
                       </div>
                       <div className="flex items-center gap-1 shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
                         <Tooltip label={t('haproxy_configs.clone_rule')}>
@@ -1450,6 +1633,9 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                               profileOptions={detail.options}
                               ipOwners={ipOwners}
                               nodes={availableServers}
+                              dnatServers={dnatServers}
+                              loadLines={loadWeights?.rules[r.name]}
+                              onCapacitiesSaved={fetchDetail}
                             />
                           </div>
                         </motion.div>
@@ -1468,6 +1654,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                               profileOptions={detail.options}
                               ipOwners={ipOwners}
                               nodes={availableServers}
+                              dnatServers={dnatServers}
                             />
                           </div>
                         </motion.div>
@@ -1630,6 +1817,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                           </Tooltip>
                         )}
                         <SyncStatusBadge status={s.sync_status} online={s.online} />
+                        {dnatChip(s.server_id)}
                         {hasAddresses && (
                           <span className="hidden md:inline text-xs font-mono text-dark-400 truncate">
                             {s.listen_ips.length > 0 && `${t('haproxy_configs.addresses_in')} ${s.listen_ips.join(', ')}`}
@@ -1821,6 +2009,12 @@ export default function HAProxyConfigs() {
     return () => clearInterval(id)
   }, [fetchProfiles])
 
+  // DNAT настраивается на другой странице — карты на время захода сюда достаточно
+  const [portUsage, setPortUsage] = useState<PortUsageMap>({})
+  useEffect(() => {
+    portUsageApi.get().then(res => setPortUsage(res.data)).catch(() => { /* предупреждения не критичны */ })
+  }, [])
+
   const handleDragEnd = async ({ active, over }: DragEndEvent) => {
     if (!over || active.id === over.id) return
     const oldIndex = profiles.findIndex(p => p.id === active.id)
@@ -1892,7 +2086,7 @@ export default function HAProxyConfigs() {
                       <>
                         <ProfileCard profile={p} expanded={openIds.includes(p.id)} dragHandle={dragHandle} onExpand={toggleProfile} onEdit={setModalProfile} onDelete={handleDelete} />
                         <AnimatePresence>
-                          {openIds.includes(p.id) && <ProfileDetailPanel profileId={p.id} onRefreshList={fetchProfiles} />}
+                          {openIds.includes(p.id) && <ProfileDetailPanel profileId={p.id} portUsage={portUsage} onRefreshList={fetchProfiles} />}
                         </AnimatePresence>
                       </>
                     )}

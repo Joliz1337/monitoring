@@ -26,7 +26,10 @@ import ProgressBar from '../ui/ProgressBar'
 import { formatBytes, formatBitsPerSecLocalized, formatUptime, formatTimeAgo, extractHost } from '../../utils/format'
 import { useTranslation } from 'react-i18next'
 import { CopyableIp } from '../ui/CopyableIp'
+import { ServerNote } from './ServerNote'
 import { Tooltip } from '../ui/Tooltip'
+import { HoverCard } from '../ui/HoverCard'
+import NetworkBreakdown from './NetworkBreakdown'
 import type { DetailLevel } from '../../stores/settingsStore'
 
 interface ServerTraffic {
@@ -157,6 +160,7 @@ function ServerCardView({
                     {server.name}
                   </h3>
                   <CopyableIp value={extractHost(server.url)} className="text-xs text-dark-500 font-mono hidden sm:inline" />
+                  <ServerNote serverId={server.id} note={server.note} />
                   <span className="text-xs px-2 py-0.5 rounded-md bg-dark-700/50 text-dark-500">
                     {t('servers.disabled')}
                   </span>
@@ -178,8 +182,8 @@ function ServerCardView({
           className={`server-card card group cursor-pointer ${disabledDragClass}`}
           onClick={handleClick}
         >
-          <div className="flex items-start justify-between mb-4">
-            <div className="flex items-center gap-3">
+          <div className="flex items-start justify-between gap-2 mb-4">
+            <div className="flex items-center gap-3 min-w-0">
               <button
                 {...handle?.attributes}
                 {...handle?.listeners}
@@ -189,16 +193,17 @@ function ServerCardView({
               >
                 <GripVertical className="w-5 h-5" />
               </button>
-              <div>
-                <div className="flex items-center gap-2">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <h3 className="font-semibold text-dark-400">
                     {server.name}
                   </h3>
                   <CopyableIp value={extractHost(server.url)} className="text-xs text-dark-500 font-mono" />
+                  <ServerNote serverId={server.id} note={server.note} />
                 </div>
               </div>
             </div>
-            <span className="text-xs px-2 py-1 rounded-lg bg-dark-700/50 text-dark-500">
+            <span className="flex-shrink-0 text-xs px-2 py-1 rounded-lg bg-dark-700/50 text-dark-500">
               {t('servers.disabled')}
             </span>
           </div>
@@ -240,6 +245,7 @@ function ServerCardView({
                   {server.name}
                 </h3>
                 <CopyableIp value={extractHost(server.url)} className="text-xs text-dark-500 font-mono hidden sm:inline" />
+                <ServerNote serverId={server.id} note={server.note} />
                 <StatusBadge status={server.status} showLabel={false} />
               </div>
             </div>
@@ -327,8 +333,8 @@ function ServerCardView({
           }}
         />
 
-        <div className="flex items-start justify-between mb-4">
-          <div className="flex items-center gap-3">
+        <div className="flex items-start justify-between gap-2 mb-4">
+          <div className="flex items-center gap-3 min-w-0">
             <button
               {...handle?.attributes}
               {...handle?.listeners}
@@ -338,12 +344,13 @@ function ServerCardView({
             >
               <GripVertical className="w-5 h-5" />
             </button>
-            <div>
-              <div className="flex items-center gap-2">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <h3 className="font-semibold text-dark-100 group-hover:text-white transition-colors">
                   {server.name}
                 </h3>
                 <CopyableIp value={extractHost(server.url)} className="text-xs text-dark-500 font-mono" />
+                <ServerNote serverId={server.id} note={server.note} />
               </div>
               {metrics && (
                 <p className="text-xs text-dark-500 mt-0.5">
@@ -352,7 +359,7 @@ function ServerCardView({
               )}
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-shrink-0">
             {server.status === 'offline' && metrics && (
               <Tooltip label={server.last_seen ? t('cache.last_update', { time: formatTimeAgo(server.last_seen) }) : t('cache.cached')}>
                 <div className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-2xs text-warning">
@@ -419,26 +426,11 @@ function ServerCardView({
                     usedBytes={metrics.disk.partitions[0]?.used}
                     totalBytes={metrics.disk.partitions[0]?.total}
                   />
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Network className="w-4 h-4 text-accent-500" />
-                      <span className="text-sm text-dark-300">{t('common.network')}</span>
-                    </div>
-                    <div className="flex gap-2 text-xs font-mono">
-                      <span className="text-success flex items-center gap-1">
-                        ↓ {formatBitsPerSecLocalized(
-                          metrics.network.total?.rx_bytes_per_sec || 0,
-                          t
-                        )}
-                      </span>
-                      <span className="text-accent-400 flex items-center gap-1">
-                        ↑ {formatBitsPerSecLocalized(
-                          metrics.network.total?.tx_bytes_per_sec || 0,
-                          t
-                        )}
-                      </span>
-                    </div>
-                  </div>
+                  <NetworkSpeedItem
+                    serverId={server.id}
+                    rxBytesPerSec={metrics.network.total?.rx_bytes_per_sec || 0}
+                    txBytesPerSec={metrics.network.total?.tx_bytes_per_sec || 0}
+                  />
                 </div>
 
                 <div className="pt-3 border-t border-dark-700/50 flex flex-wrap items-center text-xs text-dark-400 gap-x-3 gap-y-1">
@@ -515,26 +507,11 @@ function ServerCardView({
                     usedBytes={metrics.disk.partitions[0]?.used}
                     totalBytes={metrics.disk.partitions[0]?.total}
                   />
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Network className="w-4 h-4 text-accent-500" />
-                      <span className="text-sm text-dark-300">{t('common.network')}</span>
-                    </div>
-                    <div className="flex gap-2 text-xs font-mono">
-                      <span className="text-success flex items-center gap-1">
-                        ↓ {formatBitsPerSecLocalized(
-                          metrics.network.total?.rx_bytes_per_sec || 0,
-                          t
-                        )}
-                      </span>
-                      <span className="text-accent-400 flex items-center gap-1">
-                        ↑ {formatBitsPerSecLocalized(
-                          metrics.network.total?.tx_bytes_per_sec || 0,
-                          t
-                        )}
-                      </span>
-                    </div>
-                  </div>
+                  <NetworkSpeedItem
+                    serverId={server.id}
+                    rxBytesPerSec={metrics.network.total?.rx_bytes_per_sec || 0}
+                    txBytesPerSec={metrics.network.total?.tx_bytes_per_sec || 0}
+                  />
                 </div>
 
                 {server.traffic && (server.traffic.rx_bytes > 0 || server.traffic.tx_bytes > 0) && (
@@ -682,6 +659,7 @@ const ServerCard = memo(SortableServerCard, (prevProps, nextProps) => {
   if (prevProps.detailLevel !== nextProps.detailLevel) return false
   if (prevProps.index !== nextProps.index) return false
   if (a.folder !== b.folder) return false
+  if (a.note !== b.note) return false
 
   const am = a.metrics
   const bm = b.metrics
@@ -744,6 +722,35 @@ function MetricItem({ icon, label, value, usedBytes, totalBytes }: MetricItemPro
         </div>
       )}
     </div>
+  )
+}
+
+interface NetworkSpeedItemProps {
+  serverId: number
+  rxBytesPerSec: number
+  txBytesPerSec: number
+}
+
+// Наведение открывает разбивку скорости по IP, интерфейсам и портам
+function NetworkSpeedItem({ serverId, rxBytesPerSec, txBytesPerSec }: NetworkSpeedItemProps) {
+  const { t } = useTranslation()
+  return (
+    <HoverCard content={() => <NetworkBreakdown serverId={serverId} />}>
+      <div className="flex items-center gap-2 mb-2">
+        <Network className="w-4 h-4 text-accent-500" />
+        <span className="text-sm text-dark-300 underline decoration-dotted decoration-dark-500 underline-offset-4">
+          {t('common.network')}
+        </span>
+      </div>
+      <div className="flex gap-2 text-xs font-mono">
+        <span className="text-success flex items-center gap-1">
+          ↓ {formatBitsPerSecLocalized(rxBytesPerSec, t)}
+        </span>
+        <span className="text-accent-400 flex items-center gap-1">
+          ↑ {formatBitsPerSecLocalized(txBytesPerSec, t)}
+        </span>
+      </div>
+    </HoverCard>
   )
 }
 

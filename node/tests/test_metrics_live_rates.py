@@ -5,7 +5,9 @@ emitted — the panel then falls back to its own counter deltas, as it did for
 nodes that had no sampler at all.
 """
 
+import asyncio
 import os
+import socket
 import sys
 import unittest
 from types import SimpleNamespace
@@ -14,12 +16,14 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services.metrics_collector import MetricsCollector  # noqa: E402
+from app.services.nat_addresses import NatAddressProbe  # noqa: E402
 from app.services.rate_sampler import RateSample  # noqa: E402
 
 
-def bare_collector() -> MetricsCollector:
+def bare_collector(nat_addresses: NatAddressProbe | None = None) -> MetricsCollector:
     collector = MetricsCollector.__new__(MetricsCollector)
     collector.settings = SimpleNamespace(host_proc="/host/proc", node_name="test")
+    collector._nat_addresses = nat_addresses or NatAddressProbe()
     return collector
 
 
@@ -65,6 +69,30 @@ class NetworkRatesTests(unittest.TestCase):
         self.assertEqual(network["total"]["rx_bytes_per_sec"], 0.0)
         eth0 = next(i for i in network["interfaces"] if i["name"] == "eth0")
         self.assertEqual(eth0["rx_bytes_per_sec"], 0.0)
+
+
+class NatAddressTests(unittest.TestCase):
+
+    def test_private_address_carries_its_public_address_behind_nat(self):
+        async def resolve(source: str):
+            return "89.232.163.73"
+
+        probe = NatAddressProbe(resolve=resolve)
+        asyncio.run(probe.probe_once(["192.168.0.106"]))
+        addrs = {"eth0": [
+            SimpleNamespace(family=socket.AF_INET, address="192.168.0.106", netmask="255.255.255.0"),
+            SimpleNamespace(family=socket.AF_INET, address="5.9.0.10", netmask="255.255.255.0"),
+        ]}
+        with mock.patch("app.services.metrics_collector.read_net_dev", return_value=NET_DEV), \
+                mock.patch("app.services.metrics_collector.psutil.net_if_addrs", return_value=addrs), \
+                mock.patch("app.services.metrics_collector.psutil.net_if_stats", return_value={}):
+            network = bare_collector(probe).get_network_info(None)
+
+        eth0 = next(i for i in network["interfaces"] if i["name"] == "eth0")
+        self.assertEqual(
+            [(a["address"], a["public_address"]) for a in eth0["addresses"]],
+            [("192.168.0.106", "89.232.163.73"), ("5.9.0.10", None)],
+        )
 
 
 class DiskRatesTests(unittest.TestCase):
@@ -160,6 +188,21 @@ class ResponseModelTests(unittest.TestCase):
         serialized = AllMetrics.model_validate({**MINIMAL_PAYLOAD, "loss_probe": [entry]}).model_dump()
 
         self.assertEqual(serialized["loss_probe"], [entry])
+
+    def test_ip_counters_survive_the_response_model(self):
+        from app.models.metrics import AllMetrics
+
+        network = {
+            **MINIMAL_PAYLOAD["network"],
+            "ips": [{"ip": "203.0.113.10", "rx_bytes": 1, "tx_bytes": 2, "own_rx_bytes": 3, "own_tx_bytes": 4}],
+            "ips_available": True,
+            "ips_sampled_at": 1_700_000_000.0,
+        }
+        serialized = AllMetrics.model_validate({**MINIMAL_PAYLOAD, "network": network}).model_dump()
+
+        self.assertEqual(serialized["network"]["ips"], network["ips"])
+        self.assertTrue(serialized["network"]["ips_available"])
+        self.assertEqual(serialized["network"]["ips_sampled_at"], 1_700_000_000.0)
 
     def test_window_is_null_unless_requested(self):
         from app.models.metrics import AllMetrics
@@ -272,6 +315,29 @@ class PhysicalInterfacesTests(unittest.TestCase):
             physical = bare_collector().physical_interfaces(["eth0", "eth1", "veth0", "bond0", "wg0"])
 
         self.assertEqual(physical, ["eth0", "bond0"])
+
+
+def inet(address: str):
+    return SimpleNamespace(family=socket.AF_INET, address=address)
+
+
+class AccountedAddressesTests(unittest.TestCase):
+
+    def test_only_ipv4_of_physical_interfaces_is_accounted(self):
+        # Клиенты подключаются к адресам карты; docker-мост, WARP и loopback —
+        # шум из нулевых строк в окне разбивки
+        addresses = {
+            "eth0": [inet("203.0.113.10"), inet("203.0.113.20"), inet("169.254.1.1"),
+                     SimpleNamespace(family=socket.AF_INET6, address="2001:db8::1")],
+            "veth1": [inet("172.17.0.1")],
+            "lo": [inet("127.0.0.1")],
+        }
+        with mock.patch("app.services.metrics_collector.read_net_dev", return_value={**NET_DEV, "lo": {}}), \
+             mock.patch("app.services.metrics_collector.psutil.net_if_addrs", return_value=addresses), \
+             mock.patch.object(MetricsCollector, "_get_bond_slaves", return_value=set()):
+            accounted = bare_collector().accounted_ipv4_addresses()
+
+        self.assertEqual(accounted, ["203.0.113.10", "203.0.113.20"])
 
 
 class CpuRatesTests(unittest.TestCase):

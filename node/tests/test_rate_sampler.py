@@ -75,27 +75,39 @@ class PerCpuPercentTests(unittest.TestCase):
         before = [times(), times()]
         after = [times(user=2.5, idle=7.5), times(user=0.4, softirq=0.1, idle=9.5)]
 
-        self.assertEqual(per_cpu_percent(before, after), [25.0, 5.0])
+        self.assertEqual(per_cpu_percent(before, after, elapsed=10.0), [25.0, 5.0])
 
-    def test_few_ticks_are_rejected_instead_of_reported_as_0_or_100(self):
-        # 20 ms window: one core caught a single busy tick, the rest caught none.
-        # This is the exact input that used to reach the panel as [100.0, 0.0, 0.0, 0.0].
-        before = [times(), times(), times(), times()]
-        after = [times(user=0.02), times(), times(), times(idle=0.01)]
-
-        self.assertIsNone(per_cpu_percent(before, after))
-
-    def test_one_lagging_core_rejects_the_whole_sample(self):
-        before = [times(), times()]
-        after = [times(user=2.5, idle=7.5), times(idle=0.05)]
-
-        self.assertIsNone(per_cpu_percent(before, after))
-
-    def test_fully_busy_core_is_capped_at_100(self):
+    def test_time_missing_from_the_counters_counts_as_busy(self):
+        # Ядро без IRQ_TIME_ACCOUNTING не пишет короткие всплески softirq между
+        # простоями ни в одну колонку: сетевое ядро ноды за секунду натикало 0.716 с,
+        # из них 0.692 простоя. По сумме колонок это 3.4%, по часам — 30.8%
         before = [times()]
-        after = [times(user=6.0, system=4.0)]
+        after = [times(user=0.02, softirq=0.004, idle=0.692)]
 
-        self.assertEqual(per_cpu_percent(before, after), [100.0])
+        self.assertEqual(per_cpu_percent(before, after, elapsed=1.0), [30.8])
+
+    def test_overcounted_busy_ticks_do_not_inflate_the_percentage(self):
+        # Тиковый учёт отдаёт занятости весь тик, в который ядро лишь проснулось, —
+        # колонки набирают больше прошедшего времени. Простой ядро меряет точно
+        before = [times()]
+        after = [times(user=0.4, idle=0.66)]
+
+        self.assertEqual(per_cpu_percent(before, after, elapsed=1.0), [34.0])
+
+    def test_idle_running_ahead_of_the_clock_gives_zero_not_negative(self):
+        before = [times()]
+        after = [times(idle=1.01)]
+
+        self.assertEqual(per_cpu_percent(before, after, elapsed=1.0), [0.0])
+
+    def test_core_that_never_went_idle_is_fully_busy(self):
+        before = [times()]
+        after = [times(user=0.3)]
+
+        self.assertEqual(per_cpu_percent(before, after, elapsed=1.0), [100.0])
+
+    def test_core_count_change_gives_no_percentages(self):
+        self.assertIsNone(per_cpu_percent([times()], [times(), times()], elapsed=1.0))
 
 
 class HostStealPercentTests(unittest.TestCase):
@@ -105,14 +117,21 @@ class HostStealPercentTests(unittest.TestCase):
         before = [times(), times()]
         after = [times(user=1.0, steal=4.0, idle=0.0), times(user=1.0, steal=0.5, idle=3.5)]
 
-        self.assertEqual(host_steal_percent(before, after), 45.0)
+        self.assertEqual(host_steal_percent(before, after, elapsed=5.0), 45.0)
+
+    def test_steal_is_a_share_of_the_clock_not_of_the_counters(self):
+        # 0.3 с секунды не попали ни в одну колонку — steal всё равно доля секунды
+        before = [times()]
+        after = [times(steal=0.2, idle=0.5)]
+
+        self.assertEqual(host_steal_percent(before, after, elapsed=1.0), 20.0)
 
     def test_no_steal_gives_zero(self):
-        self.assertEqual(host_steal_percent([times()], [times(user=1.0, idle=1.0)]), 0.0)
+        self.assertEqual(host_steal_percent([times()], [times(user=1.0, idle=1.0)], elapsed=2.0), 0.0)
 
     def test_steal_counted_as_busy_in_per_core_percent(self):
         # Панель считает CPU как «всё, кроме простоя» — steal остаётся внутри
-        self.assertEqual(per_cpu_percent([times()], [times(steal=1.0, idle=1.0)]), [50.0])
+        self.assertEqual(per_cpu_percent([times()], [times(steal=1.0, idle=1.0)], elapsed=2.0), [50.0])
 
 
 class AdvanceTests(unittest.TestCase):
@@ -160,12 +179,19 @@ class AdvanceTests(unittest.TestCase):
 
         self.assertNotIn("wg0", s.snapshot().net)
 
-    def test_cpu_percent_comes_from_the_tick_window(self):
+    def test_cpu_percent_is_measured_over_the_elapsed_window(self):
         s = sampler()
         s.advance(raw(10.0, cpu=[times(), times()]))
         s.advance(raw(11.0, cpu=[times(user=0.2, idle=0.8), times(user=1.0)]))
 
         self.assertEqual(s.snapshot().per_cpu_percent, [20.0, 100.0])
+
+    def test_counter_time_lost_by_the_kernel_shows_up_as_busy(self):
+        s = sampler()
+        s.advance(raw(10.0, cpu=[times()]))
+        s.advance(raw(11.0, cpu=[times(user=0.02, idle=0.69)]))
+
+        self.assertEqual(s.snapshot().per_cpu_percent, [31.0])
 
     def test_reading_too_close_to_the_previous_one_is_ignored(self):
         # A 20 ms window has a handful of kernel ticks and a few packets: the
@@ -199,21 +225,12 @@ class AdvanceTests(unittest.TestCase):
 
         self.assertTrue(s.snapshot().cpu_measured)
 
-    def test_steal_comes_from_the_tick_window(self):
+    def test_steal_is_measured_over_the_elapsed_window(self):
         s = sampler()
         s.advance(raw(10.0, cpu=[times(), times()]))
         s.advance(raw(11.0, cpu=[times(steal=0.4, idle=0.6), times(idle=1.0)]))
 
         self.assertEqual(s.snapshot().steal_percent, 20.0)
-
-    def test_inherited_sample_keeps_the_last_steal(self):
-        s = sampler()
-        s.advance(raw(10.0, cpu=[times()]))
-        s.advance(raw(11.0, cpu=[times(steal=0.5, idle=0.5)]))
-        s.advance(raw(12.0, cpu=[times(steal=0.52, idle=0.5)]))
-
-        self.assertEqual(s.snapshot().steal_percent, 50.0)
-        self.assertFalse(s.snapshot().cpu_measured)
 
     def test_core_count_change_resets_steal(self):
         s = sampler()
@@ -223,17 +240,17 @@ class AdvanceTests(unittest.TestCase):
 
         self.assertEqual(s.snapshot().steal_percent, 0.0)
 
-    def test_inherited_cpu_percent_is_flagged_unmeasured(self):
-        # A full second passed by the clock, but the kernel counters barely
-        # ticked (VM freeze, heavy steal): the sample keeps the last percentages
-        # and says so, so a window summary does not count that second twice.
+    def test_second_without_idle_is_measured_as_fully_busy_even_if_counters_barely_moved(self):
+        # Полная секунда по часам, счётчики почти не сдвинулись, простоя не было:
+        # ядро работало мимо учёта (softirq) — это нагрузка, а не повод повторить
+        # прошлый замер
         s = sampler()
         s.advance(raw(10.0, cpu=[times()]))
         s.advance(raw(11.0, cpu=[times(user=0.5, idle=0.5)]))
         s.advance(raw(12.0, cpu=[times(user=0.52, idle=0.5)]))
 
-        self.assertEqual(s.snapshot().per_cpu_percent, [50.0])
-        self.assertFalse(s.snapshot().cpu_measured)
+        self.assertEqual(s.snapshot().per_cpu_percent, [100.0])
+        self.assertTrue(s.snapshot().cpu_measured)
 
     def test_disk_total_counts_whole_disks_only(self):
         # sda1 is a partition of sda: its bytes are already inside sda's counter
@@ -373,7 +390,7 @@ class SummarizeWindowTests(unittest.TestCase):
 
         self.assertEqual(summary.per_cpu_avg, [30.0, 50.0])
 
-    def test_inherited_cpu_sample_is_skipped_for_cpu_but_still_counts_for_the_window(self):
+    def test_unmeasured_cpu_sample_is_skipped_for_cpu_but_still_counts_for_the_window(self):
         samples = [
             sample([50.0]),
             sample([50.0], measured=False),
@@ -392,7 +409,7 @@ class SummarizeWindowTests(unittest.TestCase):
         self.assertEqual(summary.per_cpu_avg, [10.0, 20.0, 30.0])
         self.assertEqual(summary.cpu_avg, 20.0)
 
-    def test_steal_average_is_weighted_and_skips_inherited_samples(self):
+    def test_steal_average_is_weighted_and_skips_unmeasured_samples(self):
         samples = [
             sample([90.0], steal=60.0, window=2.0),
             sample([90.0], steal=99.0, measured=False),

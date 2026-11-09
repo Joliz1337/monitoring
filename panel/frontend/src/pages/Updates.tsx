@@ -212,11 +212,11 @@ export default function Updates() {
             folder: n.folder,
             hasSshCreds: n.has_ssh_creds,
             loadState: 'pending',
-            // Последние известные версия и статус: пока нода перечитывается, счётчики папок не падают в ноль
+            // Последние известные версии и статус: пока нода перечитывается, счётчики папок не падают в ноль
             version: known?.version ?? null,
             status: known?.status ?? 'offline',
-            haproxyVersion: null,
-            haproxyTarget: null,
+            haproxyVersion: known?.haproxyVersion ?? null,
+            haproxyTarget: known?.haproxyTarget ?? null,
             downloadProxy: null,
           })
         }
@@ -574,20 +574,42 @@ export default function Updates() {
     return getNodeNeedsUpdate(node) ? 'outdated' : 'current'
   }
 
-  const renderFolderChips = (members: NodeState[]) => {
+  const folderHaproxyState = (node: NodeState): FolderNodeState | null => {
+    if (haproxyJobs.get(node.id)?.status === 'running') return 'updating'
+    if (node.status !== 'online' || !node.haproxyVersion) return null
+    return node.haproxyTarget ? 'outdated' : 'current'
+  }
+
+  const renderFolderChips = (
+    members: NodeState[],
+    stateOf: (node: NodeState) => FolderNodeState | null,
+    tooltipPrefix: string,
+  ) => {
     const counts: Record<FolderNodeState, number> = { current: 0, updating: 0, outdated: 0 }
     for (const node of members) {
-      const state = folderNodeState(node)
+      const state = stateOf(node)
       if (state) counts[state] += 1
     }
     return FOLDER_CHIPS.filter(chip => counts[chip.state] > 0).map(({ state, icon: Icon, spin, className }) => (
-      <Tooltip key={state} label={t(`updates.folder_${state}`, { count: counts[state], total: members.length })}>
+      <Tooltip key={state} label={t(`${tooltipPrefix}_${state}`, { count: counts[state], total: members.length })}>
         <span className={`flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded-md flex-shrink-0 ${className}`}>
           <Icon className={`w-3.5 h-3.5 ${spin ? 'animate-spin' : ''}`} />
           {counts[state]}
         </span>
       </Tooltip>
     ))
+  }
+
+  // Отдельной группой с подписью — иначе счётчики HAProxy не отличить от счётчиков версий нод
+  const renderFolderHaproxyChips = (members: NodeState[]) => {
+    const chips = renderFolderChips(members, folderHaproxyState, 'updates.folder_haproxy')
+    if (chips.length === 0) return null
+    return (
+      <span className="flex items-center gap-1 pl-2 border-l border-dark-700/70 flex-shrink-0">
+        <span className="text-xs text-dark-500">HAProxy</span>
+        {chips}
+      </span>
+    )
   }
 
   const renderNodeCard = (node: NodeState, index: number) => (
@@ -630,7 +652,8 @@ export default function Updates() {
             </div>
             <span className="text-sm font-semibold text-white truncate group-hover:text-blue-300 transition">{name}</span>
             <span className="text-xs text-dark-500 flex-shrink-0">{members.length}</span>
-            {renderFolderChips(members)}
+            {renderFolderChips(members, folderNodeState, 'updates.folder')}
+            {renderFolderHaproxyChips(members)}
             <Chevron className="w-3.5 h-3.5 text-dark-500 flex-shrink-0" />
           </button>
         </div>

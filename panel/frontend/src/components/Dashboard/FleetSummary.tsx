@@ -1,31 +1,11 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { memo, useMemo, useState } from 'react'
 import { Cpu, MemoryStick, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { serversApi, type FleetHistoryPoint, type FleetHistoryResponse } from '../../api/client'
 import type { ServerWithMetrics } from '../../stores/serversStore'
-import { useAutoRefresh } from '../../hooks/useAutoRefresh'
-import { useChartDisplay } from '../../hooks/useChartDisplay'
-import { useRememberedState } from '../../hooks/useRememberedState'
-import { formatBytes, formatBitsPerSecLocalized, createBitsFormatter } from '../../utils/format'
+import { formatBytes, formatBitsPerSecLocalized } from '../../utils/format'
 import { summarizeLoad } from '../../utils/fleetLoad'
-import type { ChartGap } from '../../utils/chartUtils'
-import MultiLineChart, { type ChartSeries } from '../Charts/MultiLineChart'
-import ChartLoadingOverlay from '../Charts/ChartLoadingOverlay'
-import { METRIC_COLORS, NETWORK_COLORS } from '../Charts/chartTheme'
-import PeriodSelector from '../ui/PeriodSelector'
 import { Tooltip } from '../ui/Tooltip'
-
-// Приём и отдача — одна метрика на двух плитках: график у них общий, поэтому
-// подсвечиваются обе, и клик по любой из подсвеченных сворачивает блок
-type FleetMetric = 'cpu' | 'memory' | 'network'
-
-// Историю перечитывать не чаще, чем в ней появляется новая точка;
-// 0 — шаг автообновления дашборда
-const REFRESH_SEC: Record<string, number> = { '1h': 0, '24h': 60, '7d': 300, '30d': 300, '365d': 300 }
-
-const EMPTY_POINTS: FleetHistoryPoint[] = []
-const NO_GAPS: ChartGap[] = []
+import LoadHistoryPanel, { type LoadMetric } from './LoadHistoryPanel'
 
 interface StatTileProps {
   icon: React.ReactNode
@@ -33,9 +13,9 @@ interface StatTileProps {
   label: string
   value: string
   sub?: string
-  metric: FleetMetric
+  metric: LoadMetric
   isActive: boolean
-  onSelect: (metric: FleetMetric) => void
+  onSelect: (metric: LoadMetric) => void
 }
 
 function StatTile({ icon, iconBg, label, value, sub, metric, isActive, onSelect }: StatTileProps) {
@@ -66,95 +46,15 @@ function StatTile({ icon, iconBg, label, value, sub, metric, isActive, onSelect 
 
 function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
   const { t } = useTranslation()
-  const [expanded, setExpanded] = useState<FleetMetric | null>(null)
-  const [period, setPeriod] = useRememberedState('dashboard.fleet-period', '24h')
-  const [history, setHistory] = useState<FleetHistoryResponse | null>(null)
-  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
-
-  const cpuDisplay = useChartDisplay('cpu')
-  const memoryDisplay = useChartDisplay('memory')
-  const networkDisplay = useChartDisplay('network')
+  // Приём и отдача — одна метрика на двух плитках: график у них общий, поэтому
+  // подсвечиваются обе, и клик по любой из подсвеченных сворачивает блок
+  const [expanded, setExpanded] = useState<LoadMetric | null>(null)
 
   const totals = useMemo(() => summarizeLoad(servers), [servers])
 
-  const isOpen = expanded !== null
-
-  // Ответ прошлого периода, прилетевший после переключения, рисовать нельзя:
-  // под новой подписью висело бы старое окно
-  const periodRef = useRef(period)
-  periodRef.current = period
-
-  const loadHistory = useCallback(async (withLoader: boolean) => {
-    if (withLoader) setIsHistoryLoading(true)
-    try {
-      const res = await serversApi.getFleetHistory(period)
-      if (periodRef.current === period) setHistory(res.data)
-    } catch {
-      // Молчаливое обновление оставляет нарисованное — сеть моргнула, график не
-      // должен пропасть; при смене периода показываем «нет данных»
-      if (withLoader && periodRef.current === period) setHistory(null)
-    } finally {
-      if (withLoader) setIsHistoryLoading(false)
-    }
-  }, [period])
-
-  useEffect(() => {
-    if (isOpen) void loadHistory(true)
-  }, [isOpen, loadHistory])
-
-  const refreshHistory = useCallback(() => loadHistory(false), [loadHistory])
-
-  useAutoRefresh(refreshHistory, {
-    enabled: isOpen,
-    immediate: false,
-    pauseWhenHidden: true,
-    customInterval: REFRESH_SEC[period] ? REFRESH_SEC[period] * 1000 : undefined,
-  })
-
-  const points = history?.data ?? EMPTY_POINTS
-  const gaps = history?.gaps ?? NO_GAPS
-  const bitsFormatter = useMemo(() => createBitsFormatter(t), [t])
-
-  const series = useMemo<Record<FleetMetric, ChartSeries[]>>(() => ({
-    cpu: [{
-      name: t('common.cpu'),
-      data: points.map(p => ({ timestamp: p.timestamp, value: p.cpu_usage, peak: p.max_cpu })),
-      color: METRIC_COLORS.cpu,
-    }],
-    memory: [{
-      name: t('common.ram'),
-      data: points.map(p => ({ timestamp: p.timestamp, value: p.memory_percent, peak: p.max_memory_percent })),
-      color: METRIC_COLORS.memory,
-    }],
-    network: [
-      {
-        name: t('common.download'),
-        data: points.map(p => ({
-          timestamp: p.timestamp,
-          value: p.net_rx_bytes_per_sec,
-          peak: p.max_net_rx_bytes_per_sec,
-        })),
-        color: NETWORK_COLORS.download,
-      },
-      {
-        name: t('common.upload'),
-        data: points.map(p => ({
-          timestamp: p.timestamp,
-          value: p.net_tx_bytes_per_sec,
-          peak: p.max_net_tx_bytes_per_sec,
-        })),
-        color: NETWORK_COLORS.upload,
-      },
-    ],
-  }), [points, t])
-
   if (!totals) return null
 
-  const toggle = (target: FleetMetric) => setExpanded(current => (current === target ? null : target))
-
-  const isPercentMetric = expanded !== 'network'
-  const chartTitle = expanded ? t(`dashboard.fleet_chart_${expanded}`) : ''
-  const chartDisplay = expanded === 'cpu' ? cpuDisplay : expanded === 'memory' ? memoryDisplay : networkDisplay
+  const toggle = (target: LoadMetric) => setExpanded(current => (current === target ? null : target))
 
   return (
     <div className="mb-6 fade-in">
@@ -199,43 +99,12 @@ function FleetSummaryInner({ servers }: { servers: ServerWithMetrics[] }) {
         />
       </div>
 
-      <AnimatePresence>
-        {expanded && (
-          // Постоянный key: без него AnimatePresence теряет уходящего ребёнка при
-          // ререндере от поллинга дашборда и оставляет свёрнутый график в DOM
-          <motion.div
-            key="fleet-chart"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.3 }}
-            className="overflow-hidden"
-          >
-            <div className="mt-3 p-4 bg-dark-900/50 border border-dark-800/50 rounded-xl relative">
-              <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-dark-200">{chartTitle}</div>
-                  <div className="text-xs text-dark-500">
-                    {t('dashboard.fleet_chart_scope', { count: totals.count })}
-                  </div>
-                </div>
-                <PeriodSelector value={period} onChange={setPeriod} />
-              </div>
-              <MultiLineChart
-                series={series[expanded]}
-                display={chartDisplay}
-                height={260}
-                period={period}
-                gaps={gaps}
-                unit={isPercentMetric ? '%' : ''}
-                formatValue={isPercentMetric ? undefined : bitsFormatter}
-                yMax={isPercentMetric ? 100 : undefined}
-              />
-              <ChartLoadingOverlay visible={isHistoryLoading} />
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <LoadHistoryPanel
+        metric={expanded}
+        onlineCount={totals.count}
+        periodKey="dashboard.fleet-period"
+        className="mt-3 bg-dark-900/50 border-dark-800/50"
+      />
     </div>
   )
 }

@@ -102,6 +102,8 @@ class NetworkAddress(BaseModel):
     type: str
     address: str
     netmask: Optional[str] = None
+    # Под каким IP приватный адрес выходит через NAT облака (services/nat_addresses)
+    public_address: Optional[str] = None
 
 
 class NetworkInterface(BaseModel):
@@ -139,6 +141,16 @@ class NetworkPortCounter(BaseModel):
     tx_bytes: int = 0
 
 
+class NetworkIpCounter(BaseModel):
+    """Трафик адреса ноды: rx/tx — соединения, открытые клиентами к адресу, own_* —
+    открытые самим сервером с адреса. Сумма — весь трафик адреса."""
+    ip: str
+    rx_bytes: int = 0
+    tx_bytes: int = 0
+    own_rx_bytes: int = 0
+    own_tx_bytes: int = 0
+
+
 class NetworkInfo(BaseModel):
     interfaces: list[NetworkInterface]
     total: NetworkTotal
@@ -146,6 +158,9 @@ class NetworkInfo(BaseModel):
     ports: list[NetworkPortCounter] = Field(default_factory=list)
     ports_available: bool = False
     ports_sampled_at: Optional[float] = None
+    ips: list[NetworkIpCounter] = Field(default_factory=list)
+    ips_available: bool = False
+    ips_sampled_at: Optional[float] = None
 
 
 class ProcessInfo(BaseModel):

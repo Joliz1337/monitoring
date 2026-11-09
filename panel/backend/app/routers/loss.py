@@ -199,7 +199,7 @@ async def _active_server(server_id: int, db: AsyncSession) -> Server:
     return server
 
 
-def _trace_http_error(exc: TraceError) -> HTTPException:
+def trace_http_error(exc: TraceError) -> HTTPException:
     # detail — код: фронт сам переводит его в понятный текст
     return HTTPException(status_code=TRACE_ERROR_STATUS[exc.code], detail=exc.code.value)
 
@@ -215,7 +215,7 @@ async def start_path_trace(data: TraceRequest, db: AsyncSession = Depends(get_db
     try:
         trace_id = await start_trace(server, ip, port)
     except TraceError as exc:
-        raise _trace_http_error(exc)
+        raise trace_http_error(exc)
     return {"trace_id": trace_id, "ip": ip, "port": port}
 
 
@@ -225,7 +225,7 @@ async def get_path_trace(server_id: int, trace_id: str, db: AsyncSession = Depen
     try:
         trace = await fetch_trace(server, trace_id)
     except TraceError as exc:
-        raise _trace_http_error(exc)
+        raise trace_http_error(exc)
     owners = get_loss_registry().owners()
     for hop in trace.get("hops", []):
         hop["owner"] = owners.get(hop.get("host") or "")

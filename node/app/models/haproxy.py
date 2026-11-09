@@ -357,3 +357,37 @@ class HAProxyStatsResponse(BaseModel):
     proxies: list[HAProxyProxyStats] = []
 
 
+# Имена уходят в строку команды CLI HAProxy: пробел или `;` разбили бы её на несколько команд
+RUNTIME_NAME_PATTERN = r"^[a-zA-Z0-9_.:-]+$"
+RUNTIME_NAME_MAX_LENGTH = 128
+RUNTIME_MAX_ITEMS = 4096
+RUNTIME_MAX_WEIGHT = 256
+RUNTIME_MIN_TTL_SECONDS = 10
+RUNTIME_MAX_TTL_SECONDS = 3600
+
+
+class RuntimeWeightItem(BaseModel):
+    backend: str = Field(pattern=RUNTIME_NAME_PATTERN, max_length=RUNTIME_NAME_MAX_LENGTH)
+    server: str = Field(pattern=RUNTIME_NAME_PATTERN, max_length=RUNTIME_NAME_MAX_LENGTH)
+    weight: int = Field(ge=0, le=RUNTIME_MAX_WEIGHT)
+
+
+class RuntimeWeightsRequest(BaseModel):
+    weights: list[RuntimeWeightItem] = Field(max_length=RUNTIME_MAX_ITEMS)
+    # Через этот срок без повторной отправки нода сама вернёт веса из конфига
+    ttl_seconds: int = Field(ge=RUNTIME_MIN_TTL_SECONDS, le=RUNTIME_MAX_TTL_SECONDS)
+
+
+class RuntimeWeightResult(BaseModel):
+    backend: str
+    server: str
+    ok: bool
+    error: Optional[str] = None
+
+
+class RuntimeWeightsResponse(BaseModel):
+    results: list[RuntimeWeightResult]
+    # Бэкенды, где не осталось живого сервера с весом, — им возвращены веса из конфига
+    guarded_backends: list[str]
+
+

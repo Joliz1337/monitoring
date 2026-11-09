@@ -5,13 +5,16 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import select, update, func, and_, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 import json
 import logging
 
 from app.database import get_db, async_session_maker
-from app.models import Server, HAProxyConfigProfile, HAProxySyncLog, ServerCache, MetricsSnapshot, PanelSettings
+from app.models import (
+    LINK_CAPACITY_MAX_MBIT, LINK_CAPACITY_MIN_MBIT,
+    Server, HAProxyConfigProfile, HAProxySyncLog, ServerCache, MetricsSnapshot, PanelSettings,
+)
 from app.auth import verify_auth
 from app.services.haproxy_addresses import MAX_ADDRESSES, InvalidAddressError, ServerAddresses, dump_ips, normalize_ips
 from app.services.haproxy_profile_sync import (
@@ -29,10 +32,13 @@ from app.services.haproxy_config import (
     HAProxyRule,
     InvalidSniError,
     ProfileOptions,
+    RuleBlockNotFoundError,
     SniMode,
     get_config_generator,
     normalize_sni_domains,
 )
+from app.services.haproxy_load_weights import nic_speed_mbps
+from app.services.haproxy_load_weights_runner import get_load_weights_runner
 from app.services.haproxy_validator import validate_config
 from app.services.reserved_ports_sync import _version_tuple
 from app.services.server_ip_owners import load_ip_owners
@@ -105,11 +111,30 @@ class BalancerOptionsData(BaseModel):
     allbackups: bool = False
     fullconn: Optional[int] = None
     timeout_queue: Optional[str] = None
+    load_weights: bool = False
 
 
 class ServerAddressesUpdate(BaseModel):
     listen_ips: list[str] = Field(default_factory=list, max_length=MAX_ADDRESSES)
     source_ips: list[str] = Field(default_factory=list, max_length=MAX_ADDRESSES)
+
+
+MAX_CAPACITY_UPDATES = 500
+
+
+class ServerCapacitiesUpdate(BaseModel):
+    """id сервера → канал в Мбит/с; None снимает канал."""
+    capacities: dict[int, Optional[int]] = Field(max_length=MAX_CAPACITY_UPDATES)
+
+    @field_validator("capacities")
+    @classmethod
+    def validate_range(cls, value: dict[int, Optional[int]]) -> dict[int, Optional[int]]:
+        for server_id, mbit in value.items():
+            if mbit is not None and not LINK_CAPACITY_MIN_MBIT <= mbit <= LINK_CAPACITY_MAX_MBIT:
+                raise ValueError(
+                    f"Server {server_id}: capacity must be {LINK_CAPACITY_MIN_MBIT}-{LINK_CAPACITY_MAX_MBIT} Mbit/s"
+                )
+        return value
 
 
 class RuleData(BaseModel):
@@ -229,6 +254,8 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
             Server.active_haproxy_profile_id,
             Server.haproxy_sync_status,
             Server.folder,
+            Server.link_capacity_mbit,
+            Server.last_metrics,
         )
         .order_by(Server.name)
     )
@@ -240,9 +267,34 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
             "active_profile_id": row[3],
             "sync_status": row[4],
             "folder": row[5],
+            "link_capacity_mbit": row[6],
+            "nic_speed_mbps": nic_speed_mbps(row[7]),
         }
         for row in result.fetchall()
     ]
+
+
+@router.put("/server-capacities")
+async def set_server_capacities(
+    data: ServerCapacitiesUpdate,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    """Каналы серверов из формы правила: один на сервер со всеми его IP и для всех правил."""
+    if not data.capacities:
+        return {"updated": 0}
+    result = await db.execute(select(Server.id).where(Server.id.in_(data.capacities)))
+    unknown = sorted(set(data.capacities) - set(result.scalars().all()))
+    if unknown:
+        raise HTTPException(400, f"Unknown servers: {', '.join(map(str, unknown))}")
+    conn = await db.connection()
+    await conn.execute(
+        update(Server).where(Server.id == bindparam("sid")).values(link_capacity_mbit=bindparam("mbit")),
+        [{"sid": server_id, "mbit": mbit} for server_id, mbit in data.capacities.items()],
+    )
+    await db.commit()
+    logger.info("server capacities updated: %s", data.capacities)
+    return {"updated": len(data.capacities)}
 
 
 @router.get("/ip-owners")
@@ -653,7 +705,7 @@ async def update_options(
     profile_id: int, data: ProfileOptionsData, bg: BackgroundTasks,
     db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
 ):
-    """Общий фильтр SNI вписан в frontend каждого правила — конфиг пересобирается из текущих правил."""
+    """Общий фильтр SNI вписан в frontend каждого TCP-правила — меняются только эти frontend."""
     profile = await _get_profile(profile_id, db)
     gen = get_config_generator()
 
@@ -668,15 +720,14 @@ async def update_options(
     if not ok:
         raise HTTPException(400, msg)
 
-    profile.options = json.dumps(options.to_dict())
-    # Без разобранных правил фильтру не к чему применяться, а пересборка
-    # стёрла бы написанный вручную конфиг
-    rules = gen.parse_rules_from_config(profile.config_content)
-    new_config = gen.generate_full_config(rules, options) if rules else profile.config_content
+    try:
+        new_config = gen.apply_options(profile.config_content, _profile_options(profile), options)
+    except RuleBlockNotFoundError as e:
+        raise HTTPException(409, str(e))
     config_changed = new_config != profile.config_content
     if config_changed:
-        profile.config_content = new_config
-        await mark_outdated_pending(db, profile)
+        await _store_rules_config(db, profile, new_config)
+    profile.options = json.dumps(options.to_dict())
     await db.commit()
 
     if config_changed:
@@ -752,6 +803,7 @@ def _serialize_balancer_options(opts: BalancerOptions) -> dict:
         "retries": opts.retries, "redispatch": opts.redispatch,
         "allbackups": opts.allbackups,
         "fullconn": opts.fullconn, "timeout_queue": opts.timeout_queue,
+        "load_weights": opts.load_weights,
     }
 
 
@@ -795,6 +847,12 @@ def _rule_from_data(data: RuleData) -> HAProxyRule:
     )
 
 
+@router.get("/{profile_id}/load-weights")
+async def get_load_weights(profile_id: int, _=Depends(verify_auth)):
+    """Последний расчёт весов по нагрузке для формы правила: канал, загрузка, вес сейчас."""
+    return get_load_weights_runner().profile_view(profile_id)
+
+
 @router.get("/{profile_id}/rules")
 async def get_rules(profile_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
     profile = await _get_profile(profile_id, db)
@@ -817,9 +875,8 @@ async def add_rule(profile_id: int, data: RuleData, bg: BackgroundTasks, db: Asy
     if any(r.name == rule.name for r in existing_rules):
         raise HTTPException(400, f"Rule '{rule.name}' already exists")
 
+    await _store_rules_config(db, profile, gen.add_rule_to_config(profile.config_content, rule, _profile_options(profile)))
     existing_rules.append(rule)
-    profile.config_content = gen.generate_full_config(existing_rules, _profile_options(profile))
-    await mark_outdated_pending(db, profile)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -841,9 +898,13 @@ async def update_rule(profile_id: int, rule_name: str, data: RuleData, bg: Backg
     if idx is None:
         raise HTTPException(404, f"Rule '{rule_name}' not found")
 
+    options = _profile_options(profile)
+    try:
+        new_config = gen.replace_rule_in_config(profile.config_content, existing_rules[idx], rule, options, options)
+    except RuleBlockNotFoundError as e:
+        raise HTTPException(409, str(e))
+    await _store_rules_config(db, profile, new_config)
     existing_rules[idx] = rule
-    profile.config_content = gen.generate_full_config(existing_rules, _profile_options(profile))
-    await mark_outdated_pending(db, profile)
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -856,12 +917,16 @@ async def delete_rule(profile_id: int, rule_name: str, bg: BackgroundTasks, db: 
     gen = get_config_generator()
 
     existing_rules = gen.parse_rules_from_config(profile.config_content)
-    new_rules = [r for r in existing_rules if r.name != rule_name]
-    if len(new_rules) == len(existing_rules):
+    removed = next((r for r in existing_rules if r.name == rule_name), None)
+    if removed is None:
         raise HTTPException(404, f"Rule '{rule_name}' not found")
 
-    profile.config_content = gen.generate_full_config(new_rules, _profile_options(profile))
-    await mark_outdated_pending(db, profile)
+    try:
+        new_config = gen.remove_rule_from_config(profile.config_content, removed)
+    except RuleBlockNotFoundError as e:
+        raise HTTPException(409, str(e))
+    await _store_rules_config(db, profile, new_config)
+    new_rules = [r for r in existing_rules if r is not removed]
     await db.commit()
 
     bg.add_task(_bg_sync_profile, profile_id)
@@ -975,6 +1040,16 @@ async def _get_profile(profile_id: int, db: AsyncSession) -> HAProxyConfigProfil
     if not profile:
         raise HTTPException(404, "Profile not found")
     return profile
+
+
+async def _store_rules_config(db: AsyncSession, profile: HAProxyConfigProfile, new_config: str) -> None:
+    """Правка через форму оставляет в конфиге ручные строки, поэтому итог
+    проверяется тем же `haproxy -c`, что и сырой конфиг."""
+    valid, message = await validate_config(new_config)
+    if not valid:
+        raise HTTPException(400, f"Конфиг не прошёл проверку HAProxy: {message}")
+    profile.config_content = new_config
+    await mark_outdated_pending(db, profile)
 
 
 def _profile_options(profile: HAProxyConfigProfile) -> ProfileOptions:

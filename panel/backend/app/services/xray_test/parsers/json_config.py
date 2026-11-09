@@ -90,7 +90,11 @@ def _endpoints_from_config(config: dict[str, Any]) -> tuple[list[ProxyEndpoint],
         kind = str(item.get("protocol") or item.get("type") or "").lower()
         if not kind or kind in SERVICE_OUTBOUNDS:
             continue
-        endpoint = _outbound_to_endpoint(item, kind)
+        try:
+            endpoint = _outbound_to_endpoint(item, kind)
+        except LinkParseError:
+            # Один outbound с недопустимыми полями не должен валить весь импорт
+            continue
         if endpoint is None:
             continue
         if profile_name:

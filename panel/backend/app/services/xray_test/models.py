@@ -7,9 +7,18 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+
+from app.services.xray_test.errors import LinkParseError
+
+MAX_HOST_LENGTH = 253
+# \w в юникоде: сырые IDN-имена из ссылок тоже проходят, а пробелы,
+# табуляция и переводы строк — нет
+_HOST_PATTERN = re.compile(r"[\w.\-:\[\]%]+")
+_CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class Protocol(str, Enum):
@@ -114,6 +123,21 @@ class TransportSettings:
     xhttp_extra: Optional[str] = None
 
 
+def _ensure_host(label: str, value: Optional[str], allow_list: bool = False) -> None:
+    if not value:
+        return
+    # До strip: иначе табуляция по краям элемента списка прошла бы незамеченной
+    if _CONTROL_CHARS_PATTERN.search(value):
+        raise LinkParseError(f"Управляющие символы в поле: {label}")
+    # Заголовок Host у vmess бывает списком через запятую
+    names = value.split(",") if allow_list else [value]
+    for name in (item.strip() for item in names):
+        if len(name) > MAX_HOST_LENGTH:
+            raise LinkParseError(f"Слишком длинное поле: {label}")
+        if name and not _HOST_PATTERN.fullmatch(name):
+            raise LinkParseError(f"Недопустимые символы в поле: {label}")
+
+
 @dataclass(frozen=True)
 class ProxyEndpoint:
     protocol: Protocol
@@ -130,6 +154,15 @@ class ProxyEndpoint:
     tls: TlsSettings = field(default_factory=TlsSettings)
     transport: TransportSettings = field(default_factory=TransportSettings)
     extra: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        # Адрес, SNI и имя приходят из чужих ссылок и подписок и доезжают до
+        # задания ноды и ядра: отсекаем их здесь, на границе разбора
+        _ensure_host("адрес", self.address)
+        _ensure_host("SNI", self.tls.sni)
+        _ensure_host("host транспорта", self.transport.host, allow_list=True)
+        if _CONTROL_CHARS_PATTERN.search(self.remark):
+            raise LinkParseError("Имя содержит управляющие символы")
 
     @property
     def effective_sni(self) -> str:

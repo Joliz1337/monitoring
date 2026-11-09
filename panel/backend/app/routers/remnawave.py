@@ -3,25 +3,42 @@
 IP collection via Remnawave Panel API, HWID device tracking.
 """
 
+import ipaddress
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, func as sql_func, and_, or_, delete, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
 from app.database import get_db
-from app.models import RemnawaveSettings, XrayStats, RemnawaveUserCache, RemnawaveHwidDevice
+from app.models import (
+    RemnawaveSettings, XrayStats, RemnawaveUserCache, RemnawaveHwidDevice,
+    RemnawaveIpHistory, RemnawaveGeoPresence, Server,
+)
+from app.routers.loss import trace_http_error
+from app.services.client_route import RoutePoint, assemble_route, find_node_server, node_route_point
+from app.services.geoip import geoip_status, get_geoip, request_geoip_update
+from app.services.loss_trace import TraceError, fetch_trace, start_trace
 from app.services.known_clients import build_ua_pattern, default_ua_text
 from app.services.remnawave_api import get_remnawave_api
+from app.services.remnawave_geo_ingest import DEFAULT_IP_HISTORY_DAYS
+from app.services.remnawave_geo_queries import (
+    IpTableQuery, ips_table, map_data, parse_bbox, split_place_key, summary_extra, user_geo,
+)
 from app.services.xray_stats_collector import get_xray_stats_collector
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 logger = logging.getLogger(__name__)
+
+# Трасса до клиента идёт TCP на этот порт: промежуточные роутеры отвечают на любой,
+# а 443 фильтруют реже прочих
+CLIENT_ROUTE_PORT = 443
 
 
 # === Request Models ===
@@ -32,6 +49,7 @@ class UpdateSettingsRequest(BaseModel):
     cookie_secret: Optional[str] = Field(None, max_length=500)
     enabled: Optional[bool] = None
     collection_interval: Optional[int] = Field(None, ge=60, le=900)
+    ip_history_days: Optional[int] = Field(None, ge=1, le=90)
     anomaly_enabled: Optional[bool] = None
     anomaly_ip_enabled: Optional[bool] = None
     anomaly_hwid_enabled: Optional[bool] = None
@@ -71,6 +89,10 @@ def _parse_ignored_user_ids(json_str: Optional[str]) -> list[int]:
         return []
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 # === Settings ===
 
 @router.get("/settings")
@@ -82,6 +104,7 @@ async def get_settings(db: AsyncSession = Depends(get_db), _: dict = Depends(ver
         return {
             "api_url": None, "api_token": None, "cookie_secret": None,
             "enabled": False, "collection_interval": 300,
+            "ip_history_days": DEFAULT_IP_HISTORY_DAYS,
             "ignored_user_ids": [],
         }
 
@@ -91,6 +114,7 @@ async def get_settings(db: AsyncSession = Depends(get_db), _: dict = Depends(ver
         "cookie_secret": "***" if s.cookie_secret else None,
         "enabled": s.enabled,
         "collection_interval": s.collection_interval,
+        "ip_history_days": s.ip_history_days or DEFAULT_IP_HISTORY_DAYS,
         "ignored_user_ids": _parse_ignored_user_ids(s.ignored_user_ids),
         "anomaly_enabled": s.anomaly_enabled or False,
         "anomaly_ip_enabled": s.anomaly_ip_enabled is not False,
@@ -125,7 +149,7 @@ async def update_settings(request: UpdateSettingsRequest, db: AsyncSession = Dep
         db.add(s)
 
     for field_name in ("api_url", "api_token", "cookie_secret", "enabled", "collection_interval",
-                       "anomaly_enabled", "anomaly_ip_enabled", "anomaly_hwid_enabled",
+                       "ip_history_days", "anomaly_enabled", "anomaly_ip_enabled", "anomaly_hwid_enabled",
                        "anomaly_ua_enabled", "anomaly_devdata_enabled",
                        "anomaly_ip_margin", "anomaly_ip_confirm_count", "anomaly_asn_margin",
                        "anomaly_ip_smart_enabled", "anomaly_ip_smart_traffic_gb",
@@ -284,6 +308,7 @@ async def get_summary(db: AsyncSession = Depends(get_db), _: dict = Depends(veri
         "unique_users": row[0],
         "unique_ips": row[1],
         "total_devices": device_count,
+        **(await summary_extra(db, _utcnow())),
     }
 
 
@@ -434,13 +459,30 @@ async def get_user_stats(
         "unique_ips": len(ips),
         "ips": ips,
         "devices": devices,
+        **(await user_geo(db, email, _utcnow())),
     }
+
+
+@router.get("/stats/user/{email}/traffic")
+async def get_user_traffic(email: int, db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
+    """Расход за сутки — отдельно, чтобы карточка не ждала ответа Remnawave."""
+    s = (await db.execute(select(RemnawaveSettings).limit(1))).scalar_one_or_none()
+    if not s or not s.api_url or not s.api_token:
+        return {"bytes": None}
+    cached = (await db.execute(select(RemnawaveUserCache).where(RemnawaveUserCache.email == email))).scalar_one_or_none()
+    api = get_remnawave_api(s.api_url, s.api_token, s.cookie_secret)
+    try:
+        return {"bytes": await api.get_user_traffic_bytes(email, cached.uuid if cached else None, hours=24)}
+    finally:
+        await api.close()
 
 
 @router.delete("/stats/clear")
 async def clear_stats(db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
     stats_result = await db.execute(delete(XrayStats))
     hwid_result = await db.execute(delete(RemnawaveHwidDevice))
+    await db.execute(delete(RemnawaveIpHistory))
+    await db.execute(delete(RemnawaveGeoPresence))
     await db.commit()
 
     # Сбросить in-memory кулдауны аномалий
@@ -460,6 +502,9 @@ async def clear_user_ip(email: int, source_ip: str, db: AsyncSession = Depends(g
     result = await db.execute(
         delete(XrayStats).where(and_(XrayStats.email == email, XrayStats.source_ip == source_ip))
     )
+    await db.execute(delete(RemnawaveIpHistory).where(
+        RemnawaveIpHistory.user_id == email, RemnawaveIpHistory.source_ip == source_ip,
+    ))
     await db.commit()
     return {"success": True, "email": email, "source_ip": source_ip, "deleted_records": result.rowcount}
 
@@ -467,8 +512,117 @@ async def clear_user_ip(email: int, source_ip: str, db: AsyncSession = Depends(g
 @router.delete("/stats/user/{email}/ips")
 async def clear_user_all_ips(email: int, db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
     result = await db.execute(delete(XrayStats).where(XrayStats.email == email))
+    await db.execute(delete(RemnawaveIpHistory).where(RemnawaveIpHistory.user_id == email))
     await db.commit()
     return {"success": True, "email": email, "deleted_records": result.rowcount}
+
+
+# === Client map ===
+
+@router.get("/geo/map")
+async def get_geo_map(
+    node: Optional[str] = Query(None, max_length=64),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    return await map_data(db, node or None, _utcnow())
+
+
+@router.get("/geo/ips")
+async def get_geo_ips(
+    bbox: Optional[str] = Query(None, max_length=120),
+    place: Optional[str] = Query(None, max_length=130),
+    node: Optional[str] = Query(None, max_length=64),
+    search: Optional[str] = Query(None, max_length=100),
+    active_only: bool = True,
+    sort: str = Query("last_seen", pattern="^(last_seen|ip|city|provider)$"),
+    dir: str = Query("desc", pattern="^(asc|desc)$"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    query = IpTableQuery(
+        bbox=parse_bbox(bbox),
+        place=split_place_key(place),
+        node=node or None,
+        search=(search or "").strip() or None,
+        active_only=active_only,
+        sort=sort,
+        descending=dir == "desc",
+        offset=offset,
+        limit=limit,
+    )
+    return await ips_table(db, query, _utcnow())
+
+
+@router.get("/geo/status")
+async def get_geo_status(_: dict = Depends(verify_auth)):
+    return geoip_status()
+
+
+@router.post("/geo/update")
+async def update_geo_db(_: dict = Depends(verify_auth)):
+    return {"started": request_geoip_update()}
+
+
+class ClientRouteRequest(BaseModel):
+    ip: str = Field(..., max_length=45)
+    node_uuid: str = Field(..., min_length=1, max_length=64)
+
+    @field_validator("ip")
+    @classmethod
+    def _public_ip(cls, value: str) -> str:
+        address = ipaddress.ip_address(value.strip())
+        if not address.is_global:
+            raise ValueError("ip must be a public address")
+        return str(address)
+
+
+@router.post("/geo/route")
+async def start_client_route(data: ClientRouteRequest, db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
+    """Трасса с ноды Remnawave до IP клиента; ход — GET /geo/route/{server_id}/{trace_id}."""
+    server = await find_node_server(db, data.node_uuid)
+    # Сессию отпускаем до похода на ноду
+    await db.commit()
+    if server is None:
+        raise HTTPException(status_code=404, detail="node_not_in_panel")
+    try:
+        trace_id = await start_trace(server, data.ip, CLIENT_ROUTE_PORT)
+    except TraceError as exc:
+        raise trace_http_error(exc)
+    return {"server_id": server.id, "server_name": server.name, "trace_id": trace_id}
+
+
+@router.get("/geo/route/{server_id}/{trace_id}")
+async def get_client_route(
+    server_id: int,
+    trace_id: str = Path(..., pattern="^[0-9a-f]{1,64}$"),
+    node_uuid: str = Query(..., min_length=1, max_length=64),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth),
+):
+    geoip = get_geoip()
+    server = (await db.execute(
+        select(Server).where(Server.id == server_id, Server.is_active == True)  # noqa: E712
+    )).scalar_one_or_none()
+    node = await node_route_point(db, node_uuid, geoip.lookup)
+    await db.commit()
+    if server is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    if node is None:
+        raise HTTPException(status_code=409, detail="node_location_unknown")
+    try:
+        trace = await fetch_trace(server, trace_id)
+    except TraceError as exc:
+        raise trace_http_error(exc)
+    client = RoutePoint.from_geo(geoip.lookup(trace.get("ip", "")))
+    route = assemble_route(trace, node, client, geoip.lookup)
+    return {
+        "ip": trace.get("ip"), "state": trace.get("state"), "error": trace.get("error"),
+        "rounds_done": trace.get("rounds_done", 0), "rounds_total": trace.get("rounds_total", 0),
+        **route,
+    }
 
 
 # === Anomalies ===

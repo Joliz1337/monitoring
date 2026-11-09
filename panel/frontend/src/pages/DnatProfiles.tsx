@@ -47,9 +47,13 @@ import {
   DnatProtocol,
   DnatDistribution,
   DnatSyncStatus,
+  PortRange,
+  PortUsageMap,
+  portUsageApi,
 } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
 import { formatListen, formatTarget, protocolLabel, splitTargets } from '../utils/dnat'
+import { dnatTcpRanges, formatServerPorts, interceptedOnServers, rangesCover, ServerPorts } from '../utils/portConflicts'
 import { uniqueCopyName } from '../utils/ruleClone'
 import { writeStorage } from '../utils/storage'
 
@@ -148,11 +152,35 @@ function cloneRule(rule: DnatRuleData, takenNames: string[]): DnatRuleData {
   return { ...rule, name: uniqueCopyName(rule.name, takenNames), listen_port: 0, listen_port_end: null }
 }
 
+// Серая метка — на сервере есть HAProxy, красная — правила профиля перехватывают его порты
+function HaproxyChip({ ports, ranges }: { ports: number[]; ranges: PortRange[] }) {
+  const { t } = useTranslation()
+  if (ports.length === 0) return null
+  const intercepted = ports.filter(port => rangesCover(ranges, port))
+  if (intercepted.length > 0) {
+    return (
+      <Tooltip label={t('dnat_profiles.haproxy_chip_conflict', { ports: intercepted.join(', ') })} maxWidth={360}>
+        <span className="shrink-0 px-1.5 py-0.5 rounded text-2xs font-mono bg-red-500/10 text-red-400 border border-red-500/30">
+          HAProxy {intercepted.map(port => `:${port}`).join(' ')}
+        </span>
+      </Tooltip>
+    )
+  }
+  return (
+    <Tooltip label={t('dnat_profiles.haproxy_chip', { ports: ports.join(', ') })} maxWidth={360}>
+      <span className="shrink-0 px-1.5 py-0.5 rounded text-2xs bg-dark-700/50 text-dark-400 border border-dark-600/40">
+        HAProxy
+      </span>
+    </Tooltip>
+  )
+}
+
 function RuleForm({
   initial,
   isEdit,
   cloneOf,
   saving,
+  haproxyServers,
   onSave,
   onCancel,
 }: {
@@ -160,6 +188,7 @@ function RuleForm({
   isEdit: boolean
   cloneOf?: string
   saving: boolean
+  haproxyServers: ServerPorts[]
   onSave: (rule: DnatRuleData) => void
   onCancel: () => void
 }) {
@@ -168,6 +197,13 @@ function RuleForm({
   const [portEndText, setPortEndText] = useState(initial.listen_port_end ? String(initial.listen_port_end) : '')
 
   const update = (patch: Partial<DnatRuleData>) => setForm(prev => ({ ...prev, ...patch }))
+
+  // Предупреждение до сохранения: недописанный конец диапазона считается одиночным портом
+  const typedPortEnd = parseInt(portEndText, 10)
+  const interceptedHaproxy = interceptedOnServers(haproxyServers, dnatTcpRanges([{
+    ...form,
+    listen_port_end: typedPortEnd > form.listen_port ? typedPortEnd : null,
+  }]))
 
   const handleSubmit = () => {
     const name = form.name.trim()
@@ -309,6 +345,13 @@ function RuleForm({
             />
             <p className="text-2xs text-dark-500 mt-1">{t('dnat_profiles.target_port_hint')}</p>
           </div>
+
+          {interceptedHaproxy.length > 0 && (
+            <div className="col-span-2 sm:col-span-4 flex items-start gap-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>{t('dnat_profiles.haproxy_conflict_form', { servers: formatServerPorts(interceptedHaproxy) })}</span>
+            </div>
+          )}
 
           <div className="col-span-2 sm:col-span-4">
             <label className="block text-xs text-dark-400 mb-1">{t('dnat_profiles.field_comment')}</label>
@@ -453,10 +496,12 @@ function CreateProfileModal({
 function ProfileListItem({
   profile,
   open,
+  haproxyConflict,
   onToggle,
 }: {
   profile: DnatProfile
   open: boolean
+  haproxyConflict: boolean
   onToggle: (id: number) => void
 }) {
   const { t } = useTranslation()
@@ -487,6 +532,13 @@ function ProfileListItem({
               <Tooltip label={t('dnat_profiles.ssh_warning', { port: profile.ssh_default_port })}>
                 <span className="shrink-0 text-red-400">
                   <ShieldAlert className="w-3.5 h-3.5" />
+                </span>
+              </Tooltip>
+            )}
+            {haproxyConflict && (
+              <Tooltip label={t('dnat_profiles.haproxy_list_warning')} maxWidth={320}>
+                <span className="shrink-0 text-red-400">
+                  <AlertTriangle className="w-3.5 h-3.5" />
                 </span>
               </Tooltip>
             )}
@@ -633,12 +685,14 @@ function ProfileHeader({
 function RulesTab({
   profile,
   rules,
+  haproxyServers,
   onAddRule,
   onUpdateRule,
   onDeleteRule,
 }: {
   profile: DnatProfileWithServers
   rules: DnatRuleData[]
+  haproxyServers: ServerPorts[]
   onAddRule: (rule: DnatRuleData) => Promise<boolean>
   onUpdateRule: (index: number, rule: DnatRuleData) => Promise<boolean>
   onDeleteRule: (index: number) => Promise<void>
@@ -648,6 +702,15 @@ function RulesTab({
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [cloningIndex, setCloningIndex] = useState<number | null>(null)
   const [saving, setSaving] = useState(false)
+
+  const interceptedByRule = useMemo(
+    () => new Map(rules.map(rule => [rule.name, interceptedOnServers(haproxyServers, dnatTcpRanges([rule]))])),
+    [rules, haproxyServers],
+  )
+  const interceptedByProfile = useMemo(
+    () => interceptedOnServers(haproxyServers, dnatTcpRanges(rules)),
+    [rules, haproxyServers],
+  )
 
   const handleAdd = async (rule: DnatRuleData, closeForm: () => void) => {
     setSaving(true)
@@ -693,6 +756,13 @@ function RulesTab({
         </div>
       )}
 
+      {interceptedByProfile.length > 0 && (
+        <div className="flex items-start gap-3 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300">
+          <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
+          <div className="text-sm">{t('dnat_profiles.haproxy_conflict_banner', { servers: formatServerPorts(interceptedByProfile) })}</div>
+        </div>
+      )}
+
       <div className="flex items-start gap-3 p-3 rounded-xl bg-dark-800/40 border border-dark-700/40 text-dark-400 text-xs">
         <Activity className="w-4 h-4 shrink-0 mt-0.5 text-accent-400" />
         <div>{t('dnat_profiles.how_it_works', { port: profile.node_api_port })}</div>
@@ -716,6 +786,7 @@ function RulesTab({
             initial={EMPTY_RULE}
             isEdit={false}
             saving={saving}
+            haproxyServers={haproxyServers}
             onSave={rule => handleAdd(rule, () => setShowForm(false))}
             onCancel={() => setShowForm(false)}
           />
@@ -741,113 +812,125 @@ function RulesTab({
               </tr>
             </thead>
             <tbody>
-              {rules.map((rule, index) => (
-                <Fragment key={rule.name}>
-                  <tr className={`border-t border-dark-800/40 hover:bg-dark-800/30 transition-colors ${rule.enabled ? '' : 'opacity-50'}`}>
-                    <td className="px-3 py-2 font-medium text-dark-100 font-mono">{rule.name}</td>
-                    <td className="px-3 py-2 text-dark-300">{protocolLabel(rule.protocol)}</td>
-                    <td className="px-3 py-2 font-mono text-dark-200">:{formatListen(rule)}</td>
-                    <td className="px-3 py-2 font-mono text-dark-200">→ {formatTarget(rule)}</td>
-                    <td className="px-3 py-2">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        {!rule.enabled && (
-                          <span className="px-2 py-0.5 rounded-md text-2xs bg-dark-700/50 text-dark-400 border border-dark-600/40">
-                            {t('dnat_profiles.disabled_badge')}
-                          </span>
-                        )}
-                        {!rule.masquerade && (
-                          <Tooltip label={t('dnat_profiles.masquerade_hint')} maxWidth={360}>
-                            <span className="px-2 py-0.5 rounded-md text-2xs bg-warning/10 text-warning border border-warning/20">
-                              {t('dnat_profiles.no_masq_badge')}
+              {rules.map((rule, index) => {
+                const interceptedHaproxy = interceptedByRule.get(rule.name) ?? []
+                return (
+                  <Fragment key={rule.name}>
+                    <tr className={`border-t border-dark-800/40 hover:bg-dark-800/30 transition-colors ${rule.enabled ? '' : 'opacity-50'}`}>
+                      <td className="px-3 py-2 font-medium text-dark-100 font-mono">{rule.name}</td>
+                      <td className="px-3 py-2 text-dark-300">{protocolLabel(rule.protocol)}</td>
+                      <td className="px-3 py-2 font-mono text-dark-200">:{formatListen(rule)}</td>
+                      <td className="px-3 py-2 font-mono text-dark-200">→ {formatTarget(rule)}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {interceptedHaproxy.length > 0 && (
+                            <Tooltip label={t('dnat_profiles.haproxy_rule_hint', { servers: formatServerPorts(interceptedHaproxy) })} maxWidth={380}>
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs bg-red-500/10 text-red-400 border border-red-500/30">
+                                <AlertTriangle className="w-3 h-3" /> HAProxy
+                              </span>
+                            </Tooltip>
+                          )}
+                          {!rule.enabled && (
+                            <span className="px-2 py-0.5 rounded-md text-2xs bg-dark-700/50 text-dark-400 border border-dark-600/40">
+                              {t('dnat_profiles.disabled_badge')}
                             </span>
+                          )}
+                          {!rule.masquerade && (
+                            <Tooltip label={t('dnat_profiles.masquerade_hint')} maxWidth={360}>
+                              <span className="px-2 py-0.5 rounded-md text-2xs bg-warning/10 text-warning border border-warning/20">
+                                {t('dnat_profiles.no_masq_badge')}
+                              </span>
+                            </Tooltip>
+                          )}
+                          {rule.mask_ttl && (
+                            <Tooltip label={t('dnat_profiles.mask_ttl_hint')} maxWidth={380}>
+                              <span className="px-2 py-0.5 rounded-md text-2xs bg-dark-700/60 text-dark-200 border border-dark-600/50">
+                                {t('dnat_profiles.mask_ttl_badge')}
+                              </span>
+                            </Tooltip>
+                          )}
+                          {splitTargets(rule.target_ip).length > 1 && (
+                            <Tooltip label={t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}_hint`)} maxWidth={360}>
+                              <span className="px-2 py-0.5 rounded-md text-2xs bg-accent-500/10 text-accent-400 border border-accent-500/20">
+                                {t('dnat_profiles.balancer_badge', { count: splitTargets(rule.target_ip).length })} · {t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}`)}
+                              </span>
+                            </Tooltip>
+                          )}
+                          {rule.enabled && rule.masquerade && !rule.mask_ttl && splitTargets(rule.target_ip).length <= 1 && interceptedHaproxy.length === 0 && <span className="text-dark-500">—</span>}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-dark-400 truncate max-w-xs">{rule.comment || '—'}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center justify-end gap-1">
+                          <Tooltip label={rule.enabled ? t('dnat_profiles.disable_rule') : t('dnat_profiles.enable_rule')}>
+                            <button
+                              onClick={() => toggleEnabled(index, rule)}
+                              className={`p-1.5 rounded-lg transition-colors ${rule.enabled ? 'text-green-400 hover:bg-green-500/10' : 'text-dark-500 hover:text-dark-300 hover:bg-dark-700/50'}`}
+                            >
+                              {rule.enabled ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                            </button>
                           </Tooltip>
-                        )}
-                        {rule.mask_ttl && (
-                          <Tooltip label={t('dnat_profiles.mask_ttl_hint')} maxWidth={380}>
-                            <span className="px-2 py-0.5 rounded-md text-2xs bg-dark-700/60 text-dark-200 border border-dark-600/50">
-                              {t('dnat_profiles.mask_ttl_badge')}
-                            </span>
+                          <Tooltip label={t('common.edit')}>
+                            <button
+                              onClick={() => openEdit(index)}
+                              className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
                           </Tooltip>
-                        )}
-                        {splitTargets(rule.target_ip).length > 1 && (
-                          <Tooltip label={t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}_hint`)} maxWidth={360}>
-                            <span className="px-2 py-0.5 rounded-md text-2xs bg-accent-500/10 text-accent-400 border border-accent-500/20">
-                              {t('dnat_profiles.balancer_badge', { count: splitTargets(rule.target_ip).length })} · {t(`dnat_profiles.distribution_${rule.distribution ?? 'per_server'}`)}
-                            </span>
+                          <Tooltip label={t('dnat_profiles.clone_rule')}>
+                            <button
+                              onClick={() => openClone(index)}
+                              className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors"
+                            >
+                              <Copy className="w-4 h-4" />
+                            </button>
                           </Tooltip>
-                        )}
-                        {rule.enabled && rule.masquerade && !rule.mask_ttl && splitTargets(rule.target_ip).length <= 1 && <span className="text-dark-500">—</span>}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 text-dark-400 truncate max-w-xs">{rule.comment || '—'}</td>
-                    <td className="px-3 py-2">
-                      <div className="flex items-center justify-end gap-1">
-                        <Tooltip label={rule.enabled ? t('dnat_profiles.disable_rule') : t('dnat_profiles.enable_rule')}>
-                          <button
-                            onClick={() => toggleEnabled(index, rule)}
-                            className={`p-1.5 rounded-lg transition-colors ${rule.enabled ? 'text-green-400 hover:bg-green-500/10' : 'text-dark-500 hover:text-dark-300 hover:bg-dark-700/50'}`}
-                          >
-                            {rule.enabled ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-                          </button>
-                        </Tooltip>
-                        <Tooltip label={t('common.edit')}>
-                          <button
-                            onClick={() => openEdit(index)}
-                            className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors"
-                          >
-                            <Edit3 className="w-4 h-4" />
-                          </button>
-                        </Tooltip>
-                        <Tooltip label={t('dnat_profiles.clone_rule')}>
-                          <button
-                            onClick={() => openClone(index)}
-                            className="p-1.5 rounded-lg text-dark-400 hover:text-dark-200 hover:bg-dark-700/50 transition-colors"
-                          >
-                            <Copy className="w-4 h-4" />
-                          </button>
-                        </Tooltip>
-                        <Tooltip label={t('common.delete')}>
-                          <button
-                            onClick={() => {
-                              if (confirm(t('dnat_profiles.delete_rule_confirm', { name: rule.name }))) void onDeleteRule(index)
-                            }}
-                            className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </Tooltip>
-                      </div>
-                    </td>
-                  </tr>
-                  {editingIndex === index && (
-                    <tr>
-                      <td colSpan={7} className="px-3 py-2 bg-dark-900/40">
-                        <RuleForm
-                          initial={rule}
-                          isEdit={true}
-                          saving={saving}
-                          onSave={handleUpdate}
-                          onCancel={() => setEditingIndex(null)}
-                        />
+                          <Tooltip label={t('common.delete')}>
+                            <button
+                              onClick={() => {
+                                if (confirm(t('dnat_profiles.delete_rule_confirm', { name: rule.name }))) void onDeleteRule(index)
+                              }}
+                              className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </Tooltip>
+                        </div>
                       </td>
                     </tr>
-                  )}
-                  {cloningIndex === index && (
-                    <tr>
-                      <td colSpan={7} className="px-3 py-2 bg-dark-900/40">
-                        <RuleForm
-                          initial={cloneRule(rule, rules.map(r => r.name))}
-                          isEdit={false}
-                          cloneOf={rule.name}
-                          saving={saving}
-                          onSave={copy => handleAdd(copy, () => setCloningIndex(null))}
-                          onCancel={() => setCloningIndex(null)}
-                        />
-                      </td>
-                    </tr>
-                  )}
-                </Fragment>
-              ))}
+                    {editingIndex === index && (
+                      <tr>
+                        <td colSpan={7} className="px-3 py-2 bg-dark-900/40">
+                          <RuleForm
+                            initial={rule}
+                            isEdit={true}
+                            saving={saving}
+                            haproxyServers={haproxyServers}
+                            onSave={handleUpdate}
+                            onCancel={() => setEditingIndex(null)}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                    {cloningIndex === index && (
+                      <tr>
+                        <td colSpan={7} className="px-3 py-2 bg-dark-900/40">
+                          <RuleForm
+                            initial={cloneRule(rule, rules.map(r => r.name))}
+                            isEdit={false}
+                            cloneOf={rule.name}
+                            saving={saving}
+                            haproxyServers={haproxyServers}
+                            onSave={copy => handleAdd(copy, () => setCloningIndex(null))}
+                            onCancel={() => setCloningIndex(null)}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -860,6 +943,7 @@ function RulesTab({
 function ServersTab({
   profile,
   availableServers,
+  portUsage,
   syncingServerId,
   onSyncOne,
   onUnlink,
@@ -867,6 +951,7 @@ function ServersTab({
 }: {
   profile: DnatProfileWithServers
   availableServers: DnatAvailableServer[]
+  portUsage: PortUsageMap
   syncingServerId: number | null
   onSyncOne: (serverId: number) => void
   onUnlink: (serverId: number) => void
@@ -874,6 +959,10 @@ function ServersTab({
 }) {
   const { t } = useTranslation()
   const { uid } = useParams()
+  const profileRanges = useMemo(() => dnatTcpRanges(profile.rules), [profile.rules])
+  const haproxyChip = (serverId: number) => (
+    <HaproxyChip ports={portUsage[serverId]?.haproxy_ports ?? []} ranges={profileRanges} />
+  )
   const [searchQuery, setSearchQuery] = useState('')
   const [showBusy, setShowBusy] = useState(false)
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
@@ -970,6 +1059,7 @@ function ServersTab({
         {srv.active_profile_id && (
           <span className="text-xs text-yellow-400/80 shrink-0">{t('dnat_profiles.in_other_profile')}</span>
         )}
+        {haproxyChip(srv.id)}
       </div>
       <button
         onClick={() => onLink(srv.id)}
@@ -1067,6 +1157,7 @@ function ServersTab({
                     )}
                   </div>
                   {syncStatusBadge(srv.sync_status, t)}
+                  {haproxyChip(srv.server_id)}
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   <span className="hidden sm:inline text-xs text-dark-500 mr-2">
@@ -1205,14 +1296,18 @@ function LogTab({
 
 function ProfileDetail({
   profileId,
+  portUsage,
   onProfileDeleted,
   onProfileChanged,
+  onLinksChanged,
   onProfileCloned,
   onClose,
 }: {
   profileId: number
+  portUsage: PortUsageMap
   onProfileDeleted: () => void
   onProfileChanged: () => void
+  onLinksChanged: () => void
   onProfileCloned: (clone: DnatProfile) => void
   onClose: () => void
 }) {
@@ -1370,6 +1465,7 @@ function ProfileDetail({
       toast.success(t('dnat_profiles.linked'))
       await Promise.all([fetchProfile(), fetchAvailableServers()])
       onProfileChanged()
+      onLinksChanged()
     } catch (err) {
       toast.error(extractErrorMessage(err, t('dnat_profiles.link_error')))
     }
@@ -1381,6 +1477,7 @@ function ProfileDetail({
       toast.success(t('dnat_profiles.unlinked'))
       await Promise.all([fetchProfile(), fetchAvailableServers()])
       onProfileChanged()
+      onLinksChanged()
     } catch (err) {
       toast.error(extractErrorMessage(err, t('dnat_profiles.unlink_error')))
     }
@@ -1428,6 +1525,13 @@ function ProfileDetail({
       toast.error(extractErrorMessage(err, t('dnat_profiles.rule_delete_error')))
     }
   }
+
+  const haproxyServers = useMemo<ServerPorts[]>(
+    () => (profile?.servers ?? [])
+      .map(s => ({ name: s.server_name, ports: portUsage[s.server_id]?.haproxy_ports ?? [] }))
+      .filter(s => s.ports.length > 0),
+    [profile?.servers, portUsage],
+  )
 
   if (loading) {
     return (
@@ -1479,6 +1583,7 @@ function ProfileDetail({
         <RulesTab
           profile={profile}
           rules={profile.rules}
+          haproxyServers={haproxyServers}
           onAddRule={handleAddRule}
           onUpdateRule={handleUpdateRule}
           onDeleteRule={handleDeleteRule}
@@ -1488,6 +1593,7 @@ function ProfileDetail({
         <ServersTab
           profile={profile}
           availableServers={availableServers}
+          portUsage={portUsage}
           syncingServerId={syncingServerId}
           onSyncOne={handleSyncOne}
           onUnlink={handleUnlink}
@@ -1537,6 +1643,26 @@ export default function DnatProfiles() {
     return () => clearInterval(id)
   }, [fetchProfiles])
 
+  // Порты HAProxy меняются редко — карта грузится при заходе и после привязки/отвязки серверов
+  const [portUsage, setPortUsage] = useState<PortUsageMap>({})
+  const fetchPortUsage = useCallback(() => {
+    portUsageApi.get().then(res => setPortUsage(res.data)).catch(() => { /* предупреждения не критичны */ })
+  }, [])
+
+  useEffect(() => {
+    fetchPortUsage()
+  }, [fetchPortUsage])
+
+  const haproxyConflictIds = useMemo(() => {
+    const usage = Object.values(portUsage)
+    return new Set(profiles
+      .filter(p => {
+        const ranges = dnatTcpRanges(p.rules)
+        return usage.some(u => u.dnat_profile_id === p.id && u.haproxy_ports.some(port => rangesCover(ranges, port)))
+      })
+      .map(p => p.id))
+  }, [profiles, portUsage])
+
   const handleCreated = (profile: DnatProfile) => {
     setShowCreate(false)
     setProfiles(prev => [...prev, profile])
@@ -1546,6 +1672,7 @@ export default function DnatProfiles() {
   const handleDeleted = async (id: number) => {
     closeProfile(id)
     await fetchProfiles()
+    fetchPortUsage()
   }
 
   const handleCloned = async (clone: DnatProfile) => {
@@ -1593,7 +1720,13 @@ export default function DnatProfiles() {
           ) : (
             <AnimatePresence>
               {profiles.map(p => (
-                <ProfileListItem key={p.id} profile={p} open={openIds.includes(p.id)} onToggle={toggleProfile} />
+                <ProfileListItem
+                  key={p.id}
+                  profile={p}
+                  open={openIds.includes(p.id)}
+                  haproxyConflict={haproxyConflictIds.has(p.id)}
+                  onToggle={toggleProfile}
+                />
               ))}
             </AnimatePresence>
           )}
@@ -1611,8 +1744,10 @@ export default function DnatProfiles() {
             <div key={id} className="card">
               <ProfileDetail
                 profileId={id}
+                portUsage={portUsage}
                 onProfileDeleted={() => handleDeleted(id)}
                 onProfileChanged={fetchProfiles}
+                onLinksChanged={fetchPortUsage}
                 onProfileCloned={handleCloned}
                 onClose={() => closeProfile(id)}
               />

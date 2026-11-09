@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -25,8 +26,9 @@ from app.services.ephemeral_ports import (
     scan_listening_ports,
 )
 from app.services.loss_probe import LossProbe, get_loss_probe, readable_sources
+from app.services.nat_addresses import NatAddressProbe, get_nat_address_probe
 from app.services.numa import read_numa_nodes
-from app.services.port_traffic_sampler import get_port_traffic_sampler
+from app.services.traffic_counter_sampler import get_traffic_counter_sampler
 from app.services.rate_sampler import (
     RateSample,
     RateSampler,
@@ -40,13 +42,27 @@ logger = logging.getLogger(__name__)
 NO_RATE = (0.0, 0.0)
 
 
+def _is_accountable_ipv4(address: str) -> bool:
+    try:
+        parsed = ipaddress.IPv4Address(address)
+    except ValueError:
+        return False
+    return not (parsed.is_loopback or parsed.is_link_local or parsed.is_unspecified)
+
+
 class MetricsCollector:
     """Collects current system metrics from host."""
 
-    def __init__(self, rate_sampler: Optional[RateSampler] = None, loss_probe: Optional[LossProbe] = None):
+    def __init__(
+        self,
+        rate_sampler: Optional[RateSampler] = None,
+        loss_probe: Optional[LossProbe] = None,
+        nat_addresses: Optional[NatAddressProbe] = None,
+    ):
         self.settings = get_settings()
         self._rate_sampler = rate_sampler or get_rate_sampler()
         self._loss_probe = loss_probe or get_loss_probe()
+        self._nat_addresses = nat_addresses or get_nat_address_probe()
         # Process cache to avoid blocking
         self._processes_cache: list = []
         self._processes_cache_time: float = 0
@@ -331,7 +347,8 @@ class MetricsCollector:
                         iface_info["addresses"].append({
                             "type": "ipv4",
                             "address": addr.address,
-                            "netmask": addr.netmask
+                            "netmask": addr.netmask,
+                            "public_address": self._nat_addresses.public_address(addr.address),
                         })
                     elif addr.family == socket.AF_INET6:
                         iface_info["addresses"].append({
@@ -358,7 +375,9 @@ class MetricsCollector:
             "tx_bytes_per_sec": sum(net_rates.get(i, NO_RATE)[1] for i in physical),
         }
 
-        ports, ports_available, ports_sampled_at = self._port_counters()
+        port_counters, ip_counters = self._traffic_counters()
+        ports, ports_available, ports_sampled_at = port_counters
+        ips, ips_available, ips_sampled_at = ip_counters
 
         return {
             "interfaces": interfaces,
@@ -366,21 +385,41 @@ class MetricsCollector:
             "ports": ports,
             "ports_available": ports_available,
             "ports_sampled_at": ports_sampled_at,
+            "ips": ips,
+            "ips_available": ips_available,
+            "ips_sampled_at": ips_sampled_at,
         }
 
+    def accounted_ipv4_addresses(self) -> list[str]:
+        """IPv4 физических интерфейсов — по ним нода ведёт учёт трафика клиентов.
+
+        Адреса docker-мостов, WARP и туннелей пропускаются тем же фильтром, что и
+        их трафик в суммарном счётчике: клиенты к ним не подключаются.
+        """
+        physical = set(self.physical_interfaces(read_net_dev()))
+        addresses: set[str] = set()
+        for iface, entries in psutil.net_if_addrs().items():
+            if iface not in physical:
+                continue
+            for entry in entries:
+                if entry.family == socket.AF_INET and _is_accountable_ipv4(entry.address):
+                    addresses.add(entry.address)
+        return sorted(addresses)
+
     @staticmethod
-    def _port_counters() -> tuple[list[dict], bool, Optional[float]]:
-        """Снимок счётчиков по портам — уже в памяти, его наполняет фоновый семплер.
+    def _traffic_counters() -> tuple[tuple, tuple]:
+        """Снимки счётчиков по портам и по IP — уже в памяти, их наполняет фоновый семплер.
 
         Перехват широкий по той же причине, что и у температур: /api/metrics —
-        единственный признак живости ноды, и учёт по портам не стоит того,
-        чтобы из-за него сервер уходил в offline.
+        единственный признак живости ноды, и учёт по портам и адресам не стоит
+        того, чтобы из-за него сервер уходил в offline.
         """
         try:
-            return get_port_traffic_sampler().snapshot()
+            sampler = get_traffic_counter_sampler()
+            return sampler.snapshot(), sampler.ip_snapshot()
         except Exception as e:
-            logger.error(f"Port traffic snapshot unavailable: {e}")
-            return [], False, None
+            logger.error(f"Traffic counter snapshot unavailable: {e}")
+            return ([], False, None), ([], False, None)
 
     def get_processes_info(self, top_n: int = 10) -> dict:
         """Get process statistics and top processes with caching to avoid blocking"""

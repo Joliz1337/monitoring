@@ -6,6 +6,7 @@ The whole fleet on one screen: what is online, where load is rising, what went d
 
 - **Fleet summary on top** — total CPU, RAM and network speed across online servers. CPU is weighted by core count, so 100% on an eight-core node counts for more than on a dual-core one. Offline servers are excluded so stale numbers don't inflate the totals. Click a tile to expand a chart of that metric across the whole fleet — over an hour, a day, a week, a month or a year; click again to collapse.
 - **Server card** — status, CPU, RAM, disk, network speed, load average, IP (click copies it).
+- **Server note** — the pencil to the right of the IP opens a field for a short label (up to 40 characters). Enter or clicking away saves it, Esc cancels, an empty field removes the note. Notes are stored in the panel and visible to every administrator.
 - **Folders** — grouping for cards, collapsible to save space.
 - **Counters next to the server count** — online, offline and disabled. Click a counter to show only those servers, click it again to show all. Disabled servers appear on the dashboard only this way.
 - Clicking a card opens server details with charts, processes and a terminal.

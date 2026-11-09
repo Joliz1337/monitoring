@@ -10,6 +10,7 @@
 """
 
 import base64
+import json
 import os
 import sys
 import unittest
@@ -21,6 +22,9 @@ from app.services.xray_test.export import (  # noqa: E402
     as_subscription,
     working_links,
 )
+from app.services.xray_test.errors import LinkParseError  # noqa: E402
+from app.services.xray_test.models import Protocol, ProxyEndpoint  # noqa: E402
+from app.services.xray_test.parsers import json_config, parse_link  # noqa: E402
 from app.services.xray_test.sanitize import (  # noqa: E402
     mask_secret,
     sanitize_link,
@@ -135,6 +139,68 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(len(lines), 5)
         self.assertIn("Протокол", lines[0])
         self.assertIn("ok", lines[1])
+
+
+class EndpointFieldValidationTest(unittest.TestCase):
+    """Адрес, SNI и имя из ссылки попадают в задание ноды: управляющие символы недопустимы."""
+
+    def test_control_chars_in_address_rejected(self):
+        for char in ("\n", "\t", "\r", "\x00", "\x7f", " "):
+            with self.subTest(char=char):
+                with self.assertRaises(LinkParseError):
+                    ProxyEndpoint(Protocol.VLESS, f"host{char}x.io", 443)
+
+    def test_control_chars_in_sni_rejected(self):
+        for encoded in ("%0A", "%09"):
+            with self.subTest(encoded=encoded):
+                with self.assertRaises(LinkParseError):
+                    parse_link(f"vless://{UUID}@h.io:443?security=tls&sni=a{encoded}b.io")
+
+    def test_control_chars_in_transport_host_rejected(self):
+        with self.assertRaises(LinkParseError):
+            parse_link(f"vless://{UUID}@h.io:443?type=ws&host=a%0Ab.io")
+
+    def test_transport_host_list_passes(self):
+        endpoint = parse_link(f"vless://{UUID}@h.io:443?type=ws&host=a.com,%20b.com")
+        self.assertEqual(endpoint.transport.host, "a.com, b.com")
+
+    def test_control_char_inside_host_list_rejected(self):
+        for bad in ("a.com,%09b.com", "a.com%0A,b.com", "a.com,b.com%09"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(LinkParseError):
+                    parse_link(f"vless://{UUID}@h.io:443?type=ws&host={bad}")
+
+    def test_control_chars_in_remark_rejected(self):
+        with self.assertRaises(LinkParseError):
+            parse_link(f"vless://{UUID}@h.io:443?security=tls#na%0Ame")
+
+    def test_overlong_host_rejected(self):
+        with self.assertRaises(LinkParseError):
+            parse_link(f"vless://{UUID}@{'a' * 254}:443?security=tls")
+
+    def test_punycode_and_underscore_hosts_pass(self):
+        endpoint = parse_link(f"vless://{UUID}@xn--80ak6aa92e.xn--p1ai:443?security=tls&sni=my_host-1.example.io")
+        self.assertEqual(endpoint.address, "xn--80ak6aa92e.xn--p1ai")
+        self.assertEqual(endpoint.tls.sni, "my_host-1.example.io")
+
+    def test_bracketed_ipv6_passes(self):
+        endpoint = parse_link(f"vless://{UUID}@[2001:db8::1]:443?security=tls")
+        self.assertEqual(endpoint.port, 443)
+
+    def test_unicode_hostname_and_remark_pass(self):
+        endpoint = parse_link(f"vless://{UUID}@пример.рф:443?security=tls#Германия 1")
+        self.assertEqual(endpoint.address, "пример.рф")
+
+    def test_json_import_skips_outbound_with_bad_address(self):
+        def outbound(address: str) -> dict:
+            return {
+                "protocol": "vless",
+                "settings": {"vnext": [{"address": address, "port": 443, "users": [{"id": UUID}]}]},
+            }
+
+        text = json.dumps({"outbounds": [outbound("bad\nhost.io"), outbound("good.io")]})
+        endpoints, _ = json_config.parse_config(text)
+        self.assertEqual([e.address for e in endpoints], ["good.io"])
 
 
 if __name__ == "__main__":

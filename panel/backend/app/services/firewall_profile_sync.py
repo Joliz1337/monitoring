@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session, async_session_maker
 from app.models import Server, FirewallProfile, FirewallSyncLog
+from app.services.firewall_proxy_guard import proxy_lockout_message
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_apply_client, node_auth_headers
 from app.services.node_capabilities import Capability, denied_message, server_allows
@@ -145,6 +146,10 @@ async def _sync_single_server(
     }
 
     async with async_session_maker() as db:
+        lockout = await proxy_lockout_message(server, rules, default_in)
+        if lockout:
+            return await _log_failure(db, server, profile_id, lockout, rules_hash)
+
         try:
             client = get_node_apply_client(server)
             response = await client.post(

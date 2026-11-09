@@ -10,15 +10,15 @@
 #
 # Emergency rules live in a dedicated ANTIDDOS chain jumped from INPUT only while
 # active. A firewall-profile apply does `ufw --force reset` which flushes INPUT —
-# the loop re-adds the jump within one cycle (self-heal). Ports 22 and 9100 are
-# never dropped. Client ports are auto-detected (ss), never hardcoded.
+# the loop re-adds the jump within one cycle (self-heal). SSH is never dropped;
+# the node API port 9100 is let in by the whitelist only. Client ports are auto-detected (ss), never hardcoded.
 #
 
 set -u
 
 # Bumped when the script logic changes — the panel compares this against what a
 # node reports and auto-reinstalls on drift, so updates roll out without clicks.
-WATCHDOG_VERSION="2.4.0"
+WATCHDOG_VERSION="2.5.0"
 
 STATE_DIR="/opt/monitoring/antiddos"
 STATE_FILE="$STATE_DIR/state.json"
@@ -47,7 +47,10 @@ NEWRATE=60                  # max new conns/sec per source (tier-2, emergency)
 NEWBURST=240                # burst for the rate limiter
 HL_MAX=262144               # hashlimit hash table size
 HASHLIMIT_SRCMASK=32        # 24 helps against a /24 botnet, hurts CGNAT
-NEVER_DROP_PORTS="9100 7500"  # node API (nginx + uvicorn); SSH port auto-detected
+NODE_API_PORT_DEFAULT=9100  # nginx mTLS; let in by the whitelist only, no ACCEPT of its own
+AGENT_SOCKET=/run/monitoring-node/api.sock  # агент ноды текущей версии
+AGENT_LOOPBACK_PORT=7500    # агент нод старых версий; ACCEPT только с петли
+LOOPBACK_NET="127.0.0.0/8"
 
 # detection thresholds (conservative — must not fire on a legit evening peak)
 CONNTRACK_DROP_DELTA=50     # insert_failed growth/cycle → strong (table full, dropping)
@@ -69,9 +72,10 @@ HYSTERESIS=900              # auto-disable after this many seconds with no signa
 SYNPROXY_WSCALE=7
 SYNPROXY_MSS=1460
 
-# Self-confirm: if the node API stops answering on loopback this many cycles in
-# a row while emergency mode is on, tear the chain down. A rule bug must not be
-# able to leave the box unreachable until someone notices.
+# Self-confirm: if the node API stops answering and no SSH session is alive this
+# many cycles in a row while auto-triggered emergency mode is on, tear the chain
+# down. A rule bug must not be able to leave the box unreachable until someone
+# notices. A manual pin is kept — see safety_net_cleared.
 SELF_CONFIRM_FAILS=3
 
 # Перечитывается КАЖДЫЙ цикл, а не только при старте. tune-sysctl.sh считает
@@ -156,17 +160,21 @@ detect_ssh_ports() {
 }
 
 # The node's mTLS-nginx may listen on a custom port (NODE_API_PORT in the
-# node's .env) — without it in never-drop, emergency mode would rate-limit
-# the panel itself on such nodes.
+# node's .env) — it has to stay out of the rate-limited client ports, or
+# emergency mode would throttle the panel on such nodes.
 detect_node_api_port() {
     grep -s '^NODE_API_PORT=' /opt/monitoring-node/.env 2>/dev/null \
         | head -1 | cut -d= -f2 | tr -dc '0-9'
 }
 
-# Management ports (static) + configured node API port + auto-detected SSH
-# port(s) — never rate-limited.
+node_api_ports() {
+    printf '%s\n' "$NODE_API_PORT_DEFAULT" $(detect_node_api_port) | grep -E '^[0-9]+$' | sort -un
+}
+
+# Node API ports + agent port + auto-detected SSH port(s) — never rate-limited
+# and never SYNPROXYed. That is not the same as ACCEPT: see build_chain.
 effective_never_drop() {
-    printf '%s\n' $NEVER_DROP_PORTS $(detect_node_api_port) $(detect_ssh_ports) | grep -E '^[0-9]+$' | sort -un
+    printf '%s\n' $(node_api_ports) "$AGENT_LOOPBACK_PORT" $(detect_ssh_ports) | grep -E '^[0-9]+$' | sort -un
 }
 
 # Listening TCP ports on non-loopback addresses, minus the never-drop set.
@@ -301,11 +309,16 @@ build_chain() {
     # 3. keep established traffic flowing untouched (~99% of packets exit here)
     ipt -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-    # 4. never touch SSH (auto-detected port) / node API — BEFORE any DROP
+    # 4. never touch SSH (auto-detected port) — BEFORE any DROP. The node API
+    #    ports get no ACCEPT of their own: the panel gets in through the
+    #    whitelist above, everyone else falls through to INPUT/UFW untouched
+    #    (these ports are outside the rate-limited client ports). The agent port
+    #    is open to loopback only.
     local p
-    for p in $(effective_never_drop); do
+    for p in $(detect_ssh_ports); do
         ipt -A "$CHAIN" -p tcp --dport "$p" -j ACCEPT
     done
+    ipt -A "$CHAIN" -s "$LOOPBACK_NET" -p tcp --dport "$AGENT_LOOPBACK_PORT" -j ACCEPT
 
     [ -z "$ports" ] && return 0
 
@@ -399,19 +412,60 @@ clear_rules() {
 
 # Emergency mode inserts a chain at INPUT position 1. If a rule bug there ever
 # cuts the box off, nobody can log in to fix it — so the loop proves the node is
-# still reachable on its own API and tears the chain down after
-# SELF_CONFIRM_FAILS consecutive failures. Cheap, no new units, self-healing.
-self_confirm_ok() {
-    curl -sf --max-time 3 http://127.0.0.1:7500/health >/dev/null 2>&1 && return 0
+# still reachable on its own API and tears an auto-triggered chain down after
+# SELF_CONFIRM_FAILS consecutive failures (safety_net_cleared). Cheap, no new
+# units, self-healing.
+#
+# Печатает, чем подтверждена связь; код 1 — ничем. Сторож панель берёт с GitHub
+# своего канала, а версия ноды может быть любой: агент текущей ноды слушает
+# сокет, старой — порт на петле.
+reachable_via() {
+    if curl -sf --max-time 3 --unix-socket "$AGENT_SOCKET" http://localhost/health >/dev/null 2>&1; then
+        echo "agent via unix socket"
+        return 0
+    fi
+    if curl -sf --max-time 3 "http://127.0.0.1:$AGENT_LOOPBACK_PORT/health" >/dev/null 2>&1; then
+        echo "agent via 127.0.0.1:$AGENT_LOOPBACK_PORT (node of an older version)"
+        return 0
+    fi
     # Fall back to "is any SSH session still established" — on a node where the
     # API is legitimately down we must not tear down protection for that alone.
+    # Без -H ss печатает заголовок и при пустом списке соединений.
     local p
     for p in $(detect_ssh_ports); do
-        if ss -tn state established "( sport = :$p )" 2>/dev/null | grep -q ':'; then
+        if ss -Htn state established "( sport = :$p )" 2>/dev/null | grep -q .; then
+            echo "live SSH session only (agent /health unreachable)"
             return 0
         fi
     done
     return 1
+}
+
+self_confirm_ok() { reachable_via >/dev/null; }
+
+# Страховка, раз в цикл; код 0 — цепочка снята. Ручной пин не снимается: его
+# ставит и снимает админ, SSH цепочка не режет никогда, а агент молчит ~30 с и
+# при обычном обновлении ноды или рестарте docker — снимать из-за этого защиту
+# посреди атаки нельзя. Автоматический режим детект включит снова сам.
+safety_net_cleared() {
+    if [ "$MODE" != "on" ] || self_confirm_ok; then
+        save_prev confirm_fails 0
+        return 1
+    fi
+    local cf; cf=$(read_prev confirm_fails)
+    cf=$(( ${cf:-0} + 1 ))
+    save_prev confirm_fails "$cf"
+    [ "$cf" -ge "$SELF_CONFIRM_FAILS" ] 2>/dev/null || return 1
+    if [ "$SOURCE" = "manual" ]; then
+        # Одна запись на весь простой, а не на каждый цикл
+        [ "$cf" -eq "$SELF_CONFIRM_FAILS" ] \
+            && log "node unreachable for $cf cycles — manual pin kept, only the operator lifts it"
+        return 1
+    fi
+    log "node unreachable for $cf cycles with emergency mode on — clearing rules"
+    disable_mode
+    save_prev confirm_fails 0
+    return 0
 }
 
 # self-heal: while active, guarantee the chain+jump survive a foreign ufw reset
@@ -690,22 +744,8 @@ run_loop() {
         read_state
         sample_signals
 
-        # Reachability check runs for ANY active emergency mode, manual pins
-        # included: a manual pin with a bad ruleset locks you out just as hard.
-        if [ "$MODE" = "on" ]; then
-            if self_confirm_ok; then
-                save_prev confirm_fails 0
-            else
-                local cf; cf=$(read_prev confirm_fails)
-                cf=$(( ${cf:-0} + 1 ))
-                save_prev confirm_fails "$cf"
-                if [ "$cf" -ge "$SELF_CONFIRM_FAILS" ] 2>/dev/null; then
-                    log "node unreachable for $cf cycles with emergency mode on — clearing rules"
-                    disable_mode
-                    save_prev confirm_fails 0
-                    sleep "$INTERVAL"; continue
-                fi
-            fi
+        if safety_net_cleared; then
+            sleep "$INTERVAL"; continue
         fi
 
         # manual pin: only self-heal, never auto-toggle
@@ -752,6 +792,37 @@ run_loop() {
     done
 }
 
+# Proves the never-drop contract on a rule listing (`iptables -S` or dry-run
+# output): no ACCEPT for the node API ports, the agent port only from loopback,
+# an unconditional ACCEPT for every SSH port.
+audit_never_drop() {
+    local rules=$1 failed=0 line port p node_ports ssh_ports ssh_open=" "
+    node_ports=" $(node_api_ports | tr '\n' ' ') "
+    ssh_ports=" $(detect_ssh_ports) "
+
+    while read -r line; do
+        [[ $line == *"-j ACCEPT"* && $line =~ --dport[[:space:]]+([0-9]+) ]] || continue
+        port=${BASH_REMATCH[1]}
+        if [[ $ssh_ports == *" $port "* ]]; then
+            [[ $line == *" -s "* ]] || ssh_open+="$port "
+        elif [[ $node_ports == *" $port "* ]]; then
+            echo "self-test: FAIL  unconditional ACCEPT for node API port $port"
+            failed=1
+        elif [ "$port" = "$AGENT_LOOPBACK_PORT" ] && [[ "$line " != *" -s $LOOPBACK_NET "* ]]; then
+            echo "self-test: FAIL  ACCEPT for port $port not limited to $LOOPBACK_NET"
+            failed=1
+        fi
+    done <<< "$rules"
+
+    for p in $ssh_ports; do
+        [[ $ssh_open == *" $p "* ]] && continue
+        echo "self-test: FAIL  no unconditional ACCEPT for SSH port $p"
+        failed=1
+    done
+    [ "$failed" = 0 ] && echo "self-test: OK  never-drop: no node API ACCEPT, agent port loopback-only, SSH open"
+    return $failed
+}
+
 # Structural proof that the SYNPROXY ordering fix is actually in place. A
 # passing curl proves nothing here — it also passes when SYNPROXY is silently
 # absent — so assert on the rule positions and on the raw/filter pairing.
@@ -763,6 +834,8 @@ do_self_test() {
         echo "self-test: chain $CHAIN not present (emergency mode off) — nothing to check"
         return 0
     fi
+
+    audit_never_drop "$(iptables -S "$CHAIN" 2>/dev/null)" || ok=1
 
     local syn_line inv_line
     syn_line=$(printf '%s\n' "$out" | awk '/SYNPROXY/{print $1; exit}')
@@ -817,13 +890,26 @@ case "${1:-loop}" in
     selfheal)        read_state; [ "$MODE" = "on" ] && selfheal ;;
     whitelist-sync)  whitelist_sync ;;
     detect-ports)    ports_csv ;;
-    dry-run)         read_state; DRYRUN=1; build_chain; echo "iptables -I INPUT 1 -j $CHAIN" ;;
+    dry-run)
+        read_state; DRYRUN=1
+        dry_rules=$(build_chain)
+        printf '%s\n' "$dry_rules"
+        echo "iptables -I INPUT 1 -j $CHAIN"
+        audit_never_drop "$dry_rules" ;;
+    audit-rules)     audit_never_drop "$(cat)" ;;
     self-test)       do_self_test ;;
+    self-check)
+        if via=$(reachable_via); then
+            echo "self-check: OK  $via"
+        else
+            echo "self-check: FAIL  agent /health unreachable and no live SSH session"
+            exit 1
+        fi ;;
     version)         echo "$WATCHDOG_VERSION" ;;
     status)
         ensure_dirs; read_state
         r=$(printf '%s' "$REASON" | tr -d '"\\')
         printf '{"mode":"%s","source":"%s","since":%s,"reason":"%s","watchdog":"%s","version":"%s"}\n' \
             "$MODE" "$SOURCE" "${SINCE:-0}" "$r" "$WATCHDOG" "$WATCHDOG_VERSION" ;;
-    *)               echo "usage: $0 {loop|enable-manual|disable-manual|watchdog-on|watchdog-off|apply|clear|selfheal|whitelist-sync|detect-ports|dry-run|self-test|version|status}" >&2; exit 1 ;;
+    *)               echo "usage: $0 {loop|enable-manual|disable-manual|watchdog-on|watchdog-off|apply|clear|selfheal|whitelist-sync|detect-ports|dry-run|audit-rules|self-test|self-check|version|status}" >&2; exit 1 ;;
 esac

@@ -45,6 +45,14 @@ class DeployCommandTests(unittest.TestCase):
         command = build_install_command(params())
         self.assertIn("MON_LANG=en", command)
 
+    def test_known_commit_lets_installer_verify_mirror(self):
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        command = build_install_command(params(expected_commit=sha))
+        self.assertIn(f"MON_EXPECTED_COMMIT={sha}", command)
+
+    def test_unknown_commit_leaves_installer_without_mirror(self):
+        self.assertNotIn("MON_EXPECTED_COMMIT", build_install_command(params()))
+
 
 class TunnelCommandTests(unittest.TestCase):
     """Установка через панель: сервер за ТСПУ качает и сам install.sh, и всё

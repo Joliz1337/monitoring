@@ -1,7 +1,8 @@
 """Server Monitoring Agent API — Main Application
 
 Nginx на порту 9100 требует клиентский сертификат (mTLS), подписанный панельным CA.
-Uvicorn слушает только 127.0.0.1:7500 и доверяет прошедшим mTLS запросам от nginx.
+Uvicorn слушает только локальный сокет /run/monitoring-node/api.sock (docker-compose.yml)
+и доверяет прошедшим mTLS запросам от nginx.
 """
 
 import asyncio
@@ -15,17 +16,20 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app.capabilities import CapabilityMiddleware, get_policy
 from app.config import get_settings
-from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat, network, exit_proxy, source_pool, hoster_access, loss_probe as loss_probe_router
-from app.services.port_traffic_sampler import get_port_traffic_sampler
+from app.routers import haproxy, metrics, traffic, system, ipset, remnawave, ssh, ssl, firewall_profile, antiddos, dnat, network, exit_proxy, source_pool, hoster_access, gre, loss_probe as loss_probe_router
+from app.services.metrics_collector import get_collector
+from app.services.traffic_counter_sampler import get_traffic_counter_sampler
 from app.services.rate_sampler import get_rate_sampler
 from app.services.ipset_manager import get_ipset_manager
 from app.services.dnat_manager import get_dnat_manager
 from app.services.bandwidth_limit import get_bandwidth_limiter
 from app.services.extra_ips import get_extra_ip_manager
 from app.services.nic_routing import get_nic_routing_manager
+from app.services.gre_tunnels import get_gre_manager
 from app.services.exit_proxy.manager import get_exit_proxy_manager
 from app.services.source_pool import get_source_pool_manager
 from app.services.loss_probe import get_loss_probe
+from app.services.nat_addresses import get_nat_address_probe
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,13 +61,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Silent-drop RST guard restore failed, scanners may fill conntrack: {e}", exc_info=True)
 
-    port_sampler = get_port_traffic_sampler()
+    from app.services.haproxy_runtime_weights import get_runtime_weights
+    runtime_weights = get_runtime_weights()
     try:
-        await port_sampler.init()
-        await port_sampler.start()
-        logger.info("Port traffic sampler started")
+        await runtime_weights.start()
     except Exception as e:
-        logger.error(f"Port traffic sampler init failed, per-port counters stay empty: {e}", exc_info=True)
+        logger.error(f"Runtime weights expiry start failed, panel weights may outlive the panel: {e}", exc_info=True)
+
+    counter_sampler = get_traffic_counter_sampler()
+    try:
+        await counter_sampler.init(address_source=get_collector().accounted_ipv4_addresses)
+        await counter_sampler.start()
+    except Exception as e:
+        logger.error(f"Traffic counter sampler init failed, port and IP counters stay empty: {e}", exc_info=True)
 
     ipset_manager = get_ipset_manager()
     try:
@@ -96,6 +106,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"NIC routing start failed, the host service may run an outdated script: {e}", exc_info=True)
 
+    try:
+        await get_gre_manager().start()
+    except Exception as e:
+        logger.error(f"GRE tunnels start failed, the host service may run an outdated script: {e}", exc_info=True)
+
     exit_proxy_manager = get_exit_proxy_manager()
     try:
         await exit_proxy_manager.start()
@@ -113,6 +128,12 @@ async def lifespan(app: FastAPI):
         await loss_probe.start()
     except Exception as e:
         logger.error(f"Loss probe start failed, backend loss is not measured: {e}", exc_info=True)
+
+    nat_address_probe = get_nat_address_probe()
+    try:
+        await nat_address_probe.start(address_source=get_collector().accounted_ipv4_addresses)
+    except Exception as e:
+        logger.error(f"NAT address probe start failed, public addresses behind NAT stay unknown: {e}", exc_info=True)
 
     from app.services import cpu_affinity
     from app.services.host_executor import get_host_executor
@@ -139,13 +160,17 @@ async def lifespan(app: FastAPI):
     yield
 
     try:
-        await port_sampler.stop()
+        await counter_sampler.stop()
     except Exception as e:
-        logger.error(f"Port traffic sampler stop failed: {e}", exc_info=True)
+        logger.error(f"Traffic counter sampler stop failed: {e}", exc_info=True)
     try:
         await rate_sampler.stop()
     except Exception as e:
         logger.error(f"Rate sampler stop failed: {e}", exc_info=True)
+    try:
+        await runtime_weights.stop()
+    except Exception as e:
+        logger.error(f"Runtime weights expiry stop failed: {e}", exc_info=True)
     try:
         await affinity_sync.stop()
     except Exception as e:
@@ -170,6 +195,10 @@ async def lifespan(app: FastAPI):
         await loss_probe.stop()
     except Exception as e:
         logger.error(f"Loss probe stop failed: {e}", exc_info=True)
+    try:
+        await nat_address_probe.stop()
+    except Exception as e:
+        logger.error(f"NAT address probe stop failed: {e}", exc_info=True)
     try:
         await extra_ip_manager.stop()
     except Exception as e:
@@ -212,6 +241,7 @@ app.include_router(network.router)
 app.include_router(exit_proxy.router)
 app.include_router(source_pool.router)
 app.include_router(hoster_access.router)
+app.include_router(gre.router)
 app.include_router(loss_probe_router.router)
 
 

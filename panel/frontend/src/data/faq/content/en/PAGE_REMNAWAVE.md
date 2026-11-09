@@ -1,12 +1,13 @@
 # Remnawave
 
-Integration with the Remnawave panel: connection statistics, user devices and anomaly detection. Data comes straight from the Remnawave API; node agents aren't involved.
+Integration with the Remnawave panel: where clients connect from, their devices and anomaly detection. Data comes straight from the Remnawave API; node agents aren't involved.
 
 ## What's on the page
 
-- Summary: unique users, addresses and devices.
-- Top users, filterable by subscription status and by a specific address.
-- User card: which addresses they connected from and which devices are registered.
+- **Overview** — summary, nodes, the client map and the IP table: activity, user, node, city, provider. The table shows what's currently visible on the map; clicking a node keeps only its clients, clicking a table row opens the user card.
+- **Map** — countries from afar, cities closer in. Circle size is how many clients are online now, color compares with the same hour yesterday: yellow — noticeably fewer, red — far fewer, red outline — there were clients yesterday and none now. Clicking a city fans out its clients, clicking a dot opens the IP card.
+- **Users** — the user card with a mini map: where they connect from now and before, through which nodes, which providers, and their traffic over the last 24 hours.
+- **Route** — a button next to the IP in the table and in the card. The node the client is connected to traces the route to their address, and the map draws the traffic path through the cities where the routers are. A leg whose latency is higher than the distance explains is highlighted yellow or red — that shows where time is lost on the way. The Remnawave node has to be added to the panel as a server.
 - Connection settings and the ignore list.
 
 ## Anomalies
@@ -41,7 +42,8 @@ Add your own app as a single line like `MyApp/`. Clear the field and save to res
 
 ## Good to know
 
-- The user list is cached and refreshed roughly every half hour; connection statistics are rebuilt on their own interval and fully replaced — it's a snapshot of "now", not accumulated history.
+- The user list is cached and refreshed roughly every half hour; "online" is the latest collection snapshot, while IP history is kept for as many days as set in the settings (30 by default).
+- Cities come from the free DB-IP database, which the panel updates monthly on its own. Accuracy is city level, sometimes only region; mobile carriers often place a client in another city. Clients connecting through your relays show up with the relay's address, so their location is unknown.
 - Empty statistics? Verify the API address and token with the connection test button.
 - Users who shouldn't raise anomalies (your test accounts, shared subscriptions) belong in the ignore list.
 - This page only observes: torrent bans are handled by the blocker page.

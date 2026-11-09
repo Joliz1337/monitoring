@@ -555,9 +555,7 @@ NODE_CAPABILITIES=readonly,haproxy    # всё только на чтение, H
 
 ## Что нового
 
-История изменений простым языком — в [CHANGES.md](CHANGES.md): что изменилось, что это даёт и нужно ли что-то делать после обновления.
-
-Задать вопрос, пообщаться и следить за анонсами обновлений можно в [Telegram-сообществе](https://t.me/+IClul20AJ7Y5MTFi). Идеи и баги также welcome в [Issues](https://github.com/Joliz1337/monitoring/issues).
+Анонсы обновлений — что изменилось и нужно ли что-то делать после обновления — выходят в [Telegram-сообществе](https://t.me/+IClul20AJ7Y5MTFi). Там же можно задать вопрос и пообщаться. Идеи и баги также welcome в [Issues](https://github.com/Joliz1337/monitoring/issues).
 
 ## Документация
 

@@ -116,6 +116,9 @@ class DeployParams:
     # Сервер без доступа к GitHub/реестрам (ТСПУ): всё качается через панель по
     # SSH-туннелю, прокси на сервере живёт только на время установки
     via_panel: bool = False
+    # Коммит ветки по данным GitHub: с ним install.sh может взять код с зеркала,
+    # сверив клон; без него зеркало не используется
+    expected_commit: str | None = None
 
 
 def _generate_strong_password(length: int = 20) -> str:
@@ -213,6 +216,8 @@ def build_install_command(params: DeployParams, tunnel_proxy: str | None = None)
     }
     if update_channel.current_branch() != update_channel.STABLE_BRANCH:
         env["MON_BRANCH"] = update_channel.current_branch()
+    if params.expected_commit:
+        env["MON_EXPECTED_COMMIT"] = params.expected_commit
     if params.panel_ip:
         env["PANEL_IP"] = params.panel_ip
     if params.node_api_port != 9100:
