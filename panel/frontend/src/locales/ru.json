@@ -149,8 +149,7 @@
     "folder_chart_cpu": "CPU папки",
     "folder_chart_memory": "Память папки",
     "folder_chart_network": "Скорость сети папки",
-    "folder_chart_hint": "Нажмите — график за период",
-    "folder_chart_button": "График нагрузки папки"
+    "folder_chart_hint": "Нажмите — график за период"
   },
   "servers": {
     "title": "Серверы",

@@ -30,7 +30,7 @@ import { useFolderBoard, FOLDER_SORTABLE_PREFIX } from '../hooks/useFolderBoard'
 import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import ServerCard, { ServerCardOverlay } from '../components/Dashboard/ServerCard'
 import FleetSummary from '../components/Dashboard/FleetSummary'
-import { FolderChartButton, FolderLoadBadges, FolderLoadChart, FolderStatusCounts } from '../components/Dashboard/FolderStats'
+import { FolderLoadBadges, FolderLoadChart, FolderStatusCounts } from '../components/Dashboard/FolderStats'
 import type { LoadMetric } from '../components/Dashboard/LoadHistoryPanel'
 import { SortableFolder, UnfolderDropZone, FolderDragPreview } from '../components/folders/SortableFolder'
 import { FolderDialogs } from '../components/folders/FolderDialogs'
@@ -66,14 +66,14 @@ export default function Dashboard() {
   const [collapsed, toggleCollapsed] = useCollapsedFolders(COLLAPSED_KEY)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter | null>(null)
-  // Открытый график каждой папки; папки без ключа — график закрыт
+  // Открытый график каждой папки; повторный клик по тому же бейджу его закрывает
   const [folderCharts, setFolderCharts] = useState<Record<string, LoadMetric>>({})
 
-  const setFolderChart = useCallback((folder: string, metric: LoadMetric | null) => {
+  const toggleFolderChart = useCallback((folder: string, metric: LoadMetric) => {
     setFolderCharts(prev => {
       const next = { ...prev }
-      if (metric) next[folder] = metric
-      else delete next[folder]
+      if (next[folder] === metric) delete next[folder]
+      else next[folder] = metric
       return next
     })
   }, [])
@@ -361,7 +361,7 @@ export default function Dashboard() {
                   const folderServers = grouped.get(folderName) || []
                   const folderActiveServers = activeGrouped.get(folderName) ?? NO_SERVERS
                   const folderChart = folderCharts[folderName] ?? null
-                  const onChartChange = (metric: LoadMetric | null) => setFolderChart(folderName, metric)
+                  const onChartToggle = (metric: LoadMetric) => toggleFolderChart(folderName, metric)
                   return (
                     <SortableFolder
                       key={folderName}
@@ -376,7 +376,7 @@ export default function Dashboard() {
                         <FolderLoadBadges
                           servers={folderActiveServers}
                           chart={folderChart}
-                          onChartChange={onChartChange}
+                          onChartToggle={onChartToggle}
                           className="hidden sm:flex flex-shrink-0 ml-1.5"
                         />
                       }
@@ -385,21 +385,11 @@ export default function Dashboard() {
                         <FolderLoadBadges
                           servers={folderActiveServers}
                           chart={folderChart}
-                          onChartChange={onChartChange}
+                          onChartToggle={onChartToggle}
                           className="sm:hidden basis-full pl-7"
                         />
                       }
-                      actions={
-                        <FolderChartButton servers={folderActiveServers} chart={folderChart} onChartChange={onChartChange} />
-                      }
-                      panel={
-                        <FolderLoadChart
-                          servers={folderActiveServers}
-                          folder={folderName}
-                          chart={folderChart}
-                          onChartChange={onChartChange}
-                        />
-                      }
+                      panel={<FolderLoadChart servers={folderActiveServers} folder={folderName} chart={folderChart} />}
                     >
                       {folderServers.length > 0 ? (
                         <SortableContext items={folderServers.map(s => s.id)} strategy={rectSortingStrategy}>

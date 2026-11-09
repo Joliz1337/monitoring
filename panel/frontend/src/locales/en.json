@@ -145,8 +145,7 @@
     "folder_chart_cpu": "Folder CPU",
     "folder_chart_memory": "Folder memory",
     "folder_chart_network": "Folder network speed",
-    "folder_chart_hint": "Click for the history chart",
-    "folder_chart_button": "Folder load chart"
+    "folder_chart_hint": "Click for the history chart"
   },
   "servers": {
     "title": "Servers",

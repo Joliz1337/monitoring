@@ -1,5 +1,5 @@
 import { memo, useMemo, type ReactNode } from 'react'
-import { Cpu, LineChart, MemoryStick, Network, PowerOff, Wifi, WifiOff } from 'lucide-react'
+import { Cpu, MemoryStick, Network, PowerOff, Wifi, WifiOff } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { ServerWithMetrics } from '../../stores/serversStore'
 import { summarizeLoad } from '../../utils/fleetLoad'
@@ -84,28 +84,28 @@ function FolderStatusCountsInner({ servers, disabled = 0 }: { servers: ServerWit
   )
 }
 
-interface FolderChartProps {
+interface FolderLoadBadgesProps {
   servers: ServerWithMetrics[]
-  /** Открытый график папки, null — закрыт */
+  /** Открытый график папки — его бейдж подсвечен */
   chart: LoadMetric | null
-  onChartChange: (metric: LoadMetric | null) => void
+  onChartToggle: (metric: LoadMetric) => void
+  className?: string
 }
 
-function FolderLoadBadgesInner({ servers, chart, onChartChange, className = '' }: FolderChartProps & { className?: string }) {
+function FolderLoadBadgesInner({ servers, chart, onChartToggle, className = '' }: FolderLoadBadgesProps) {
   const { t } = useTranslation()
   const load = useMemo(() => summarizeLoad(servers), [servers])
   if (!load) return null
 
   const scope = <div className="text-dark-400">{t('dashboard.fleet_chart_scope', { count: load.count })}</div>
   const hint = <div className="text-dark-500">{t('dashboard.folder_chart_hint')}</div>
-  const toggle = (metric: LoadMetric) => onChartChange(chart === metric ? null : metric)
 
   return (
     <span className={`flex flex-wrap items-center gap-1 ${className}`}>
       <ChartBadge
         tooltip={<>{t('common.cpu')} · {t('common.cores_count', { count: load.cores })}{scope}{hint}</>}
         isActive={chart === 'cpu'}
-        onClick={() => toggle('cpu')}
+        onClick={() => onChartToggle('cpu')}
       >
         <Cpu className="w-3.5 h-3.5 text-accent-400" />
         <span className={loadTone(load.cpuPercent)}>{load.cpuPercent.toFixed(0)}%</span>
@@ -113,7 +113,7 @@ function FolderLoadBadgesInner({ servers, chart, onChartChange, className = '' }
       <ChartBadge
         tooltip={<>{t('common.ram')} · {formatBytes(load.ramUsed, 0)} / {formatBytes(load.ramTotal, 0)}{scope}{hint}</>}
         isActive={chart === 'memory'}
-        onClick={() => toggle('memory')}
+        onClick={() => onChartToggle('memory')}
       >
         <MemoryStick className="w-3.5 h-3.5 text-purple" />
         <span className={loadTone(load.ramPercent)}>{load.ramPercent.toFixed(0)}%</span>
@@ -121,7 +121,7 @@ function FolderLoadBadgesInner({ servers, chart, onChartChange, className = '' }
       <ChartBadge
         tooltip={<>{t('common.download')} / {t('common.upload')}{scope}{hint}</>}
         isActive={chart === 'network'}
-        onClick={() => toggle('network')}
+        onClick={() => onChartToggle('network')}
       >
         <Network className="w-3.5 h-3.5 text-dark-400" />
         <span className="text-success">↓ {formatBitsPerSecLocalized(load.rx, t)}</span>
@@ -131,42 +131,19 @@ function FolderLoadBadgesInner({ servers, chart, onChartChange, className = '' }
   )
 }
 
-/** Явная кнопка графика: по бейджам загрузки не видно, что они нажимаются */
-function FolderChartButtonInner({ servers, chart, onChartChange }: FolderChartProps) {
-  const { t } = useTranslation()
-  const load = useMemo(() => summarizeLoad(servers), [servers])
-  if (!load) return null
-
-  const isOpen = chart !== null
-  const label = t('dashboard.folder_chart_button')
-
-  return (
-    <Tooltip label={label}>
-      <button
-        type="button"
-        onClick={() => onChartChange(isOpen ? null : 'cpu')}
-        aria-expanded={isOpen}
-        aria-label={label}
-        className={`p-1.5 transition rounded-lg ${
-          isOpen ? 'text-accent-400 bg-accent-500/10' : 'text-dark-500 hover:text-dark-300 hover:bg-dark-800/50'
-        }`}
-      >
-        <LineChart className="w-4 h-4" />
-      </button>
-    </Tooltip>
-  )
-}
-
 /** История нагрузки папки — тот же график, что под плитками парка */
-function FolderLoadChartInner({ servers, folder, chart, onChartChange }: FolderChartProps & { folder: string }) {
+function FolderLoadChartInner({ servers, folder, chart }: {
+  servers: ServerWithMetrics[]
+  folder: string
+  chart: LoadMetric | null
+}) {
   const load = useMemo(() => summarizeLoad(servers), [servers])
-  // Ни одного сервера онлайн — нет и кнопок, которыми график закрывается
+  // Ни одного сервера онлайн — нет и бейджей, которыми график закрывается
   if (!load) return null
 
   return (
     <LoadHistoryPanel
       metric={chart}
-      onMetricChange={onChartChange}
       folder={folder}
       onlineCount={load.count}
       periodKey="dashboard.folder-period"
@@ -177,5 +154,4 @@ function FolderLoadChartInner({ servers, folder, chart, onChartChange }: FolderC
 
 export const FolderStatusCounts = memo(FolderStatusCountsInner)
 export const FolderLoadBadges = memo(FolderLoadBadgesInner)
-export const FolderChartButton = memo(FolderChartButtonInner)
 export const FolderLoadChart = memo(FolderLoadChartInner)

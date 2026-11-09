@@ -21,34 +21,8 @@ const REFRESH_SEC: Record<string, number> = { '1h': 0, '24h': 60, '7d': 300, '30
 const EMPTY_POINTS: FleetHistoryPoint[] = []
 const NO_GAPS: ChartGap[] = []
 
-const METRIC_LABEL_KEYS: Record<LoadMetric, string> = { cpu: 'common.cpu', memory: 'common.ram', network: 'common.network' }
-const METRICS = Object.keys(METRIC_LABEL_KEYS) as LoadMetric[]
-
-function MetricTabs({ value, onChange }: { value: LoadMetric; onChange: (metric: LoadMetric) => void }) {
-  const { t } = useTranslation()
-  return (
-    <div className="flex items-center bg-dark-800/60 rounded-xl p-1 border border-dark-700/50">
-      {METRICS.map(metric => (
-        <button
-          key={metric}
-          type="button"
-          onClick={() => onChange(metric)}
-          aria-pressed={metric === value}
-          className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
-            metric === value ? 'bg-dark-700 text-white' : 'text-dark-400 hover:text-dark-200'
-          }`}
-        >
-          {t(METRIC_LABEL_KEYS[metric])}
-        </button>
-      ))}
-    </div>
-  )
-}
-
 interface LoadHistoryChartProps {
   metric: LoadMetric
-  /** Переключатель метрики в шапке; без него метрику выбирают плитки снаружи */
-  onMetricChange?: (metric: LoadMetric) => void
   /** Без папки — весь парк */
   folder?: string
   onlineCount: number
@@ -56,7 +30,7 @@ interface LoadHistoryChartProps {
   className: string
 }
 
-function LoadHistoryChart({ metric, onMetricChange, folder, onlineCount, periodKey, className }: LoadHistoryChartProps) {
+function LoadHistoryChart({ metric, folder, onlineCount, periodKey, className }: LoadHistoryChartProps) {
   const { t } = useTranslation()
   const [period, setPeriod] = useRememberedState(periodKey, '24h')
   const [history, setHistory] = useState<FleetHistoryResponse | null>(null)
@@ -136,10 +110,7 @@ function LoadHistoryChart({ metric, onMetricChange, folder, onlineCount, periodK
           <div className="text-sm font-medium text-dark-200">{title}</div>
           <div className="text-xs text-dark-500">{t('dashboard.fleet_chart_scope', { count: onlineCount })}</div>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {onMetricChange && <MetricTabs value={metric} onChange={onMetricChange} />}
-          <PeriodSelector value={period} onChange={setPeriod} />
-        </div>
+        <PeriodSelector value={period} onChange={setPeriod} />
       </div>
       <MultiLineChart
         series={series}

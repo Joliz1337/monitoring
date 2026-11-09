@@ -23,14 +23,12 @@ interface SortableFolderProps {
   footer?: ReactNode
   /** Блок под заголовком, который не сворачивается вместе с серверами папки */
   panel?: ReactNode
-  /** Кнопки-иконки перед правкой и удалением */
-  actions?: ReactNode
   children: ReactNode
 }
 
 /** Папка, которую можно перетаскивать за ручку и в которую можно бросить сервер */
 export function SortableFolder({
-  name, collapsed, isDropTarget, onToggle, onRename, onDelete, badges, controls, footer, panel, actions, children,
+  name, collapsed, isDropTarget, onToggle, onRename, onDelete, badges, controls, footer, panel, children,
 }: SortableFolderProps) {
   const { t } = useTranslation()
   const {
@@ -94,7 +92,6 @@ export function SortableFolder({
           </button>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-          {actions}
           <Tooltip label={t('common.edit')}>
             <button onClick={onRename} className="p-1.5 text-dark-500 hover:text-dark-300 transition rounded-lg hover:bg-dark-800/50">
               <Pencil className="w-4 h-4" />
