@@ -119,7 +119,7 @@ HAProxy работает как **нативный systemd сервис** на �
 
 **Живая статистика (stats socket):**
 
-`GET /api/haproxy/stats` — живой срез `show stat` + `show info` через stats socket (строка `stats socket /var/run/haproxy.sock ... level admin` есть в базовом шаблоне конфига). Только чтение, admin-команды сокета не используются. Методы — в `haproxy_manager.py` (`get_stats()` и чистые парсеры).
+`GET /api/haproxy/stats` — живой срез `show stat` + `show info` через stats socket (строка `stats socket /var/run/haproxy.sock ... level admin` есть в базовом шаблоне конфига). Эндпоинт только читает; admin-команды сокета использует смена весов (ниже). Методы — в `haproxy_manager.py` (`get_stats()` и чистые парсеры).
 
 - Путь сокета извлекается из строки `stats socket` самого конфига. Строки нет (конфиг создан старым шаблоном — `init_config()` не трогает существующий файл) — ответ `available: false, reason: socket_not_configured`; лечится перегенерацией/применением конфига и **restart** HAProxy.
 - Контейнер агента работает с `pid: host` + `privileged`, поэтому сокет хоста доступен через `/proc/1/root` без bind-mount (mount на inode сокета ломался бы при рестарте haproxy). `/var/run` — absolute-симлинк на `/run` и под `/proc/1/root` может разрезолвиться в корень контейнера, поэтому кандидаты перебираются по порядку: `/proc/1/root/run/...` → `/proc/1/root/var/run/...` → сам путь из конфига.
@@ -128,6 +128,18 @@ HAProxy работает как **нативный systemd сервис** на �
 - Кэш результата на ноде — 2 секунды (`_stats_cache_ttl`): гасит наложение fast-цикла панели (5 с) и авто-обновления нескольких открытых вкладок UI.
 
 Тесты: `node/tests/test_haproxy_stats.py` — парсинг CSV/`show info`, выбор пути сокета, fallback-логика причин недоступности, кэш.
+
+**Веса серверов на лету (`services/haproxy_runtime_weights.py`):**
+
+`PUT /api/haproxy/runtime/weights` `{weights: [{backend, server, weight}], ttl_seconds}` — панель присылает веса бэкендов правил с режимом «Веса по нагрузке» (расчёт — в [panel/DOCUMENTATION.md](../panel/DOCUMENTATION.md#haproxy-configs-профили-конфигурации-haproxy)). Каждый элемент — команда `set server <backend>/<server> weight N` через тот же stats socket и тех же кандидатов пути (`HAProxyManager.runtime_command()`): без reload, открытые соединения остаются на своих серверах. Вес влияет только на новые соединения; клиента из stick-table HAProxy ведёт на его сервер при любом весе.
+
+- Имена — `^[a-zA-Z0-9_.:-]+$` до 128 символов: пробел или `;` превратили бы одну команду CLI в несколько. Вес 0..256, до 4096 элементов, `ttl_seconds` 10..3600 (модели `RuntimeWeights*` в `models/haproxy.py`).
+- Ответ — результат по каждому элементу (`ok`, `error` — текст HAProxy, например `No such server.`) и `guarded_backends`. Нет stats socket — 503, сокет не `level admin` (`Permission denied`) — 409.
+- Предохранитель: после команд нода читает свежий `show stat` (`read_live_proxies()`, мимо 2-секундного кэша) и по каждому затронутому backend ищет сервер, который жив (`UP*` или `no check`, без `backup`) и имеет вес больше 0. Не нашёлся — всем живым и `DRAIN*` серверам возвращается вес из конфига (`weight 100%`), backend попадает в `guarded_backends`. Так релей не остаётся без серверов, даже если панель видит их иначе, чем он: health-check у каждого релея свой.
+- Срок: успешный элемент получает срок `ttl_seconds` в памяти (на диск нода ничего не пишет — источник правды панель). Фоновый цикл раз в 5 с возвращает вес из конфига тем, кого панель не обновила вовремя: панель упала или потеряла связь, режим выключили, пока релей был офлайн, правило удалили. Ответ HAProxy с ошибкой (сервера больше нет) снимает срок, недоступный сокет — оставляет до следующего круга. Перезапуск агента сроки теряет: присланные веса живут до следующей отправки панели (раз в минуту) или reload.
+- Reload HAProxy возвращает веса из конфига; после синхронизации профиля панель присылает их заново.
+
+Тесты: `node/tests/test_haproxy_runtime_weights.py` (команды, ошибки элементов, предохранитель, сроки, `runtime_command`), `node/tests/test_haproxy_runtime_weights_api.py` (валидация запроса).
 
 **Потери до адресов назначения (`services/loss_probe.py`):**
 
@@ -534,6 +546,7 @@ data: {"message": "error description"}
 |-------|----------|----------|
 | GET | /api/haproxy/status | Статус сервиса |
 | GET | /api/haproxy/stats | Живая статистика из stats socket (`show stat` + `show info`), read-only |
+| PUT | /api/haproxy/runtime/weights | Веса серверов на лету (`set server … weight`) со сроком действия и предохранителем пустого бэкенда |
 | GET | /api/haproxy/rules | Список правил |
 | POST | /api/haproxy/rules | Создать правило |
 | PUT | /api/haproxy/rules/{name} | Обновить правило |
