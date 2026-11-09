@@ -61,6 +61,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Silent-drop RST guard restore failed, scanners may fill conntrack: {e}", exc_info=True)
 
+    from app.services.haproxy_runtime_weights import get_runtime_weights
+    runtime_weights = get_runtime_weights()
+    try:
+        await runtime_weights.start()
+    except Exception as e:
+        logger.error(f"Runtime weights expiry start failed, panel weights may outlive the panel: {e}", exc_info=True)
+
     counter_sampler = get_traffic_counter_sampler()
     try:
         await counter_sampler.init(address_source=get_collector().accounted_ipv4_addresses)
@@ -160,6 +167,10 @@ async def lifespan(app: FastAPI):
         await rate_sampler.stop()
     except Exception as e:
         logger.error(f"Rate sampler stop failed: {e}", exc_info=True)
+    try:
+        await runtime_weights.stop()
+    except Exception as e:
+        logger.error(f"Runtime weights expiry stop failed: {e}", exc_info=True)
     try:
         await affinity_sync.stop()
     except Exception as e:

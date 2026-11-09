@@ -19,7 +19,6 @@ from app.services.haproxy_manager import get_haproxy_manager
 
 logger = logging.getLogger(__name__)
 
-MAX_ITEMS = 4096
 EXPIRY_CHECK_SECONDS = 5
 CONFIG_WEIGHT = "100%"
 PERMISSION_DENIED = "Permission denied"
