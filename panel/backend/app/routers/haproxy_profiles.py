@@ -5,13 +5,16 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import select, update, func, and_, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 import json
 import logging
 
 from app.database import get_db, async_session_maker
-from app.models import Server, HAProxyConfigProfile, HAProxySyncLog, ServerCache, MetricsSnapshot, PanelSettings
+from app.models import (
+    LINK_CAPACITY_MAX_MBIT, LINK_CAPACITY_MIN_MBIT,
+    Server, HAProxyConfigProfile, HAProxySyncLog, ServerCache, MetricsSnapshot, PanelSettings,
+)
 from app.auth import verify_auth
 from app.services.haproxy_addresses import MAX_ADDRESSES, InvalidAddressError, ServerAddresses, dump_ips, normalize_ips
 from app.services.haproxy_profile_sync import (
@@ -34,6 +37,7 @@ from app.services.haproxy_config import (
     get_config_generator,
     normalize_sni_domains,
 )
+from app.services.haproxy_load_weights import nic_speed_mbps
 from app.services.haproxy_validator import validate_config
 from app.services.reserved_ports_sync import _version_tuple
 from app.services.server_ip_owners import load_ip_owners
@@ -112,6 +116,24 @@ class BalancerOptionsData(BaseModel):
 class ServerAddressesUpdate(BaseModel):
     listen_ips: list[str] = Field(default_factory=list, max_length=MAX_ADDRESSES)
     source_ips: list[str] = Field(default_factory=list, max_length=MAX_ADDRESSES)
+
+
+MAX_CAPACITY_UPDATES = 500
+
+
+class ServerCapacitiesUpdate(BaseModel):
+    """id сервера → канал в Мбит/с; None снимает канал."""
+    capacities: dict[int, Optional[int]] = Field(max_length=MAX_CAPACITY_UPDATES)
+
+    @field_validator("capacities")
+    @classmethod
+    def validate_range(cls, value: dict[int, Optional[int]]) -> dict[int, Optional[int]]:
+        for server_id, mbit in value.items():
+            if mbit is not None and not LINK_CAPACITY_MIN_MBIT <= mbit <= LINK_CAPACITY_MAX_MBIT:
+                raise ValueError(
+                    f"Server {server_id}: capacity must be {LINK_CAPACITY_MIN_MBIT}-{LINK_CAPACITY_MAX_MBIT} Mbit/s"
+                )
+        return value
 
 
 class RuleData(BaseModel):
@@ -231,6 +253,8 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
             Server.active_haproxy_profile_id,
             Server.haproxy_sync_status,
             Server.folder,
+            Server.link_capacity_mbit,
+            Server.last_metrics,
         )
         .order_by(Server.name)
     )
@@ -242,9 +266,34 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
             "active_profile_id": row[3],
             "sync_status": row[4],
             "folder": row[5],
+            "link_capacity_mbit": row[6],
+            "nic_speed_mbps": nic_speed_mbps(row[7]),
         }
         for row in result.fetchall()
     ]
+
+
+@router.put("/server-capacities")
+async def set_server_capacities(
+    data: ServerCapacitiesUpdate,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_auth),
+):
+    """Каналы серверов из формы правила: один на сервер со всеми его IP и для всех правил."""
+    if not data.capacities:
+        return {"updated": 0}
+    result = await db.execute(select(Server.id).where(Server.id.in_(data.capacities)))
+    unknown = sorted(set(data.capacities) - set(result.scalars().all()))
+    if unknown:
+        raise HTTPException(400, f"Unknown servers: {', '.join(map(str, unknown))}")
+    conn = await db.connection()
+    await conn.execute(
+        update(Server).where(Server.id == bindparam("sid")).values(link_capacity_mbit=bindparam("mbit")),
+        [{"sid": server_id, "mbit": mbit} for server_id, mbit in data.capacities.items()],
+    )
+    await db.commit()
+    logger.info("server capacities updated: %s", data.capacities)
+    return {"updated": len(data.capacities)}
 
 
 @router.get("/ip-owners")

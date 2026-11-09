@@ -537,6 +537,7 @@ async def run_migrations(conn):
             ("haproxy_sync_status", "VARCHAR(20)"),
             ("haproxy_listen_ips", "TEXT"),
             ("haproxy_source_ips", "TEXT"),
+            ("link_capacity_mbit", "INTEGER"),
         ]
         for col_name, col_type in haproxy_profile_columns:
             if col_name not in columns:

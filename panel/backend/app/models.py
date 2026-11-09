@@ -5,6 +5,10 @@ from app.crypto import EncryptedString
 
 SERVER_NOTE_MAX_LENGTH = 40
 
+# Потолок полосы сервера по тарифу, Мбит/с — знаменатель загрузки для весов балансировщика
+LINK_CAPACITY_MIN_MBIT = 10
+LINK_CAPACITY_MAX_MBIT = 400_000
+
 
 class PKIKeygen(Base):
     """Singleton: CA, клиентский сертификат панели и общий серверный cert для всех нод."""
@@ -130,6 +134,8 @@ class Server(Base):
     # выходные — source к бэкендам; пусто = все адреса / выбор системы
     haproxy_listen_ips = Column(Text, nullable=True)
     haproxy_source_ips = Column(Text, nullable=True)
+    # Канал по тарифу, Мбит/с: общий для всех IP сервера и всех правил с весами по нагрузке
+    link_capacity_mbit = Column(Integer, nullable=True)
 
     # Firewall (UFW) profile binding
     active_firewall_profile_id = Column(Integer, ForeignKey("firewall_profiles.id", ondelete="SET NULL"), nullable=True)
