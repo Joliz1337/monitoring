@@ -43,13 +43,14 @@ class RuntimeWeightsTestCase(unittest.TestCase):
         self.commands: list[str] = []
         self.responses: dict[str, str] = {}
         self.proxies: list[dict] = []
+        self.worker = "100"
         self.clock = FakeClock()
 
         def run_command(command: str) -> str:
             self.commands.append(command)
             return self.responses.get(command, "\n")
 
-        self.rw = RuntimeWeights(run_command, lambda: self.proxies, clock=self.clock)
+        self.rw = RuntimeWeights(run_command, lambda: self.proxies, lambda: self.worker, clock=self.clock)
 
 
 class ApplyTests(RuntimeWeightsTestCase):
@@ -179,6 +180,55 @@ class PeriodicGuardTests(RuntimeWeightsTestCase):
         reads.assert_not_called()
 
 
+class ReloadTests(RuntimeWeightsTestCase):
+    """Reload поднимает новый воркер HAProxy с весами из конфига: до следующей
+    отправки панели (до минуты) забитый сервер снова получал свою долю клиентов."""
+
+    def test_new_worker_gets_leased_weights(self):
+        self.rw.apply([WeightItem(BACKEND, "srv1", 6), WeightItem(BACKEND, "srv2", 20)], 180)
+        self.commands.clear()
+        self.worker = "200"
+        self.assertEqual(self.rw.reapply_after_reload(), 2)
+        self.assertEqual(self.commands, [f"set server {BACKEND}/srv1 weight 6", f"set server {BACKEND}/srv2 weight 20"])
+
+    def test_same_worker_is_left_alone(self):
+        self.rw.apply([WeightItem(BACKEND, "srv1", 6)], 180)
+        self.commands.clear()
+        self.assertEqual(self.rw.reapply_after_reload(), 0)
+        self.assertEqual(self.commands, [])
+
+    def test_resend_does_not_extend_lease(self):
+        self.rw.apply([WeightItem(BACKEND, "srv1", 6)], 180)
+        self.clock.now += 100
+        self.worker = "200"
+        self.rw.reapply_after_reload()
+        self.clock.now += 81
+        self.assertEqual(self.rw.expire_due(), [(BACKEND, "srv1")])
+
+    def test_expired_weight_is_not_resent(self):
+        self.rw.apply([WeightItem(BACKEND, "srv1", 6)], 10)
+        self.clock.now += 11
+        self.worker = "200"
+        self.commands.clear()
+        self.assertEqual(self.rw.reapply_after_reload(), 0)
+        self.assertEqual(self.commands, [])
+
+    def test_without_panel_weights_worker_is_not_read(self):
+        reads = mock.Mock(return_value="200")
+        self.rw._read_worker = reads
+        self.assertEqual(self.rw.reapply_after_reload(), 0)
+        reads.assert_not_called()
+
+    def test_resend_respects_guard(self):
+        self.proxies[:] = proxy(("srv1", "UP", 100), ("srv2", "UP", 100))
+        self.rw.apply([WeightItem(BACKEND, "srv1", 0)], 180)
+        self.proxies[:] = proxy(("srv1", "UP", 100), ("srv2", "DOWN", 100))
+        self.worker = "200"
+        self.commands.clear()
+        self.assertEqual(self.rw.reapply_after_reload(), 0)
+        self.assertNotIn(f"set server {BACKEND}/srv1 weight 0", self.commands)
+
+
 SHOW_STAT = (
     "# pxname,svname,scur,status,weight,bck,mode,\n"
     f"{BACKEND},srv1,1,UP,6,0,tcp,\n"
@@ -214,6 +264,12 @@ class ManagerRuntimeCommandTests(unittest.TestCase):
         with mock.patch.object(HAProxyManager, "_query_stats_socket", return_value=SHOW_STAT):
             [proxy] = manager.read_live_proxies()
         self.assertEqual([(s["name"], s["status"], s["weight"]) for s in proxy["servers"]], [("srv1", "UP", 6)])
+
+    def test_worker_pid_from_show_info(self):
+        manager = self.manager("global\n    stats socket /run/haproxy.sock level admin\n")
+        info = "Name: HAProxy\nVersion: 3.2.25\nPid: 4242\nUptime: 0d 0h01m02s\n"
+        with mock.patch.object(HAProxyManager, "_query_stats_socket", return_value=info):
+            self.assertEqual(manager.worker_pid(), "4242")
 
 
 if __name__ == "__main__":

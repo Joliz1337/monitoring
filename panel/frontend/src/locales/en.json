@@ -2980,6 +2980,7 @@
     "capacities_fill_weights": "Fallback weights by link",
     "capacities_invalid": "A whole number from 10 to 400000",
     "capacities_save_failed": "Failed to save server links",
+    "capacities_saved": "Links saved. The rule is unchanged, so HAProxy on relays is not reloaded",
     "load_capacity_missing": "No link set — weight stays as is",
     "copy_servers_hint": "Copy servers as HAProxy config lines — paste them into another rule or send them to someone",
     "servers_copied": "Servers copied: {{count}}",

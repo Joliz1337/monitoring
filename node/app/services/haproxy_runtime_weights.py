@@ -2,9 +2,10 @@
 
 Команда `set server <backend>/<server> weight N` идёт через admin-сокет: без
 reload, открытые соединения остаются на своих серверах. Источник правды —
-панель, поэтому на диске ничего не хранится. В памяти — только срок каждого
-веса: если панель замолчала, нода сама вернёт вес из конфига (`100%` — вес,
-с которым сервер стартовал).
+панель, поэтому на диске ничего не хранится. В памяти — вес и срок каждого:
+если панель замолчала, нода сама вернёт вес из конфига (`100%` — вес, с
+которым сервер стартовал), а после reload пришлёт действующие веса новому
+воркеру — он стартует с весами из конфига.
 """
 
 import asyncio
@@ -73,52 +74,84 @@ def _would_be_empty(proxy: dict, new_weights: Mapping[str, int]) -> bool:
     return bool(serving) and not any(new_weights.get(s["name"], s.get("weight") or 0) > 0 for s in serving)
 
 
+@dataclass(frozen=True)
+class _Lease:
+    weight: int
+    deadline: float
+
+
 class RuntimeWeights:
     def __init__(
         self,
         run_command: Callable[[str], str],
         read_proxies: Callable[[], list[dict]],
+        read_worker: Callable[[], Optional[str]],
         clock: Callable[[], float] = time.monotonic,
     ):
         self._run_command = run_command
         self._read_proxies = read_proxies
+        self._read_worker = read_worker
         self._clock = clock
-        self._deadlines: dict[tuple[str, str], float] = {}
+        self._leases: dict[tuple[str, str], _Lease] = {}
+        # Воркер, который получил веса последним: другой — значит, был reload
+        self._worker: Optional[str] = None
         # apply и expire_due идут из тред-пула одновременно
         self._lock = threading.Lock()
         self._task: Optional[asyncio.Task] = None
 
     def apply(self, items: Sequence[WeightItem], ttl_seconds: int) -> ApplyResult:
+        with self._lock:
+            self._worker = self._read_worker()
+            deadline = self._clock() + ttl_seconds
+            return self._apply_locked([(item, deadline) for item in items])
+
+    def reapply_after_reload(self) -> int:
+        """Новый воркер стартует с весами из конфига, а панель пришлёт свои только
+        при следующей отправке — до минуты. Действующие веса шлются ему сразу,
+        сроки не продлеваются. Возвращает число применённых весов."""
+        with self._lock:
+            if not self._leases:
+                return 0
+            worker = self._read_worker()
+            if worker == self._worker:
+                return 0
+            self._worker = worker
+            now = self._clock()
+            live = [(WeightItem(backend, server, lease.weight), lease.deadline)
+                    for (backend, server), lease in self._leases.items() if lease.deadline > now]
+            if not live:
+                return 0
+            return sum(1 for item in self._apply_locked(live).results if item.ok)
+
+    def _apply_locked(self, entries: Sequence[tuple[WeightItem, float]]) -> ApplyResult:
         """Предохранитель смотрит до команд: иначе последний живой сервер на миг
         получал бы 0, и новые клиенты этого мига уходили бы в отказ."""
-        with self._lock:
-            proxies = self._proxies_by_name()
-            new_weights: dict[str, dict[str, int]] = {}
-            for item in items:
-                new_weights.setdefault(item.backend, {})[item.server] = item.weight
-            guarded = sorted(
-                backend for backend, weights in new_weights.items()
-                if backend in proxies and _would_be_empty(proxies[backend], weights)
-            )
+        proxies = self._proxies_by_name()
+        new_weights: dict[str, dict[str, int]] = {}
+        for item, _ in entries:
+            new_weights.setdefault(item.backend, {})[item.server] = item.weight
+        guarded = sorted(
+            backend for backend, weights in new_weights.items()
+            if backend in proxies and _would_be_empty(proxies[backend], weights)
+        )
 
-            result = ApplyResult(guarded_backends=guarded)
-            deadline = self._clock() + ttl_seconds
-            for item in items:
-                if item.backend in guarded:
-                    result.results.append(ItemResult(item.backend, item.server, False, GUARDED_ERROR))
-                    continue
-                error = self._command(_weight_command(item.backend, item.server, str(item.weight)))
-                result.results.append(ItemResult(item.backend, item.server, error is None, error))
-                if error is None:
-                    self._deadlines[(item.backend, item.server)] = deadline
-            self._restore(guarded, proxies)
-            return result
+        result = ApplyResult(guarded_backends=guarded)
+        for item, deadline in entries:
+            if item.backend in guarded:
+                result.results.append(ItemResult(item.backend, item.server, False, GUARDED_ERROR))
+                continue
+            error = self._command(_weight_command(item.backend, item.server, str(item.weight)))
+            result.results.append(ItemResult(item.backend, item.server, error is None, error))
+            if error is None:
+                self._leases[(item.backend, item.server)] = _Lease(item.weight, deadline)
+        self._restore(guarded, proxies)
+        return result
 
     def check_guard(self) -> list[str]:
         """Сервер мог упасть уже после отправки весов: панель узнает об этом не
         сразу, а до её следующей отправки бэкенд остался бы без серверов."""
         with self._lock:
-            weighted = {backend for backend, _ in self._deadlines}
+            weighted = {backend for backend, _ in self._leases}
             if not weighted:
                 return []
             proxies = self._proxies_by_name()
@@ -130,7 +163,7 @@ class RuntimeWeights:
         with self._lock:
             now = self._clock()
             restored = []
-            for backend, server in sorted(key for key, at in self._deadlines.items() if at <= now):
+            for backend, server in sorted(key for key, lease in self._leases.items() if lease.deadline <= now):
                 try:
                     self._command(_weight_command(backend, server, CONFIG_WEIGHT))
                 except OSError:
@@ -138,7 +171,7 @@ class RuntimeWeights:
                     # свой таймаут под блокировкой — остаток круга переносится
                     break
                 # Ответ с ошибкой — сервера больше нет (правило удалили), держать срок незачем
-                del self._deadlines[(backend, server)]
+                del self._leases[(backend, server)]
                 restored.append((backend, server))
             return restored
 
@@ -158,11 +191,14 @@ class RuntimeWeights:
         while True:
             await asyncio.sleep(EXPIRY_CHECK_SECONDS)
             try:
+                resent = await asyncio.to_thread(self.reapply_after_reload)
                 restored = await asyncio.to_thread(self.expire_due)
                 await asyncio.to_thread(self.check_guard)
             except (OSError, SocketPermissionError) as e:
                 logger.warning("Runtime weights round skipped: %s", e)
                 continue
+            if resent:
+                logger.info("HAProxy reloaded, %d panel weights re-sent to the new worker", resent)
             if restored:
                 logger.info("Panel stopped refreshing weights, config weights restored: %s", restored)
 
@@ -193,5 +229,5 @@ def get_runtime_weights() -> RuntimeWeights:
     global _runtime_weights
     if _runtime_weights is None:
         manager = get_haproxy_manager()
-        _runtime_weights = RuntimeWeights(manager.runtime_command, manager.read_live_proxies)
+        _runtime_weights = RuntimeWeights(manager.runtime_command, manager.read_live_proxies, manager.worker_pid)
     return _runtime_weights

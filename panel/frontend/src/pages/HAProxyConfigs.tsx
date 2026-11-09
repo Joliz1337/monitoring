@@ -657,6 +657,7 @@ function RuleForm({
   nodes,
   dnatServers,
   loadLines,
+  onCapacitiesSaved,
 }: {
   initial: RuleFormData
   isEdit: boolean
@@ -664,6 +665,8 @@ function RuleForm({
   saving: boolean
   onSave: (data: RuleFormData) => void
   onCancel: () => void
+  /** Правились только каналы: правило не отправляется, форма закрывается */
+  onCapacitiesSaved?: () => void
   profileId: number
   profileOptions: HAProxyProfileOptions
   ipOwners: HAProxyIpOwners
@@ -713,6 +716,14 @@ function RuleForm({
           await haproxyProfilesApi.setServerCapacities(changed)
         } catch {
           toast.error(t('balancer.capacities_save_failed'))
+          return
+        }
+        // Канал не попадает в конфиг: сохранение правила без правок запустило бы
+        // синхронизацию, и релеи перезагрузили бы HAProxy впустую
+        if (onCapacitiesSaved && JSON.stringify(form) === JSON.stringify(initial)) {
+          toast.success(t('balancer.capacities_saved'))
+          onCancel()
+          onCapacitiesSaved()
           return
         }
       }
@@ -1624,6 +1635,7 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
                               nodes={availableServers}
                               dnatServers={dnatServers}
                               loadLines={loadWeights?.rules[r.name]}
+                              onCapacitiesSaved={fetchDetail}
                             />
                           </div>
                         </motion.div>

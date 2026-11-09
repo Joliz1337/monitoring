@@ -594,6 +594,11 @@ resolvers mydns
         """Срез show stat мимо кэша get_stats: после смены весов нужен текущий."""
         return self._parse_show_stat(self.runtime_command("show stat"))
 
+    def worker_pid(self) -> Optional[str]:
+        """Pid воркера, ответившего на сокете: после reload он другой."""
+        match = re.search(r"^Pid:\s*(\d+)", self.runtime_command("show info"), re.MULTILINE)
+        return match.group(1) if match else None
+
     def _stats_socket_path_from_config(self) -> Optional[str]:
         match = re.search(r'^\s*stats socket\s+(\S+)', self._read_config(), re.MULTILINE)
         return match.group(1) if match else None
