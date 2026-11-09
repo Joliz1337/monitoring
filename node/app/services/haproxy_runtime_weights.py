@@ -56,9 +56,10 @@ def _weight_command(backend: str, server: str, weight: str) -> str:
 
 
 def _can_serve(server: dict) -> bool:
-    # DRAIN — сервер жив, но вес 0 (HAProxy так показывает нулевой вес); DOWN вес не спасёт
+    # Нулевой вес HAProxy показывает как UP. DRAIN — ручной слив, DOWN — упал:
+    # новых клиентов такой сервер не возьмёт при любом весе
     status = server.get("status") or ""
-    return status.startswith(("UP", "DRAIN")) or status == NO_CHECK_STATUS
+    return status.startswith("UP") or status == NO_CHECK_STATUS
 
 
 def _serving_servers(proxy: dict) -> list[dict]:

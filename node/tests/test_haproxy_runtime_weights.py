@@ -72,7 +72,7 @@ class ApplyTests(RuntimeWeightsTestCase):
             self.rw.apply([WeightItem(BACKEND, "srv1", 5)], 180)
 
     def test_guard_restores_when_no_live_weighted_server(self):
-        self.proxies[:] = proxy(("srv1", "DRAIN", 0), ("srv2", "DOWN", 100), ("srv3", "UP 1/3", 0))
+        self.proxies[:] = proxy(("srv1", "UP", 0), ("srv2", "DOWN", 100), ("srv3", "UP 1/3", 0))
         result = self.rw.apply([WeightItem(BACKEND, "srv1", 0)], 180)
         self.assertEqual(result.guarded_backends, [BACKEND])
         self.assertIn(f"set server {BACKEND}/srv1 weight 100%", self.commands)
@@ -86,19 +86,27 @@ class ApplyTests(RuntimeWeightsTestCase):
         self.assertNotIn(f"set server {BACKEND}/srv1 weight 0", self.commands)
         self.assertFalse(result.results[0].ok)
 
-    def test_drained_server_getting_weight_counts_as_live(self):
-        self.proxies[:] = proxy(("srv1", "DRAIN", 0), ("srv2", "DOWN", 100))
+    def test_zero_weight_server_getting_weight_counts_as_live(self):
+        self.proxies[:] = proxy(("srv1", "UP", 0), ("srv2", "DOWN", 100))
         result = self.rw.apply([WeightItem(BACKEND, "srv1", 50)], 180)
         self.assertEqual(result.guarded_backends, [])
         self.assertIn(f"set server {BACKEND}/srv1 weight 50", self.commands)
 
+    def test_admin_drained_server_is_not_live(self):
+        # DRAIN — ручной слив (set server state drain): новых клиентов сервер не берёт при любом весе
+        self.proxies[:] = proxy(("srv1", "UP", 100), ("srv2", "DRAIN", 0))
+        result = self.rw.apply([WeightItem(BACKEND, "srv1", 0), WeightItem(BACKEND, "srv2", 100)], 180)
+        self.assertEqual(result.guarded_backends, [BACKEND])
+        self.assertIn(f"set server {BACKEND}/srv1 weight 100%", self.commands)
+        self.assertNotIn(f"set server {BACKEND}/srv2 weight 100%", self.commands)
+
     def test_guard_quiet_with_live_weighted_server(self):
-        self.proxies[:] = proxy(("srv1", "DRAIN", 0), ("srv2", "no check", 100))
+        self.proxies[:] = proxy(("srv1", "UP", 0), ("srv2", "no check", 100))
         self.assertEqual(self.rw.apply([WeightItem(BACKEND, "srv1", 0)], 180).guarded_backends, [])
 
     def test_guard_ignores_backup_servers(self):
         self.proxies[:] = [{"name": BACKEND, "servers": [
-            {"name": "srv1", "status": "DRAIN", "weight": 0, "backup": False},
+            {"name": "srv1", "status": "UP", "weight": 0, "backup": False},
             {"name": "bk", "status": "UP", "weight": 100, "backup": True},
         ]}]
         self.assertEqual(self.rw.apply([WeightItem(BACKEND, "srv1", 0)], 180).guarded_backends, [BACKEND])
@@ -154,14 +162,14 @@ class PeriodicGuardTests(RuntimeWeightsTestCase):
     def test_restores_when_the_live_server_goes_down_later(self):
         self.proxies[:] = proxy(("srv1", "UP", 100), ("srv2", "UP", 100))
         self.rw.apply([WeightItem(BACKEND, "srv1", 0)], 180)
-        self.proxies[:] = proxy(("srv1", "DRAIN", 0), ("srv2", "DOWN", 100))
+        self.proxies[:] = proxy(("srv1", "UP", 0), ("srv2", "DOWN", 100))
         self.assertEqual(self.rw.check_guard(), [BACKEND])
         self.assertEqual(self.commands[-1], f"set server {BACKEND}/srv1 weight 100%")
 
     def test_quiet_while_a_live_server_has_weight(self):
         self.proxies[:] = proxy(("srv1", "UP", 100), ("srv2", "UP", 100))
         self.rw.apply([WeightItem(BACKEND, "srv1", 0)], 180)
-        self.proxies[:] = proxy(("srv1", "DRAIN", 0), ("srv2", "UP", 100))
+        self.proxies[:] = proxy(("srv1", "UP", 0), ("srv2", "UP", 100))
         self.assertEqual(self.rw.check_guard(), [])
 
     def test_no_stat_read_without_panel_weights(self):
