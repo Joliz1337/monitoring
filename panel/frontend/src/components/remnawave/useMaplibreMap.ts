@@ -80,6 +80,13 @@ export function useMaplibreMap(
   return { handle, styleVersion, isFallback, failed }
 }
 
+// Развёрнутая подпись источников закрывает полкарты небольшого размера; свёрнутая — кнопка «i»
+export function useCollapsedAttribution(handle: MapHandle | null, styleVersion: number) {
+  useEffect(() => {
+    handle?.map.getContainer().querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show')
+  }, [handle, styleVersion])
+}
+
 // Колесо мыши зумит карту только после клика по ней — иначе страница с картой
 // перестаёт прокручиваться, как только курсор оказывается над картой
 export function useScrollZoomAfterClick(handle: MapHandle | null) {

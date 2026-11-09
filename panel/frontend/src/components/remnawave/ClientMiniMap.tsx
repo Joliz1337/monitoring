@@ -5,7 +5,7 @@ import { Loader2, MapPinOff } from 'lucide-react'
 import type { RemnawaveUserHistoryIp, RemnawaveUserNode } from '../../api/client'
 import { COMPARE_COLORS } from './geo'
 import { LABEL_FONT } from './mapLoader'
-import { useMaplibreMap, useScrollZoomAfterClick, type MapHandle } from './useMaplibreMap'
+import { useCollapsedAttribution, useMaplibreMap, useScrollZoomAfterClick, type MapHandle } from './useMaplibreMap'
 
 const NODE_COLOR = '#a78bfa'
 const PAST_COLOR = '#64748b'
@@ -139,11 +139,7 @@ export default function ClientMiniMap({ history, nodes }: ClientMiniMapProps) {
 
   const { handle, styleVersion } = useMaplibreMap(containerRef, mapOptions, addLayers)
   useScrollZoomAfterClick(handle)
-
-  // Развёрнутая подпись источников закрывает пол-мини-карты; свернув её, оставляем кнопку «i»
-  useEffect(() => {
-    handle?.map.getContainer().querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show')
-  }, [handle, styleVersion])
+  useCollapsedAttribution(handle, styleVersion)
 
   useEffect(() => {
     const map = handle?.map

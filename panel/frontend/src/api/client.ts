@@ -1966,6 +1966,53 @@ export interface RemnawaveGeoStatus {
   checked_at: string | null
 }
 
+export type ClientRouteHiddenReason = 'silent' | 'private' | 'no_geo' | 'impossible'
+
+export interface ClientRouteHop {
+  hop: number
+  host: string | null
+  asn: string | null
+  as_name: string | null
+  avg_ms: number | null
+  loss_pct: number | null
+  reason: ClientRouteHiddenReason | null
+}
+
+export interface ClientRouteStop {
+  kind: 'client' | 'router' | 'node'
+  lat: number
+  lon: number
+  place: string | null
+  country_code: string | null
+  rtt_ms: number | null
+  hops: ClientRouteHop[]
+}
+
+export interface ClientRouteLeg {
+  coords: [number, number][]
+  km: number
+  mode: 'rail' | 'direct'
+  added_ms: number | null
+  expected_ms: number
+  status: 'ok' | 'warn' | 'bad' | null
+  hidden: ClientRouteHop[]
+  last_mile: boolean
+}
+
+export interface ClientRoute {
+  ip: string
+  state: 'running' | 'done' | 'failed'
+  error: string | null
+  rounds_done: number
+  rounds_total: number
+  client_reached: boolean
+  client_located: boolean
+  stops: ClientRouteStop[]
+  legs: ClientRouteLeg[]
+  hidden_tail: ClientRouteHop[]
+  totals: { rtt_ms: number | null; km: number; direct_km: number }
+}
+
 export interface RemnawaveUser {
   email: number
   username: string | null
@@ -2063,6 +2110,10 @@ export const remnawaveApi = {
     api.get<{ rows: RemnawaveGeoIpRow[]; total: number }>('/remnawave/geo/ips', { params }),
   getGeoStatus: () => api.get<RemnawaveGeoStatus>('/remnawave/geo/status'),
   updateGeoDb: () => api.post<{ started: boolean }>('/remnawave/geo/update'),
+  startClientRoute: (ip: string, nodeUuid: string) =>
+    api.post<{ server_id: number; server_name: string; trace_id: string }>('/remnawave/geo/route', { ip, node_uuid: nodeUuid }),
+  getClientRoute: (serverId: number, traceId: string, nodeUuid: string) =>
+    api.get<ClientRoute>(`/remnawave/geo/route/${serverId}/${traceId}`, { params: { node_uuid: nodeUuid } }),
   clearStats: () =>
     api.delete<{ success: boolean; deleted: { xray_stats: number }; message: string }>('/remnawave/stats/clear'),
   clearUserIp: (email: number, sourceIp: string) =>

@@ -2,13 +2,17 @@ import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'framer-motion'
 import { ExternalLink, Smartphone, Trash2 } from 'lucide-react'
-import { remnawaveApi, type RemnawaveUserDetails } from '../../api/client'
+import {
+  remnawaveApi, type RemnawaveNodeBrief, type RemnawaveUserDetails, type RemnawaveUserHistoryIp,
+} from '../../api/client'
 import { formatBytes, getFlag } from '../../utils/format'
 import { CopyableIp } from '../ui/CopyableIp'
 import { Tooltip } from '../ui/Tooltip'
 import ClientMiniMap from './ClientMiniMap'
 import { formatAgo } from './geo'
 import { ProviderBadge } from './ProviderBadge'
+import RouteButton from './RouteButton'
+import RouteModal from './RouteModal'
 
 interface UserGeoDetailsProps {
   details: RemnawaveUserDetails
@@ -30,6 +34,7 @@ export default function UserGeoDetails({ details, onDeleteIp, onDeleteAllIps }: 
     return () => { alive = false }
   }, [details.email])
 
+  const [routeIp, setRouteIp] = useState<{ ip: RemnawaveUserHistoryIp; nodes: RemnawaveNodeBrief[] } | null>(null)
   const nodesByUuid = useMemo(() => new Map(details.nodes.map(n => [n.uuid, n])), [details.nodes])
   const lang = i18n.language
   const days = details.history_days
@@ -86,7 +91,8 @@ export default function UserGeoDetails({ details, onDeleteIp, onDeleteAllIps }: 
               {details.history.length === 0 ? (
                 <tr><td colSpan={6} className="text-center py-6 text-dark-500">{t('remnawave.noData')}</td></tr>
               ) : details.history.map(ip => {
-                const [firstNode, ...otherNodes] = ip.nodes.map(uuid => nodesByUuid.get(uuid) ?? { uuid, name: null, country_code: null })
+                const ipNodes = ip.nodes.map(uuid => nodesByUuid.get(uuid) ?? { uuid, name: null, country_code: null })
+                const [firstNode, ...otherNodes] = ipNodes
                 return (
                   <tr key={ip.source_ip} className={`border-b border-dark-800/30 last:border-0 group ${ip.online ? '' : 'text-dark-500'}`}>
                     <td className="px-3 py-2 whitespace-nowrap">
@@ -102,6 +108,11 @@ export default function UserGeoDetails({ details, onDeleteIp, onDeleteAllIps }: 
                         >
                           <ExternalLink className="w-3.5 h-3.5" />
                         </a>
+                        <RouteButton
+                          relay={!!ip.relay}
+                          disabled={ipNodes.length === 0}
+                          onClick={() => setRouteIp({ ip, nodes: ipNodes })}
+                        />
                       </span>
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
@@ -168,6 +179,18 @@ export default function UserGeoDetails({ details, onDeleteIp, onDeleteAllIps }: 
             </div>
           ))}
         </div>
+      )}
+
+      {routeIp && (
+        <RouteModal
+          ip={routeIp.ip.source_ip}
+          nodes={routeIp.nodes}
+          countryCode={routeIp.ip.country_code}
+          place={routeIp.ip.place}
+          asOrg={routeIp.ip.as_org}
+          asn={routeIp.ip.asn}
+          onClose={() => setRouteIp(null)}
+        />
       )}
     </div>
   )
