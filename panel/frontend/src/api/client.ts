@@ -2763,6 +2763,25 @@ export interface HAProxyAvailableServer {
   active_profile_id: number | null
   sync_status: string | null
   folder: string | null
+  /** Канал по тарифу, Мбит/с — общий для всех IP сервера и всех правил */
+  link_capacity_mbit?: number | null
+  /** Скорость карты с трафиком — только подсказка к каналу, на VPS часто врёт */
+  nic_speed_mbps?: number | null
+}
+
+/** Строка бэкенда в последнем расчёте весов по нагрузке */
+export interface HAProxyLoadWeightLine {
+  server_name: string
+  panel_server_id: number
+  weight: number
+  /** null — свежих данных о нагрузке нет, стоит вес по каналу */
+  utilization: number | null
+  capacity_mbit: number
+}
+
+export interface HAProxyLoadWeights {
+  rules: Record<string, HAProxyLoadWeightLine[]>
+  updated_at: string | null
 }
 
 export interface HAProxyIpOwner {
@@ -2840,6 +2859,7 @@ export interface BalancerOptions {
   allbackups?: boolean
   fullconn?: number | null
   timeout_queue?: string | null
+  load_weights?: boolean
 }
 
 export interface HAProxyProfileRule {
@@ -2894,6 +2914,10 @@ export const haproxyProfilesApi = {
     api.get<HAProxyAvailableServer[]>('/haproxy-profiles/available-servers'),
   getIpOwners: () =>
     api.get<HAProxyIpOwners>('/haproxy-profiles/ip-owners'),
+  getLoadWeights: (profileId: number) =>
+    api.get<HAProxyLoadWeights>(`/haproxy-profiles/${profileId}/load-weights`),
+  setServerCapacities: (capacities: Record<number, number | null>) =>
+    api.put<{ updated: number }>('/haproxy-profiles/server-capacities', { capacities }),
   getServersStatus: (profileId: number) =>
     api.get<HAProxyServerStatus[]>(`/haproxy-profiles/${profileId}/servers-status`),
   getRules: (profileId: number) =>

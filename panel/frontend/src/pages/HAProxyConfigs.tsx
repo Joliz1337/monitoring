@@ -24,6 +24,8 @@ import {
   HAProxyAvailableServer,
   HAProxyIpOwner,
   HAProxyIpOwners,
+  HAProxyLoadWeightLine,
+  HAProxyLoadWeights,
   HAProxyServerStatus,
   BackendServer,
   BalancerOptions,
@@ -31,6 +33,7 @@ import {
   PortUsageMap,
   portUsageApi,
 } from '../api/client'
+import { DYNAMIC_ALGORITHMS } from '../utils/loadWeights'
 import { formatPortRanges, formatServerPorts, portsInterceptedOnServers, rangesCover, ServerRanges } from '../utils/portConflicts'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
@@ -144,6 +147,7 @@ const DEFAULT_BALANCER_OPTIONS: BalancerOptions = {
 // ==================== Target owners ====================
 
 const BALANCER_TARGETS_SHOWN = 2
+const LOAD_WEIGHTS_POLL_MS = 10_000
 
 type AddressRole = (owner: HAProxyIpOwner) => string
 
@@ -231,11 +235,26 @@ function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: bool
 
 // ==================== Backend Server Row ====================
 
+function BackendLoadLine({ load }: { load: HAProxyLoadWeightLine }) {
+  const { t } = useTranslation()
+  return (
+    <p className="text-2xs text-dark-400">
+      {t('balancer.load_line', {
+        capacity: load.capacity_mbit,
+        load: load.utilization === null ? '—' : `${Math.round(load.utilization * 100)}%`,
+        weight: load.weight,
+      })}
+    </p>
+  )
+}
+
 function BackendServerRow({
-  srv, index, owner, onChange, onRemove, canRemove, t,
+  srv, index, owner, load, loadMode, onChange, onRemove, canRemove, t,
 }: {
   srv: BackendServer; index: number
   owner?: string
+  load?: HAProxyLoadWeightLine
+  loadMode?: boolean
   onChange: (i: number, s: BackendServer) => void
   onRemove: (i: number) => void
   canRemove: boolean
@@ -288,9 +307,11 @@ function BackendServerRow({
             ? <span className="text-2xs text-accent-400 truncate" title={owner}>{owner}</span>
             : <span className="text-2xs text-dark-500">{t('balancer.address')}</span>}
           <span className="text-2xs text-dark-500">{t('haproxy.target_port')}</span>
-          <span className="text-2xs text-dark-500">{t('balancer.weight')}</span>
+          <span className="text-2xs text-dark-500">{t(loadMode ? 'balancer.weight_fallback' : 'balancer.weight')}</span>
         </div>
       )}
+
+      {loadMode && load && <BackendLoadLine load={load} />}
 
       {expanded && (
         <div className="space-y-2 pt-1 border-t border-dark-700/30">
@@ -358,13 +379,25 @@ function BalancerSettingsSection({
           {t('balancer.algorithm')}
           <FAQIcon screen="HAPROXY_CONFIGS_BALANCER" size="sm" />
         </label>
-        <select value={opts.algorithm} onChange={e => upd({ algorithm: e.target.value })} className={inp}>
+        <select value={opts.algorithm}
+          onChange={e => upd({ algorithm: e.target.value, ...(DYNAMIC_ALGORITHMS.has(e.target.value) ? {} : { load_weights: false }) })}
+          className={inp}>
           {ALGORITHMS.map(a => (
             <option key={a} value={a}>{t(`balancer.alg.${a.replace('-', '_')}`)}</option>
           ))}
         </select>
         <p className="text-2xs text-dark-500 mt-0.5">{t(`balancer.alg.${opts.algorithm.replace('-', '_')}_hint`)}</p>
       </div>
+
+      {DYNAMIC_ALGORITHMS.has(opts.algorithm) && (
+        <div className="space-y-1">
+          <Toggle value={opts.load_weights ?? false} onChange={v => upd({ load_weights: v })} label={t('balancer.load_weights')} />
+          <p className="text-2xs text-dark-500">{t('balancer.load_weights_hint')}</p>
+          {opts.load_weights && opts.sticky_type && (
+            <p className="text-2xs text-amber-400">{t('balancer.load_weights_sticky_hint')}</p>
+          )}
+        </div>
+      )}
 
       {ALGO_NEEDS_HASH.has(opts.algorithm) && (
         <div>
@@ -622,6 +655,7 @@ function RuleForm({
   ipOwners,
   nodes,
   dnatServers,
+  loadLines,
 }: {
   initial: RuleFormData
   isEdit: boolean
@@ -634,6 +668,8 @@ function RuleForm({
   ipOwners: HAProxyIpOwners
   nodes: HAProxyAvailableServer[]
   dnatServers: ServerRanges[]
+  /** Последний расчёт весов по нагрузке для этого правила */
+  loadLines?: HAProxyLoadWeightLine[]
 }) {
   const { t } = useTranslation()
   const [form, setForm] = useState(initial)
@@ -888,7 +924,10 @@ function RuleForm({
               )}
               <div className="space-y-2">
                 {form.servers.map((srv, i) => (
-                  <BackendServerRow key={i} srv={srv} index={i} owner={ownerLabel(findOwner(ipOwners, srv.address), addressRole)} onChange={updateServer}
+                  <BackendServerRow key={i} srv={srv} index={i} owner={ownerLabel(findOwner(ipOwners, srv.address), addressRole)}
+                    load={loadLines?.find(line => line.server_name === srv.name)}
+                    loadMode={form.balancer_options?.load_weights ?? false}
+                    onChange={updateServer}
                     onRemove={removeServer} canRemove={form.servers.length > 1} t={t} />
                 ))}
               </div>
@@ -1033,6 +1072,7 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
   const [rules, setRules] = useState<HAProxyProfileRule[]>([])
   const [availableServers, setAvailableServers] = useState<HAProxyAvailableServer[]>([])
   const [ipOwners, setIpOwners] = useState<HAProxyIpOwners>({})
+  const [loadWeights, setLoadWeights] = useState<HAProxyLoadWeights | null>(null)
   const addressRole = useAddressRole()
   const [serversStatus, setServersStatus] = useState<HAProxyServerStatus[]>([])
   const [syncLog, setSyncLog] = useState<HAProxySyncLogEntry[]>([])
@@ -1096,6 +1136,17 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
   useEffect(() => {
     haproxyProfilesApi.getIpOwners().then(res => setIpOwners(res.data)).catch(() => {})
   }, [])
+
+  // Расчёт весов панель обновляет раз в цикл метрик — чаще спрашивать незачем
+  useEffect(() => {
+    const load = () => {
+      if (document.hidden) return
+      haproxyProfilesApi.getLoadWeights(profileId).then(res => setLoadWeights(res.data)).catch(() => {})
+    }
+    load()
+    const timer = setInterval(load, LOAD_WEIGHTS_POLL_MS)
+    return () => clearInterval(timer)
+  }, [profileId])
 
   // Автообновление статусов серверов каждые 3 секунды
   // (пропускаем, когда вкладка скрыта — не долбим бэкенд в фоне)
@@ -1467,6 +1518,9 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
                               </span>
                             </Tooltip>
                             <span className="text-2xs text-dark-500 hidden sm:block">{r.balancer_options?.algorithm}</span>
+                            {r.balancer_options?.load_weights && (
+                              <span className="text-2xs text-accent-400/80 hidden sm:block">{t('balancer.load_weights_badge')}</span>
+                            )}
                             {r.accept_proxy && <span className="text-2xs text-cyan-400/60 hidden sm:block">ACCEPT</span>}
                           </>
                         ) : (
@@ -1515,6 +1569,7 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
                               ipOwners={ipOwners}
                               nodes={availableServers}
                               dnatServers={dnatServers}
+                              loadLines={loadWeights?.rules[r.name]}
                             />
                           </div>
                         </motion.div>
