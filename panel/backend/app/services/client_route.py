@@ -20,7 +20,6 @@ import ipaddress
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from functools import lru_cache
 from typing import Callable, Optional
 
 from sqlalchemy import select
@@ -30,16 +29,23 @@ from app.models import RemnawaveNodeCache, Server
 from app.services.geoip import GeoRecord
 from app.services.net_utils import host_to_ip
 from app.services.node_ips import public_interface_ipv4, url_host
-from app.services.rail_graph import LegPath, Point, RailGraph, haversine_km, leg_path
 
+Point = tuple[float, float]  # (lon, lat)
+
+EARTH_RADIUS_KM = 6371.0
 # Свет в оптике — ~200 км/мс в одну сторону, значит за 1 мс туда-обратно не дальше 100 км
 KM_PER_RTT_MS = 100.0
+# Кабель не идёт по прямой: путь по сети обычно на треть длиннее расстояния между городами
+FIBER_DETOUR = 1.3
+CURVE_BEND = 0.12
+CURVE_STEP_KM = 15.0
+CURVE_MIN_STEPS = 16
+CURVE_MAX_STEPS = 96
 # База ошибается в пределах области: город провайдера вместо соседнего города роутера
 GEO_SLACK_KM = 150.0
 SAME_STOP_KM = 40.0
 LEG_WARN_EXCESS_MS = 7.0
 LEG_BAD_EXCESS_MS = 15.0
-LEG_CACHE_SIZE = 2048
 COORD_DECIMALS = 4
 
 
@@ -89,8 +95,34 @@ class _Stop:
     hidden_before: list[dict] = field(default_factory=list)
 
 
+def haversine_km(a: Point, b: Point) -> float:
+    lon1, lat1, lon2, lat2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    return 2 * EARTH_RADIUS_KM * math.asin(min(1.0, math.sqrt(h)))
+
+
 def _km(a: RoutePoint, b: RoutePoint) -> float:
     return haversine_km(a.lon_lat, b.lon_lat)
+
+
+def leg_curve(start: Point, end: Point) -> list[list[float]]:
+    """Плавная дуга между городами (квадратичная кривая Безье): соседние участки не
+    сливаются в одну прямую. Через антимеридиан идёт коротким путём."""
+    end_lon = end[0]
+    if end_lon - start[0] > 180:
+        end_lon -= 360
+    elif end_lon - start[0] < -180:
+        end_lon += 360
+    dx, dy = end_lon - start[0], end[1] - start[1]
+    control = ((start[0] + end_lon) / 2 - dy * CURVE_BEND, (start[1] + end[1]) / 2 + dx * CURVE_BEND)
+    steps = max(CURVE_MIN_STEPS, min(CURVE_MAX_STEPS, int(haversine_km(start, end) / CURVE_STEP_KM)))
+    points = []
+    for i in range(steps + 1):
+        t = i / steps
+        lon = (1 - t) ** 2 * start[0] + 2 * (1 - t) * t * control[0] + t * t * end_lon
+        lat = (1 - t) ** 2 * start[1] + 2 * (1 - t) * t * control[1] + t * t * end[1]
+        points.append([round(lon, COORD_DECIMALS), round(lat, COORD_DECIMALS)])
+    return points
 
 
 def _answered(hop: dict) -> bool:
@@ -133,11 +165,6 @@ def _locate(hop: dict, node: RoutePoint,
     return place, None
 
 
-@lru_cache(maxsize=LEG_CACHE_SIZE)
-def _leg_geometry(graph: Optional[RailGraph], start: Point, end: Point) -> LegPath:
-    return leg_path(graph, start, end)
-
-
 def _leg_status(added_ms: Optional[float], expected_ms: float) -> Optional[LegStatus]:
     if added_ms is None:
         return None
@@ -149,22 +176,19 @@ def _leg_status(added_ms: Optional[float], expected_ms: float) -> Optional[LegSt
     return LegStatus.OK
 
 
-def _leg_view(outer: _Stop, inner: _Stop, graph: Optional[RailGraph]) -> dict:
-    # Клиент не ответил: последний участок рисуется по городу из базы, без задержки и без
-    # рельсов — путь до него неизвестен, кратчайшие рельсы его бы выдумали
-    last_mile = outer.kind is StopKind.CLIENT and outer.rtt_ms is None
-    path = _leg_geometry(None if last_mile else graph, outer.point.lon_lat, inner.point.lon_lat)
+def _leg_view(outer: _Stop, inner: _Stop) -> dict:
+    km = _km(outer.point, inner.point)
     added = None if outer.rtt_ms is None or inner.rtt_ms is None else max(0.0, outer.rtt_ms - inner.rtt_ms)
-    expected = path.km / KM_PER_RTT_MS
+    expected = km * FIBER_DETOUR / KM_PER_RTT_MS
     return {
-        "coords": [list(p) for p in path.coords],
-        "km": path.km,
-        "mode": path.mode,
+        "coords": leg_curve(outer.point.lon_lat, inner.point.lon_lat),
+        "km": round(km, 1),
         "added_ms": round(added, 1) if added is not None else None,
         "expected_ms": round(expected, 1),
         "status": _leg_status(added, expected),
         "hidden": outer.hidden_before,
-        "last_mile": last_mile,
+        # Клиент не ответил: последний участок — по городу из базы, без задержки
+        "last_mile": outer.kind is StopKind.CLIENT and outer.rtt_ms is None,
     }
 
 
@@ -178,7 +202,7 @@ def _stop_view(stop: _Stop) -> dict:
 
 
 def assemble_route(trace: dict, node: RoutePoint, client: Optional[RoutePoint],
-                   lookup: Callable[[str], Optional[GeoRecord]], graph: Optional[RailGraph]) -> dict:
+                   lookup: Callable[[str], Optional[GeoRecord]]) -> dict:
     """Остановки и участки от клиента к ноде по ходу трассы (можно звать на каждом опросе)."""
     hops = sorted(trace.get("hops") or [], key=lambda h: h["hop"])
     client_ip = trace.get("ip")
@@ -216,7 +240,7 @@ def assemble_route(trace: dict, node: RoutePoint, client: Optional[RoutePoint],
         stops.append(_Stop(StopKind.CLIENT, client, client_rtt, client_views, pending))
 
     ordered = stops[::-1]
-    legs = [_leg_view(outer, inner, graph) for outer, inner in zip(ordered, ordered[1:])]
+    legs = [_leg_view(outer, inner) for outer, inner in zip(ordered, ordered[1:])]
     known_rtt = client_rtt if client_rtt is not None else max(smoothed.values(), default=None)
     return {
         "client_reached": client_hop is not None,

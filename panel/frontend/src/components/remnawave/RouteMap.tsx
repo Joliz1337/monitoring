@@ -22,7 +22,6 @@ const FLOW_FRAME_MS = 55
 const FIT_PADDING = { top: 48, bottom: 48, left: 48, right: 170 }
 const FIT_MAX_ZOOM = 6
 const FOCUS_MAX_ZOOM = 8
-const DIRECT_OPACITY = 0.6
 // Штрих «бежит» по линии от клиента к ноде: сдвиг рисунка пунктира по кругу
 const DASH_STEPS: number[][] = [
   [0, 4, 3], [0.5, 4, 2.5], [1, 4, 2], [1.5, 4, 1.5], [2, 4, 1], [2.5, 4, 0.5], [3, 4, 0],
@@ -60,7 +59,7 @@ function addLayers({ map }: MapHandle) {
     paint: {
       'line-color': legColor,
       'line-width': ['case', hovered, 4.5, ['interpolate', ['linear'], ['zoom'], 2, 2, 8, 3.5]],
-      'line-opacity': ['match', ['get', 'mode'], 'direct', DIRECT_OPACITY, 0.95],
+      'line-opacity': 0.95,
     },
   })
   map.addLayer({
@@ -118,7 +117,7 @@ function legsCollection(legs: ClientRouteLeg[], fraction: number): GeoJSON.Featu
       type: 'Feature',
       id: index,
       geometry: { type: 'LineString', coordinates: slicePolyline(leg.coords, Math.min(1, shown)) },
-      properties: { index, status: leg.status ?? 'unknown', mode: leg.mode, last_mile: leg.last_mile },
+      properties: { index, status: leg.status ?? 'unknown', last_mile: leg.last_mile },
     })
   })
   return { type: 'FeatureCollection', features }

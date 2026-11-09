@@ -1991,7 +1991,6 @@ export interface ClientRouteStop {
 export interface ClientRouteLeg {
   coords: [number, number][]
   km: number
-  mode: 'rail' | 'direct'
   added_ms: number | null
   expected_ms: number
   status: 'ok' | 'warn' | 'bad' | null

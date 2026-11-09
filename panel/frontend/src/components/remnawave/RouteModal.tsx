@@ -309,9 +309,6 @@ function LegRow({ leg, active, onHover, onFocus }: {
 }) {
   const { t } = useTranslation()
   const color = ROUTE_LEG_COLORS[leg.status ?? 'unknown']
-  const way = leg.last_mile
-    ? t('remnawave.geo.route_leg_last_mile')
-    : t(leg.mode === 'rail' ? 'remnawave.geo.route_leg_rail' : 'remnawave.geo.route_leg_direct')
   return (
     <div
       className={`flex gap-2.5 rounded-lg cursor-pointer transition-colors ${active ? 'bg-dark-800/60' : 'hover:bg-dark-800/40'}`}
@@ -332,7 +329,8 @@ function LegRow({ leg, active, onHover, onFocus }: {
           {leg.added_ms !== null && (
             <b className="font-semibold" style={{ color }}>+{t('remnawave.geo.route_ms', { value: Math.round(leg.added_ms) })} </b>
           )}
-          {t('remnawave.geo.route_km_value', { value: Math.round(leg.km).toLocaleString() })} · {way}
+          {t('remnawave.geo.route_km_value', { value: Math.round(leg.km).toLocaleString() })}
+          {leg.last_mile && <> · {t('remnawave.geo.route_leg_last_mile')}</>}
         </div>
         {leg.status && leg.status !== 'ok' && (
           <div style={{ color }}>

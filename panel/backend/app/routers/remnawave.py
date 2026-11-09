@@ -3,7 +3,6 @@
 IP collection via Remnawave Panel API, HWID device tracking.
 """
 
-import asyncio
 import ipaddress
 import json
 import logging
@@ -26,7 +25,6 @@ from app.routers.loss import trace_http_error
 from app.services.client_route import RoutePoint, assemble_route, find_node_server, node_route_point
 from app.services.geoip import geoip_status, get_geoip, request_geoip_update
 from app.services.loss_trace import TraceError, fetch_trace, start_trace
-from app.services.rail_graph import get_rail_graph
 from app.services.known_clients import build_ua_pattern, default_ua_text
 from app.services.remnawave_api import get_remnawave_api
 from app.services.remnawave_geo_ingest import DEFAULT_IP_HISTORY_DAYS
@@ -619,7 +617,7 @@ async def get_client_route(
     except TraceError as exc:
         raise trace_http_error(exc)
     client = RoutePoint.from_geo(geoip.lookup(trace.get("ip", "")))
-    route = await asyncio.to_thread(assemble_route, trace, node, client, geoip.lookup, await get_rail_graph())
+    route = assemble_route(trace, node, client, geoip.lookup)
     return {
         "ip": trace.get("ip"), "state": trace.get("state"), "error": trace.get("error"),
         "rounds_done": trace.get("rounds_done", 0), "rounds_total": trace.get("rounds_total", 0),

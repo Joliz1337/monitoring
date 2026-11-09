@@ -19,7 +19,6 @@ from app.services.client_route import (  # noqa: E402
     HiddenReason, LegStatus, RoutePoint, StopKind, assemble_route, find_node_server,
 )
 from app.services.geoip import GeoRecord  # noqa: E402
-from app.services.rail_graph import LegMode, build_graph  # noqa: E402
 
 AMSTERDAM = RoutePoint(lat=52.37, lon=4.90, place="Amsterdam", country_code="NL")
 CLIENT_IP = "85.140.1.1"
@@ -58,7 +57,7 @@ def trace(*hops):
 
 
 def build(hops, located: dict[str, str], client=point("Krasnodar")):
-    return assemble_route(trace(*hops), AMSTERDAM, client, lambda ip: record(located[ip]) if ip in located else None, None)
+    return assemble_route(trace(*hops), AMSTERDAM, client, lambda ip: record(located[ip]) if ip in located else None)
 
 
 class StopsTests(unittest.TestCase):
@@ -149,6 +148,12 @@ class LegsTests(unittest.TestCase):
         self.assertEqual(node_leg["status"], LegStatus.OK)
         self.assertAlmostEqual(node_leg["added_ms"], 8.0)
 
+    def test_usual_latency_over_long_distance_is_ok(self):
+        # Амстердам → Москва ~2150 км по прямой, обычные ~30 мс: кабель длиннее прямой,
+        # участок не должен желтеть только из-за этого
+        route = build([hop(1, "80.0.0.5", 30.0)], {"80.0.0.5": "Moscow"})
+        self.assertEqual(route["legs"][-1]["status"], LegStatus.OK)
+
     def test_unanswered_client_gets_dashed_last_mile_without_latency(self):
         route = build([hop(1, "80.0.0.3", 8.0), hop(2, None)], {"80.0.0.3": "Berlin"})
         last_mile = route["legs"][0]
@@ -156,19 +161,6 @@ class LegsTests(unittest.TestCase):
         self.assertIsNone(last_mile["added_ms"])
         self.assertIsNone(last_mile["status"])
         self.assertFalse(route["client_reached"])
-
-    def test_last_mile_is_schematic_even_where_rails_exist(self):
-        # Путь до неответившего клиента неизвестен — рисовать его по рельсам значило бы
-        # выдумать маршрут (по кратчайшим рельсам Минск → Краснодар шёл бы через Украину)
-        berlin, krasnodar = PLACES["Berlin"], PLACES["Krasnodar"]
-        rails = [(berlin[2] + (krasnodar[2] - berlin[2]) * i / 20, berlin[1] + (krasnodar[1] - berlin[1]) * i / 20 + 0.3 * (i % 2))
-                 for i in range(21)]
-        graph = build_graph([rails])
-        route = assemble_route(trace(hop(1, "80.0.0.3", 8.0), hop(2, None)), AMSTERDAM, point("Krasnodar"),
-                               lambda ip: record("Berlin") if ip == "80.0.0.3" else None, graph)
-        last_mile = route["legs"][0]
-        self.assertTrue(last_mile["last_mile"])
-        self.assertEqual(last_mile["mode"], LegMode.DIRECT)
 
     def test_answered_client_closes_the_route(self):
         route = build([hop(1, "80.0.0.3", 8.0), hop(2, CLIENT_IP, 45.0)], {"80.0.0.3": "Berlin"})
