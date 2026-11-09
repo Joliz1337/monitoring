@@ -10,6 +10,7 @@ import os
 import sys
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -23,6 +24,7 @@ from app.services.fleet_history import (  # noqa: E402
     fleet_point,
     node_capacity,
 )
+from app.services import fleet_history  # noqa: E402
 from app.services.metrics_history import insert_gap_markers, merge_downtime  # noqa: E402
 
 
@@ -110,6 +112,33 @@ class PeriodTests(unittest.TestCase):
 
     def test_every_period_has_a_cache_ttl(self):
         self.assertEqual(set(CACHE_TTL_SEC), set(FLEET_PERIODS))
+
+
+class CacheTests(unittest.TestCase):
+    def setUp(self):
+        fleet_history._cache.clear()
+        self.addCleanup(fleet_history._cache.clear)
+        clock = patch.object(fleet_history.time, "monotonic", return_value=1000.0)
+        self.monotonic = clock.start()
+        self.addCleanup(clock.stop)
+
+    def test_folder_and_whole_fleet_are_cached_apart(self):
+        fleet_history._store(("24h", None), {"scope": "fleet"})
+        fleet_history._store(("24h", "EU"), {"scope": "EU"})
+        self.assertEqual(fleet_history._cached(("24h", None)), {"scope": "fleet"})
+        self.assertEqual(fleet_history._cached(("24h", "EU")), {"scope": "EU"})
+        self.assertIsNone(fleet_history._cached(("24h", "US")))
+
+    def test_entry_expires_after_period_ttl(self):
+        fleet_history._store(("1h", "EU"), {"scope": "EU"})
+        self.monotonic.return_value = 1000.0 + CACHE_TTL_SEC["1h"]
+        self.assertIsNone(fleet_history._cached(("1h", "EU")))
+
+    def test_store_drops_expired_keys_of_renamed_folders(self):
+        fleet_history._store(("1h", "old name"), {"scope": "old"})
+        self.monotonic.return_value = 1000.0 + CACHE_TTL_SEC["1h"]
+        fleet_history._store(("1h", "new name"), {"scope": "new"})
+        self.assertEqual(set(fleet_history._cache), {("1h", "new name")})
 
 
 class PanelDowntimeTests(unittest.TestCase):

@@ -190,11 +190,14 @@ def _clean_url(v: str) -> str:
     return v
 
 
+FOLDER_MAX_LENGTH = 200  # длина колонки servers.folder
+
+
 class ServerCreate(BaseModel):
     name: str
     url: str
     proxy_url: Optional[str] = None
-    folder: Optional[str] = Field(None, max_length=200)
+    folder: Optional[str] = Field(None, max_length=FOLDER_MAX_LENGTH)
 
     @field_validator('url')
     @classmethod
@@ -421,11 +424,12 @@ async def get_migration_status(
 @router.get("/fleet/history")
 async def get_fleet_history(
     period: FleetPeriod = Query(default="24h"),
+    folder: Optional[str] = Query(default=None, min_length=1, max_length=FOLDER_MAX_LENGTH),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth),
 ):
-    """Сводная история парка под плитками дашборда: CPU, память и скорости сети."""
-    return await load_fleet_history(db, period)
+    """Сводная история парка или одной папки: CPU, память и скорости сети."""
+    return await load_fleet_history(db, period, folder)
 
 
 @router.post("")

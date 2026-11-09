@@ -30,7 +30,8 @@ import { useFolderBoard, FOLDER_SORTABLE_PREFIX } from '../hooks/useFolderBoard'
 import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import ServerCard, { ServerCardOverlay } from '../components/Dashboard/ServerCard'
 import FleetSummary from '../components/Dashboard/FleetSummary'
-import { FolderLoadBadges, FolderStatusCounts } from '../components/Dashboard/FolderStats'
+import { FolderChartButton, FolderLoadBadges, FolderLoadChart, FolderStatusCounts } from '../components/Dashboard/FolderStats'
+import type { LoadMetric } from '../components/Dashboard/LoadHistoryPanel'
 import { SortableFolder, UnfolderDropZone, FolderDragPreview } from '../components/folders/SortableFolder'
 import { FolderDialogs } from '../components/folders/FolderDialogs'
 import { ServerCardSkeleton } from '../components/ui/Skeleton'
@@ -65,6 +66,17 @@ export default function Dashboard() {
   const [collapsed, toggleCollapsed] = useCollapsedFolders(COLLAPSED_KEY)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter | null>(null)
+  // Открытый график каждой папки; папки без ключа — график закрыт
+  const [folderCharts, setFolderCharts] = useState<Record<string, LoadMetric>>({})
+
+  const setFolderChart = useCallback((folder: string, metric: LoadMetric | null) => {
+    setFolderCharts(prev => {
+      const next = { ...prev }
+      if (metric) next[folder] = metric
+      else delete next[folder]
+      return next
+    })
+  }, [])
 
   useEffect(() => {
     fetchServersWithMetrics().then(() => { initialLoadDone.current = true })
@@ -348,6 +360,8 @@ export default function Dashboard() {
                 {folders.map(folderName => {
                   const folderServers = grouped.get(folderName) || []
                   const folderActiveServers = activeGrouped.get(folderName) ?? NO_SERVERS
+                  const folderChart = folderCharts[folderName] ?? null
+                  const onChartChange = (metric: LoadMetric | null) => setFolderChart(folderName, metric)
                   return (
                     <SortableFolder
                       key={folderName}
@@ -357,14 +371,35 @@ export default function Dashboard() {
                       onToggle={() => toggleCollapsed(folderName)}
                       onRename={() => board.openRenameFolder(folderName)}
                       onDelete={() => board.deleteFolder(folderName)}
-                      badges={
-                        <>
-                          <FolderStatusCounts servers={folderActiveServers} />
-                          <FolderLoadBadges servers={folderActiveServers} className="hidden sm:flex flex-shrink-0" />
-                        </>
+                      badges={<FolderStatusCounts servers={folderActiveServers} />}
+                      controls={
+                        <FolderLoadBadges
+                          servers={folderActiveServers}
+                          chart={folderChart}
+                          onChartChange={onChartChange}
+                          className="hidden sm:flex flex-shrink-0 ml-1.5"
+                        />
                       }
                       // На телефоне рядом с именем места нет — загрузка уходит второй строкой
-                      footer={<FolderLoadBadges servers={folderActiveServers} className="sm:hidden basis-full pl-7" />}
+                      footer={
+                        <FolderLoadBadges
+                          servers={folderActiveServers}
+                          chart={folderChart}
+                          onChartChange={onChartChange}
+                          className="sm:hidden basis-full pl-7"
+                        />
+                      }
+                      actions={
+                        <FolderChartButton servers={folderActiveServers} chart={folderChart} onChartChange={onChartChange} />
+                      }
+                      panel={
+                        <FolderLoadChart
+                          servers={folderActiveServers}
+                          folder={folderName}
+                          chart={folderChart}
+                          onChartChange={onChartChange}
+                        />
+                      }
                     >
                       {folderServers.length > 0 ? (
                         <SortableContext items={folderServers.map(s => s.id)} strategy={rectSortingStrategy}>

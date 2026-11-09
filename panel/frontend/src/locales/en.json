@@ -141,7 +141,12 @@
     "fleet_chart_memory": "Fleet memory",
     "fleet_chart_network": "Fleet network speed",
     "fleet_chart_scope_one": "across {{count}} server online",
-    "fleet_chart_scope_other": "across {{count}} servers online"
+    "fleet_chart_scope_other": "across {{count}} servers online",
+    "folder_chart_cpu": "Folder CPU",
+    "folder_chart_memory": "Folder memory",
+    "folder_chart_network": "Folder network speed",
+    "folder_chart_hint": "Click for the history chart",
+    "folder_chart_button": "Folder load chart"
   },
   "servers": {
     "title": "Servers",

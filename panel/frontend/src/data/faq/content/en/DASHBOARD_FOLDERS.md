@@ -12,6 +12,7 @@ Grouping for cards so you can find the right node among dozens or hundreds.
 ## Good to know
 
 - The folder header shows how many of its servers are online and offline, plus the combined load: CPU, RAM and network speed across the servers that are up. It stays visible when the folder is collapsed. Search and filters don't change these numbers.
+- The chart button on the right of the folder header, next to the pencil, opens the folder's load chart. It's the same as the summary at the top, but only for the folder's servers: CPU, RAM and network for an hour, day, week, month or year. Click again to close it; it works on a collapsed folder too. To jump straight to one metric, click the CPU, RAM or network numbers in the header.
 - Folders and card order live **in the panel database** — every administrator sees the same layout, and it survives browser changes and cache clearing. Only collapsed state and view mode are kept locally.
 - One server belongs to one folder. There are no nested folders: use names like `EU-Production-VPN` for hierarchy.
 - Cards are moved one at a time; there is no bulk move in the interface.

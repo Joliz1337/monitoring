@@ -1,8 +1,8 @@
-"""Сводная история всего парка для плиток дашборда.
+"""Сводная история всего парка или одной папки для плиток и папок дашборда.
 
-Плитки сводки показывают мгновенный срез: суммарные CPU, RAM и скорости сети
-по онлайн-нодам. Здесь та же арифметика, но по истории — за час, сутки, неделю,
-месяц или год. Отдельной таблицы под это нет: точка собирается на лету из
+Плитки сводки и бейджи папок показывают мгновенный срез: суммарные CPU, RAM и
+скорости сети по онлайн-нодам. Здесь та же арифметика, но по истории — за час,
+сутки, неделю, месяц или год. Отдельной таблицы под это нет: точка собирается на лету из
 per-server истории (`metrics_snapshots` и `aggregated_metrics`) двумя уровнями
 агрегации — сначала среднее по (сервер, бакет), потом взвешенная сумма по
 бакету. Без внутреннего уровня нода, отдавшая в бакет два снапшота, весила бы
@@ -220,10 +220,12 @@ def fleet_point(row: Mapping[str, Any]) -> dict[str, Any]:
     return point
 
 
-async def load_capacity(db: AsyncSession) -> FleetCapacity:
-    result = await db.execute(
-        select(Server.id, Server.last_metrics).where(Server.is_active == True)  # noqa: E712
-    )
+async def load_capacity(db: AsyncSession, folder: Optional[str]) -> FleetCapacity:
+    """Ёмкость активных нод парка, а с `folder` — только нод этой папки."""
+    query = select(Server.id, Server.last_metrics).where(Server.is_active == True)  # noqa: E712
+    if folder is not None:
+        query = query.where(Server.folder == folder)
+    result = await db.execute(query)
     return build_capacity(result.all())
 
 
@@ -267,14 +269,14 @@ async def load_points(
     return [fleet_point(row) for row in result.mappings().all()]
 
 
-async def _build_history(db: AsyncSession, period: FleetPeriod) -> dict[str, Any]:
+async def _build_history(db: AsyncSession, period: FleetPeriod, folder: Optional[str]) -> dict[str, Any]:
     spec = FLEET_PERIODS[period]
     end = _utcnow()
     # Начало окна — на границе бакета: иначе первый бакет считался бы по
     # усыхающему хвосту снапшотов и менялся при каждом обновлении страницы.
     start = align_down(end - spec.span, spec.bucket_sec)
 
-    capacity = await load_capacity(db)
+    capacity = await load_capacity(db, folder)
     points = await load_points(db, capacity, spec, start, end) if capacity else []
     gaps = merge_downtime(await load_panel_downtime(db, start, end), start, end)
     interval = await load_collect_interval(db)
@@ -293,28 +295,47 @@ async def _build_history(db: AsyncSession, period: FleetPeriod) -> dict[str, Any
     }
 
 
-_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+# Ключ — (период, папка); None — весь парк.
+CacheKey = tuple[str, Optional[str]]
+
+_cache: dict[CacheKey, tuple[float, dict[str, Any]]] = {}
 _cache_lock = asyncio.Lock()
 
 
-def _cached(period: str) -> Optional[dict[str, Any]]:
-    entry = _cache.get(period)
+def _is_fresh(key: CacheKey, stored_at: float, now: float) -> bool:
+    return now - stored_at < CACHE_TTL_SEC[key[0]]
+
+
+def _cached(key: CacheKey) -> Optional[dict[str, Any]]:
+    entry = _cache.get(key)
     if entry is None:
         return None
     stored_at, payload = entry
-    return payload if time.monotonic() - stored_at < CACHE_TTL_SEC[period] else None
+    return payload if _is_fresh(key, stored_at, time.monotonic()) else None
 
 
-async def load_fleet_history(db: AsyncSession, period: FleetPeriod) -> dict[str, Any]:
-    payload = _cached(period)
+def _store(key: CacheKey, payload: dict[str, Any]) -> None:
+    # Папки переименовывают и удаляют — без чистки ключи старых имён копились бы
+    # до перезапуска панели.
+    now = time.monotonic()
+    for stale in [k for k, (stored_at, _) in _cache.items() if not _is_fresh(k, stored_at, now)]:
+        del _cache[stale]
+    _cache[key] = (now, payload)
+
+
+async def load_fleet_history(
+    db: AsyncSession, period: FleetPeriod, folder: Optional[str] = None
+) -> dict[str, Any]:
+    key: CacheKey = (period, folder)
+    payload = _cached(key)
     if payload is not None:
         return payload
 
     async with _cache_lock:
         # Пока ждали лок, другой запрос мог пересобрать кэш.
-        payload = _cached(period)
+        payload = _cached(key)
         if payload is not None:
             return payload
-        payload = await _build_history(db, period)
-        _cache[period] = (time.monotonic(), payload)
+        payload = await _build_history(db, period, folder)
+        _store(key, payload)
         return payload

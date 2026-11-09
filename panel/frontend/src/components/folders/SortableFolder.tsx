@@ -17,14 +17,20 @@ interface SortableFolderProps {
   onDelete: () => void
   /** Бейджи сразу за именем, внутри кнопки сворачивания — видны и у свёрнутой папки */
   badges?: ReactNode
+  /** Свои кнопки за бейджами — снаружи кнопки сворачивания, кнопку в кнопку вкладывать нельзя */
+  controls?: ReactNode
   /** Отдельная строка под заголовком — для того, что на узком экране не влезает рядом с именем */
   footer?: ReactNode
+  /** Блок под заголовком, который не сворачивается вместе с серверами папки */
+  panel?: ReactNode
+  /** Кнопки-иконки перед правкой и удалением */
+  actions?: ReactNode
   children: ReactNode
 }
 
 /** Папка, которую можно перетаскивать за ручку и в которую можно бросить сервер */
 export function SortableFolder({
-  name, collapsed, isDropTarget, onToggle, onRename, onDelete, badges, footer, children,
+  name, collapsed, isDropTarget, onToggle, onRename, onDelete, badges, controls, footer, panel, actions, children,
 }: SortableFolderProps) {
   const { t } = useTranslation()
   const {
@@ -69,16 +75,26 @@ export function SortableFolder({
           >
             <GripVertical className="w-4 h-4" />
           </div>
-          <button onClick={onToggle} className="flex items-center gap-2.5 flex-1 min-w-0 group">
+          <button onClick={onToggle} aria-expanded={!collapsed} className="flex items-center gap-2.5 min-w-0 group">
             <div className="w-8 h-8 rounded-lg bg-blue-500/15 flex items-center justify-center flex-shrink-0">
               {collapsed ? <Folder className="w-4 h-4 text-blue-400" /> : <FolderOpen className="w-4 h-4 text-blue-400" />}
             </div>
             <span className="text-sm font-semibold text-white truncate group-hover:text-blue-300 transition">{name}</span>
             {badges}
+          </button>
+          {controls}
+          {/* Свободное место до правки и удаления сворачивает папку, как раньше вся строка */}
+          <button
+            onClick={onToggle}
+            tabIndex={-1}
+            aria-hidden="true"
+            className="flex-1 self-stretch flex items-center pl-1.5 min-w-[1.25rem]"
+          >
             {collapsed ? <ChevronRight className="w-3.5 h-3.5 text-dark-500 flex-shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-dark-500 flex-shrink-0" />}
           </button>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0 ml-2">
+          {actions}
           <Tooltip label={t('common.edit')}>
             <button onClick={onRename} className="p-1.5 text-dark-500 hover:text-dark-300 transition rounded-lg hover:bg-dark-800/50">
               <Pencil className="w-4 h-4" />
@@ -92,6 +108,7 @@ export function SortableFolder({
         </div>
         {footer}
       </div>
+      {panel}
       <AnimatePresence initial={false}>
         {!collapsed && (
           <motion.div

@@ -982,9 +982,9 @@ export const serversApi = {
     }),
   deleteRemnawaveCert: (id: number) =>
     api.delete<{ success: boolean }>(`/servers/remnawave-certs/${id}`),
-  // Сводная история всего парка под плитками дашборда
-  getFleetHistory: (period: string) =>
-    api.get<FleetHistoryResponse>('/servers/fleet/history', { params: { period } }),
+  // Сводная история всего парка под плитками дашборда, с folder — одной папки
+  getFleetHistory: (period: string, folder?: string) =>
+    api.get<FleetHistoryResponse>('/servers/fleet/history', { params: { period, folder } }),
 }
 
 // Точка сводки по парку: CPU и память — средневзвешенные по ёмкости нод,

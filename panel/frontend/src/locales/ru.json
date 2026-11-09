@@ -145,7 +145,12 @@
     "fleet_chart_scope_one": "по {{count}} серверу онлайн",
     "fleet_chart_scope_few": "по {{count}} серверам онлайн",
     "fleet_chart_scope_many": "по {{count}} серверам онлайн",
-    "fleet_chart_scope_other": "по {{count}} серверам онлайн"
+    "fleet_chart_scope_other": "по {{count}} серверам онлайн",
+    "folder_chart_cpu": "CPU папки",
+    "folder_chart_memory": "Память папки",
+    "folder_chart_network": "Скорость сети папки",
+    "folder_chart_hint": "Нажмите — график за период",
+    "folder_chart_button": "График нагрузки папки"
   },
   "servers": {
     "title": "Серверы",
