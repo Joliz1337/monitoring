@@ -4,7 +4,7 @@ No auth dependency: nginx terminates mTLS with the panel CA before requests
 reach uvicorn (same model as every other node router).
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.services.antiddos_manager import get_antiddos_manager
@@ -71,7 +71,11 @@ async def set_watchdog(request: WatchdogRequest):
 @router.post("/whitelist/sync")
 async def sync_whitelist(request: WhitelistSyncRequest):
     ok, msg, count = await get_antiddos_manager().sync_whitelist(request.ips)
-    return {"success": ok, "message": msg, "count": count}
+    if not ok:
+        # Панель судит о доставке по коду ответа: 200 с success=false она сочла бы
+        # успехом и не стала бы досылать набор
+        raise HTTPException(status_code=502, detail=msg)
+    return {"success": True, "message": msg, "count": count}
 
 
 @router.post("/install")

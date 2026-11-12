@@ -3,37 +3,43 @@
 Runnable with plain stdlib:  python -m unittest discover -s panel/backend/tests
 """
 
-import json
 import os
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from sqlalchemy.dialects import postgresql  # noqa: E402
+
+from app.services import server_ip_owners  # noqa: E402
+from app.services.latest_metrics import LatestMetrics  # noqa: E402
 from app.services.server_ip_owners import (  # noqa: E402
     IpOwner,
     ServerAddressSource,
     build_ip_owners,
+    load_ip_owners,
 )
 
 
-def metrics_with(*interfaces: list[dict]) -> str:
-    return json.dumps({
+def metrics_with(*interfaces: list[dict]) -> dict:
+    return {
         "network": {
             "interfaces": [
                 {"name": f"eth{i}", "addresses": addresses}
                 for i, addresses in enumerate(interfaces)
             ],
         },
-    })
+    }
 
 
 def ipv4(address: str) -> dict:
     return {"type": "ipv4", "address": address, "netmask": "255.255.255.0"}
 
 
-def server(server_id: int, name: str, url: str, last_metrics: str | None = None) -> ServerAddressSource:
-    return ServerAddressSource(id=server_id, name=name, url=url, last_metrics=last_metrics)
+def server(server_id: int, name: str, url: str, metrics: dict | None = None) -> ServerAddressSource:
+    return ServerAddressSource(id=server_id, name=name, url=url, metrics=metrics)
 
 
 class BuildIpOwnersTest(unittest.TestCase):
@@ -112,11 +118,11 @@ class BuildIpOwnersTest(unittest.TestCase):
 
         self.assertEqual(owners["5.9.0.10"], IpOwner(1, "first"))
 
-    def test_broken_or_missing_metrics_leave_only_url_host(self):
+    def test_malformed_or_missing_metrics_leave_only_url_host(self):
         owners = build_ip_owners([
-            server(1, "a", "https://a.example.com", "{not json"),
-            server(2, "b", "https://b.example.com", json.dumps(["unexpected"])),
-            server(3, "c", "https://c.example.com", json.dumps({"network": None})),
+            server(1, "a", "https://a.example.com", {"network": {"interfaces": "eth0"}}),
+            server(2, "b", "https://b.example.com", {}),
+            server(3, "c", "https://c.example.com", {"network": None}),
             server(4, "d", "https://d.example.com"),
         ])
 
@@ -126,6 +132,42 @@ class BuildIpOwnersTest(unittest.TestCase):
         owners = build_ip_owners([server(1, "bad", "https://[::1:9100")])
 
         self.assertEqual(owners, {})
+
+
+class RecordingSession:
+    """Сессия без базы: отдаёт заготовленные строки и запоминает текст запросов."""
+
+    def __init__(self, rows: list[tuple]) -> None:
+        self._rows = rows
+        self.queries: list[str] = []
+
+    async def execute(self, statement):
+        self.queries.append(str(statement.compile(dialect=postgresql.dialect())))
+        return SimpleNamespace(fetchall=lambda: self._rows)
+
+
+class LoadIpOwnersTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.latest = LatestMetrics()
+        store_patch = mock.patch.object(server_ip_owners, "get_latest_metrics", return_value=self.latest)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
+
+    async def test_interface_addresses_come_from_the_latest_answers_in_memory(self):
+        self.latest.put(1, metrics_with([ipv4("5.9.0.11"), ipv4("5.9.0.12")]))
+        db = RecordingSession([(1, "DE", "https://5.9.0.11:9100"), (2, "FI", "https://fi.example.com")])
+
+        owners = await load_ip_owners(db)
+
+        self.assertEqual(owners["5.9.0.12"], IpOwner(1, "DE", 1))
+        self.assertEqual(owners["fi.example.com"], IpOwner(2, "FI"))
+
+    async def test_saved_answers_are_not_read_from_the_database(self):
+        db = RecordingSession([(1, "DE", "https://5.9.0.11:9100")])
+
+        await load_ip_owners(db)
+
+        self.assertFalse([query for query in db.queries if "last_metrics" in query])
 
 
 if __name__ == "__main__":

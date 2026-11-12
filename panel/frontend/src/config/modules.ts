@@ -23,6 +23,8 @@ import {
   FolderCog,
   ShieldHalf,
   Wrench,
+  Search,
+  Gauge,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -75,6 +77,8 @@ export const PANEL_MODULES: PanelModule[] = [
   { id: 'updates', path: 'updates', icon: Package, labelKey: 'common.updates', group: 'maintenance' },
   { id: 'system-optimizations', path: 'system-optimizations', icon: Settings2, labelKey: 'sys_opt.title', group: 'maintenance' },
   { id: 'wildcard-ssl', path: 'wildcard-ssl', icon: ShieldCheck, labelKey: 'wildcard_ssl.title', group: 'maintenance' },
+  { id: 'ip-search', path: 'ip-search', icon: Search, labelKey: 'ip_search.title', group: 'maintenance' },
+  { id: 'cloud-bandwidth', path: 'cloud-bandwidth', icon: Gauge, labelKey: 'cloud_bandwidth.title', group: 'maintenance' },
   { id: 'settings', path: 'settings', icon: Settings, labelKey: 'common.settings' },
 ]
 

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -33,6 +34,12 @@ logger = logging.getLogger(__name__)
 BACKUP_DIR = Path("/app/data/backups")
 POSTGRES_CONTAINER = "panel-postgres"
 MAX_BACKUPS = 20
+PG_DUMP_TIMEOUT_SEC = 600
+# Сырые замеры раз в 10 секунд живут всего сутки, но при 2000 нодах это ~17 млн
+# строк и ~5 ГБ: дамп с ними не укладывался ни в таймаут, ни в память. Из дампа
+# выпадают только строки — определение таблицы остаётся, и restore создаёт её
+# пустой; часовые и суточные агрегаты едут в бэкапе целиком.
+RAW_METRICS_TABLE = "metrics_snapshots"
 
 # Весь .env панели едет внутри .dump заголовком — чтобы бэкапом можно было
 # восстановить панель полностью (логин, секреты, ключ шифрования). Без ключа
@@ -72,13 +79,23 @@ def _pg_env() -> tuple[str, str]:
 
 def _run_pg_dump() -> tuple[bytes, str | None]:
     user, db = _pg_env()
-    result = subprocess.run(
-        ["docker", "exec", POSTGRES_CONTAINER, "pg_dump", "-U", user, "-d", db, "-Fc"],
-        capture_output=True,
-        timeout=600,
-    )
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            [
+                "docker", "exec", POSTGRES_CONTAINER, "pg_dump", "-U", user, "-d", db, "-Fc",
+                f"--exclude-table-data={RAW_METRICS_TABLE}",
+            ],
+            capture_output=True,
+            timeout=PG_DUMP_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        # Обычный провал, а не исключение: вылетев наружу, таймаут обходил запись
+        # запуска автобэкапа, и расписание стартовало новый дамп каждую минуту
+        return b"", f"pg_dump timed out after {PG_DUMP_TIMEOUT_SEC} s"
     if result.returncode != 0:
         return b"", result.stderr.decode(errors="replace")
+    logger.info("pg_dump finished: %d bytes in %.1f s", len(result.stdout), time.monotonic() - started)
     return result.stdout, None
 
 
@@ -546,15 +563,10 @@ async def update_backup_settings(
 async def backup_to_telegram_now(_: dict = Depends(verify_auth)):
     """Внеплановый бэкап в Telegram в фоне (может идти минуты на медленном канале)."""
     async def task():
-        from app.services.backup_scheduler import get_or_create_settings, run_backup_to_telegram
-        now = datetime.now(timezone.utc)
+        from app.services.backup_scheduler import get_or_create_settings, run_and_record
         async with async_session_maker() as db:
             s = await get_or_create_settings(db)
-            ok, err = await run_backup_to_telegram(s)
-            s.last_run_at = now
-            s.last_status = "ok" if ok else "error"
-            s.last_error = err
-            await db.commit()
+        await run_and_record(s, datetime.now(timezone.utc))
 
     asyncio.create_task(task())
     return {"success": True, "message": "Backup to Telegram started"}

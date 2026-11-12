@@ -121,6 +121,8 @@ If the command is run inside the Hetzner Rescue System, the installer provisions
 | **Servers behind DPI blocking (TSPU)** | "Download everything through the panel" for node install, Remnawave install and HAProxy upgrade; Docker image delivery to the node over SSH; SOCKS5 proxy to the node |
 | **Optimizations** | Kernel, network and NIC tuning on nodes — values computed for the actual hardware |
 | **Time sync** | Time zone and NTP on all servers and the panel itself — with chrony, systemd-timesyncd and ntp |
+| **IP Search** | Picks public IP addresses from the subnets you need in VK Cloud, Yandex Cloud, Cloud.ru and Selectel: per-account workers, statistics of issued addresses, a Telegram message when an address is caught |
+| **Cloud.ru Bandwidth** | Bandwidth of Cloud.ru Advanced public IPs on a schedule or by node load, with history and cost estimate |
 | **Backups** | One-click panel database backups and auto-backups to Telegram: password encryption, volumes < 50 MB, restore right from the panel |
 
 ### Services

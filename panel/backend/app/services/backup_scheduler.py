@@ -18,6 +18,10 @@ from app.services import backup_telegram
 logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL = 60
+_BYTES_PER_MB = 1024 * 1024
+# Строку длиннее колонки Postgres отклоняет целиком, и запуск остался бы
+# незаписанным; а pg_dump в тексте ошибки перечисляет все колонки таблицы
+_LAST_ERROR_MAX_LEN = BackupSettings.__table__.c.last_error.type.length
 _task: asyncio.Task | None = None
 
 
@@ -56,6 +60,19 @@ def should_run(s: BackupSettings, now: datetime) -> bool:
     return True
 
 
+def _dump_and_frame() -> tuple[bytes, str | None]:
+    """Дамп с вшитым .env или причина провала — целиком в потоке executor'а.
+
+    Сырой дамп из потока не выходит: результат executor'а остаётся в памяти,
+    пока корутина не уступит циклу событий, то есть до самой заливки, и дамп
+    пролежал бы всё шифрование рядом со своей копией с .env и шифртекстом.
+    """
+    data, err = backup_router._run_pg_dump()
+    if err or not data:
+        return b"", err or "Пустой дамп"
+    return backup_router._frame_backup(data, backup_router.read_panel_env()), None
+
+
 async def run_backup_to_telegram(s: BackupSettings) -> tuple[bool, str | None]:
     """Снять дамп, зашифровать паролем, разбить на тома и залить в Telegram."""
     token, chat_id, password = s.bot_token, s.chat_id, s.archive_password
@@ -65,21 +82,21 @@ async def run_backup_to_telegram(s: BackupSettings) -> tuple[bool, str | None]:
         return False, "Не задан пароль архива"
 
     loop = asyncio.get_event_loop()
-    data, err = await loop.run_in_executor(None, backup_router._run_pg_dump)
-    if err or not data:
-        msg = err or "Пустой дамп"
-        await backup_telegram.send_message(token, chat_id, f"🔴 Бэкап панели не выполнен: {msg}")
-        return False, msg
+    framed, err = await loop.run_in_executor(None, _dump_and_frame)
+    if err:
+        await backup_telegram.send_message(token, chat_id, f"🔴 Бэкап панели не выполнен: {err}")
+        return False, err
+    size_mb = len(framed) // _BYTES_PER_MB
 
-    framed = backup_router._frame_backup(data, backup_router.read_panel_env())
-
-    volume_bytes = max(1, s.volume_size_mb or 45) * 1024 * 1024
+    volume_bytes = max(1, s.volume_size_mb or 45) * _BYTES_PER_MB
     try:
         parts = backup_telegram.encrypt_and_split(framed, password, volume_bytes)
+        # У шифртекста своя копия архива — открытый текст на время заливки не нужен
+        del framed
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         caption = (
             f"🗄 Бэкап панели\n📅 {ts} UTC\n"
-            f"📦 {len(framed) // (1024 * 1024)} МБ · томов: {len(parts)}\n🔐 AES-256"
+            f"📦 {size_mb} МБ · томов: {len(parts)}\n🔐 AES-256"
         )
         await backup_telegram.send_volumes(token, chat_id, parts, f"panel-backup_{ts}.enc", caption)
     except Exception as exc:  # noqa: BLE001 — граница: крипто/сеть Telegram
@@ -95,8 +112,22 @@ async def _record_run(now: datetime, ok: bool, err: str | None) -> None:
         s = await get_or_create_settings(db)
         s.last_run_at = now
         s.last_status = "ok" if ok else "error"
-        s.last_error = err
+        s.last_error = err[:_LAST_ERROR_MAX_LEN] if err else err
         await db.commit()
+
+
+async def run_and_record(settings: BackupSettings, now: datetime) -> None:
+    """Выполнить бэкап и записать исход запуска — при любом сбое.
+
+    Незаписанный запуск расписание считает несостоявшимся и стартует новый дамп
+    каждую минуту, поэтому неожиданное исключение — тоже записанный провал.
+    """
+    try:
+        ok, err = await run_backup_to_telegram(settings)
+    except Exception as exc:  # noqa: BLE001 — записать нужно любой исход
+        logger.exception("Auto-backup failed unexpectedly")
+        ok, err = False, f"{type(exc).__name__}: {exc}"
+    await _record_run(now, ok, err)
 
 
 async def _loop() -> None:
@@ -107,8 +138,7 @@ async def _loop() -> None:
             now = datetime.now(timezone.utc)
             if should_run(settings, now):
                 logger.info("Auto-backup: scheduled run starting")
-                ok, err = await run_backup_to_telegram(settings)
-                await _record_run(now, ok, err)
+                await run_and_record(settings, now)
         except Exception as exc:  # noqa: BLE001 — верхняя граница фонового цикла
             logger.error("Auto-backup scheduler error: %s", exc)
         await asyncio.sleep(CHECK_INTERVAL)

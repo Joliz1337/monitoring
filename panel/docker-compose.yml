@@ -98,8 +98,6 @@ services:
         - CACHE_BUST=${CACHE_BUST:-}
     container_name: panel-frontend
     restart: unless-stopped
-    environment:
-      - EXT_KEY=${EXT_KEY:-}
     depends_on:
       backend:
         condition: service_healthy
@@ -138,7 +136,6 @@ services:
       - DOMAIN=${DOMAIN}
       # Ноды забирают ядра прокси для проверок по внешнему адресу панели
       - PANEL_PORT=${PANEL_PORT:-443}
-      - EXT_KEY=${EXT_KEY:-}
       - PANEL_ENC_KEY=${PANEL_ENC_KEY:-}
     volumes:
       - panel-data:/app/data

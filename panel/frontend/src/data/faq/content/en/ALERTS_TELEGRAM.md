@@ -16,6 +16,7 @@ The single delivery channel for alerts. Takes a couple of minutes to set up.
 - The bot must be allowed to post in the group; if the group uses topics, it must see the right one.
 - The token is a secret: anyone holding it can post as your bot. Leaked? Revoke it in @BotFather.
 - One chat serves the whole panel. For several recipients, use a group.
+- When more than ten servers raise the same alert at once (a hosting outage, for example), you get a single message listing the servers instead of dozens of identical ones. Each server still gets its own entry in the alert history.
 
 ## Test errors
 

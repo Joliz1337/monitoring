@@ -23,8 +23,11 @@ from app.services.haproxy_profile_sync import compute_config_hash, is_server_onl
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.node_capabilities import Capability, server_allows
 from app.services.remnawave_nginx_config import DOMAIN_PLACEHOLDER, render_for_server
+from app.services.rollout_guard import RolloutGuard
 
 logger = logging.getLogger(__name__)
+
+rollout_guard = RolloutGuard()
 
 MAX_CONCURRENT_SYNCS = 10
 APPLY_TIMEOUT_SECONDS = 60.0
@@ -274,7 +277,8 @@ async def sync_profile_to_servers(
                 server, profile.config_content, profile.id, install_path, ensure_started
             )
 
-    online_results = await asyncio.gather(*[_guarded(s) for s in online])
+    with rollout_guard.hold(s.id for s in online):
+        online_results = await asyncio.gather(*[_guarded(s) for s in online])
     results.extend(online_results)
     return results
 
@@ -289,6 +293,9 @@ async def retry_pending_remnawave_nginx_syncs(db: AsyncSession) -> int:
         )
     )
     revived = [s for s in result.scalars().all() if is_server_online(s)]
+    # Серверы идущей раскатки тоже «pending» — их черёд ещё не дошёл, это не ожившие
+    waiting = set(rollout_guard.idle(s.id for s in revived))
+    revived = [s for s in revived if s.id in waiting]
     if not revived:
         return 0
 

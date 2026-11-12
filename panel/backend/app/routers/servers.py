@@ -1,11 +1,15 @@
 import asyncio
+import copy
+import gzip
 import hashlib
 import ipaddress
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from sqlalchemy import select, update, bindparam, func
+from sqlalchemy import Row, select, text, update, bindparam, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 import re
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, field_validator
@@ -20,11 +24,12 @@ from app.services.node_capabilities import (
 )
 
 from app.database import get_db
-from app.models import SERVER_NOTE_MAX_LENGTH, Server, MetricsSnapshot, ServerTraffic
+from app.models import SERVER_NOTE_MAX_LENGTH, Server, ServerTraffic
 from app.auth import verify_auth
 from app.services import ping_block
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.fleet_history import FleetPeriod, load_fleet_history
+from app.services.latest_metrics import get_latest_metrics
 from app.services.metrics_rates import enrich_metrics_with_speeds
 from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.time_sync import get_time_sync_service
@@ -116,23 +121,33 @@ def to_iso_utc(dt: Optional[datetime]) -> Optional[str]:
     return dt.strftime('%Y-%m-%dT%H:%M:%S.') + f'{dt.microsecond // 1000:03d}Z'
 
 
-async def get_latest_snapshots_bulk(server_ids: list[int], db: AsyncSession) -> dict[int, MetricsSnapshot]:
-    """Get the most recent metrics snapshot for multiple servers in one query.
-    
-    Uses PostgreSQL DISTINCT ON for efficient index-only lookups on (server_id, timestamp DESC).
+_LATEST_SPEEDS_SQL = text("""
+    SELECT i.server_id,
+           s.net_rx_bytes_per_sec, s.net_tx_bytes_per_sec,
+           s.disk_read_bytes_per_sec, s.disk_write_bytes_per_sec
+    FROM unnest(CAST(:ids AS int[])) AS i(server_id)
+    CROSS JOIN LATERAL (
+        SELECT m.net_rx_bytes_per_sec, m.net_tx_bytes_per_sec,
+               m.disk_read_bytes_per_sec, m.disk_write_bytes_per_sec
+        FROM metrics_snapshots m
+        WHERE m.server_id = i.server_id
+        ORDER BY m.timestamp DESC
+        LIMIT 1
+    ) s
+""")
+
+
+async def get_latest_snapshots_bulk(server_ids: list[int], db: AsyncSession) -> dict[int, Row]:
+    """Скорости из последнего снапшота каждого сервера.
+
+    На сервер — один спуск с конца по индексу (server_id, timestamp). DISTINCT ON
+    по списку серверов читал и сортировал таблицу снапшотов целиком.
     """
     if not server_ids:
         return {}
-    
-    result = await db.execute(
-        select(MetricsSnapshot)
-        .where(MetricsSnapshot.server_id.in_(server_ids))
-        .order_by(MetricsSnapshot.server_id, MetricsSnapshot.timestamp.desc())
-        .distinct(MetricsSnapshot.server_id)
-    )
-    
-    snapshots = result.scalars().all()
-    return {s.server_id: s for s in snapshots}
+
+    result = await db.execute(_LATEST_SPEEDS_SQL, {"ids": server_ids})
+    return {row.server_id: row for row in result}
 
 
 # Окно трафика на карточке сервера — то же, что по умолчанию на странице трафика.
@@ -267,37 +282,82 @@ class RenameServerFolder(BaseModel):
 # JSON без повторных запросов к БД и пересборки. ETag даёт браузеру 304 на неизменных
 # данных — вместо ~1 МБ на каждый поллинг при сотнях нод.
 _LIST_CACHE_TTL = 3.0
+# Список сжимается один раз на сборку и вне event loop: сжатие ответа в десятки
+# мегабайт на каждый запрос останавливало бы бэкенд вместе со сбором метрик
+_LIST_GZIP_LEVEL = 5
+_monotonic = time.monotonic
+
+
+@dataclass(frozen=True)
+class CachedList:
+    body: bytes
+    gzipped: bytes
+    etag: str
+    built_at: float
+
+
 _list_cache_lock = asyncio.Lock()
-_list_cache_body: Optional[str] = None
-_list_cache_etag: str = ""
-_list_cache_at: float = 0.0
+_list_cache: Optional[CachedList] = None
+_list_generation = 0
 
 
 def _invalidate_list_cache() -> None:
     # Мутации раскладки (порядок, папки) должны быть видны сразу: иначе поллинг
     # в пределах TTL возвращает старый JSON и фронт откатывает optimistic-обновление.
-    global _list_cache_body, _list_cache_at
-    _list_cache_body = None
-    _list_cache_at = 0.0
+    global _list_cache, _list_generation
+    _list_cache = None
+    _list_generation += 1
 
 
-async def _get_cached_servers_list(db: AsyncSession) -> tuple[str, str]:
-    global _list_cache_body, _list_cache_etag, _list_cache_at
-    now = time.monotonic()
-    if _list_cache_body is not None and (now - _list_cache_at) < _LIST_CACHE_TTL:
-        return _list_cache_body, _list_cache_etag
+def _fresh_list() -> Optional[CachedList]:
+    if _list_cache is not None and (_monotonic() - _list_cache.built_at) < _LIST_CACHE_TTL:
+        return _list_cache
+    return None
+
+
+def _encode_list(payload: dict) -> tuple[bytes, bytes, str]:
+    body = json.dumps(payload, default=str).encode("utf-8")
+    etag = '"' + hashlib.md5(body).hexdigest() + '"'
+    return body, gzip.compress(body, compresslevel=_LIST_GZIP_LEVEL), etag
+
+
+async def _get_cached_servers_list(db: AsyncSession) -> CachedList:
+    global _list_cache
+    cached = _fresh_list()
+    if cached is not None:
+        return cached
 
     async with _list_cache_lock:
         # Повторная проверка: пока ждали лок, другой запрос мог пересобрать кэш.
-        now = time.monotonic()
-        if _list_cache_body is not None and (now - _list_cache_at) < _LIST_CACHE_TTL:
-            return _list_cache_body, _list_cache_etag
+        cached = _fresh_list()
+        if cached is not None:
+            return cached
 
+        generation = _list_generation
         payload = await _build_servers_list(db, include_metrics=True)
-        body = json.dumps(payload, default=str)
-        etag = '"' + hashlib.md5(body.encode("utf-8")).hexdigest() + '"'
-        _list_cache_body, _list_cache_etag, _list_cache_at = body, etag, now
-        return body, etag
+        body, gzipped, etag = await asyncio.to_thread(_encode_list, payload)
+        # TTL отсчитывается от конца сборки: на большом парке она длиннее TTL, и кэш,
+        # помеченный её началом, рождался бы протухшим — каждый запрос собирал бы заново
+        built = CachedList(body=body, gzipped=gzipped, etag=etag, built_at=_monotonic())
+        # Список, собранный до мутации раскладки, в кэш не кладём
+        if generation == _list_generation:
+            _list_cache = built
+        return built
+
+
+def _list_response(
+    cached: CachedList, accept_encoding: str, if_none_match: Optional[str]
+) -> Response:
+    headers = {"ETag": cached.etag, "Cache-Control": "no-cache", "Vary": "Accept-Encoding"}
+    if if_none_match == cached.etag:
+        return Response(status_code=304, headers=headers)
+    if "gzip" in accept_encoding.lower():
+        return Response(
+            content=cached.gzipped,
+            media_type="application/json",
+            headers={**headers, "Content-Encoding": "gzip"},
+        )
+    return Response(content=cached.body, media_type="application/json", headers=headers)
 
 
 @router.get("")
@@ -311,29 +371,45 @@ async def list_servers(
     if not include_metrics:
         return await _build_servers_list(db, include_metrics=False)
 
-    body, etag = await _get_cached_servers_list(db)
-    if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers={"ETag": etag})
-    return Response(
-        content=body,
-        media_type="application/json",
-        headers={"ETag": etag, "Cache-Control": "no-cache"},
+    cached = await _get_cached_servers_list(db)
+    return _list_response(
+        cached, request.headers.get("accept-encoding", ""), request.headers.get("if-none-match")
     )
+
+
+def _ids_needing_snapshot(latest: dict[int, dict]) -> list[int]:
+    """Скорости из снапшота нужны только старым агентам: остальные присылают свои."""
+    return [server_id for server_id, metrics in latest.items() if not metrics.get("live_rates")]
+
+
+def _metrics_with_speeds(metrics: dict, snapshot: Optional[Row]) -> dict:
+    """Ответ ноды для списка; старому агенту скорости дописываются из снапшота.
+
+    Дописывание правит словарь на месте, а он общий для всех читателей
+    хранилища — старому агенту достаётся копия. Остальным она не нужна: их
+    ответ уходит в список как есть.
+    """
+    if not snapshot:
+        return metrics
+    return enrich_metrics_with_speeds(copy.deepcopy(metrics), snapshot)
 
 
 async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
+    # Ответ ноды берётся из памяти: копия в базе тянула бы на каждую сборку
+    # десятки килобайт на сервер
     result = await db.execute(
-        select(Server).order_by(Server.position, Server.id)
+        select(Server).options(defer(Server.last_metrics)).order_by(Server.position, Server.id)
     )
     servers = result.scalars().all()
-    
+
+    latest: dict[int, dict] = {}
     snapshots_map = {}
     traffic_map: dict[int, dict] = {}
     offline_threshold = await get_offline_threshold(db)
     if include_metrics:
-        server_ids = [s.id for s in servers]
-        snapshots_map = await get_latest_snapshots_bulk(server_ids, db)
-        traffic_map = await get_traffic_totals_bulk(server_ids, db)
+        latest = get_latest_metrics().get_many(s.id for s in servers)
+        snapshots_map = await get_latest_snapshots_bulk(_ids_needing_snapshot(latest), db)
+        traffic_map = await get_traffic_totals_bulk([s.id for s in servers], db)
 
     servers_data = []
     for s in servers:
@@ -359,15 +435,10 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
             "node_capabilities": parse_capabilities(s.node_capabilities),
         }
 
-        if include_metrics and s.last_metrics:
-            try:
-                metrics = json.loads(s.last_metrics)
-                snapshot = snapshots_map.get(s.id)
-                server_info["metrics"] = enrich_metrics_with_speeds(metrics, snapshot)
-                server_info["status"] = resolve_status(s, offline_threshold)
-            except json.JSONDecodeError:
-                server_info["metrics"] = None
-                server_info["status"] = "error" if s.last_error else "loading"
+        metrics = latest.get(s.id)
+        if include_metrics and metrics:
+            server_info["metrics"] = _metrics_with_speeds(metrics, snapshots_map.get(s.id))
+            server_info["status"] = resolve_status(s, offline_threshold)
         elif include_metrics:
             server_info["metrics"] = None
             server_info["status"] = resolve_status(s, offline_threshold) if s.last_seen else "loading"
@@ -683,6 +754,7 @@ async def delete_server(
     
     await db.delete(server)
     await db.commit()
+    get_latest_metrics().forget(server_id)
     # IP удалённой ноды мог уйти хостеру и достаться чужому — из белого списка его убрать сразу
     get_blocklist_manager().request_allowlist_push()
 

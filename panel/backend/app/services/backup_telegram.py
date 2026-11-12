@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import re
+from collections.abc import Sequence
 
 import httpx
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -50,7 +51,37 @@ def _derive_key(password: str, salt: bytes) -> bytes:
     return kdf.derive(password.encode("utf-8"))
 
 
-def encrypt_and_split(data: bytes, password: str, volume_bytes: int) -> list[bytes]:
+class _Volumes(Sequence[bytes]):
+    """Тома архива «заголовок + шифртекст», собираемые по обращению.
+
+    Готовый список томов — вторая полная копия архива на всё время заливки, а
+    склейка заголовка с шифртекстом перед нарезкой — третья. Здесь в памяти
+    лежит один шифртекст и тот том, который уходит сейчас.
+    """
+
+    def __init__(self, header: bytes, ciphertext: bytes, volume_bytes: int) -> None:
+        self._header = header
+        self._ciphertext = memoryview(ciphertext)
+        self._volume_bytes = volume_bytes
+        self._starts = range(0, len(header) + len(ciphertext), volume_bytes)
+
+    def __len__(self) -> int:
+        return len(self._starts)
+
+    def __getitem__(self, index: int | slice) -> bytes | list[bytes]:
+        if isinstance(index, slice):
+            return [self._volume_from(start) for start in self._starts[index]]
+        return self._volume_from(self._starts[index])
+
+    def _volume_from(self, start: int) -> bytes:
+        """Том с байта start архива; заголовок короче тома и целиком лежит в первом."""
+        end = start + self._volume_bytes - len(self._header)
+        if start == 0:
+            return b"".join((self._header, self._ciphertext[:end]))
+        return bytes(self._ciphertext[start - len(self._header):end])
+
+
+def encrypt_and_split(data: bytes, password: str, volume_bytes: int) -> Sequence[bytes]:
     """Зашифровать данные паролем и разбить на тома по volume_bytes байт."""
     if not password:
         raise ValueError("Пароль архива обязателен")
@@ -58,9 +89,8 @@ def encrypt_and_split(data: bytes, password: str, volume_bytes: int) -> list[byt
         raise ValueError("Размер тома слишком мал")
     salt = os.urandom(_SALT_LEN)
     nonce = os.urandom(_NONCE_LEN)
-    ct = AESGCM(_derive_key(password, salt)).encrypt(nonce, data, None)
-    blob = _MAGIC + salt + nonce + ct
-    return [blob[i:i + volume_bytes] for i in range(0, len(blob), volume_bytes)]
+    ciphertext = AESGCM(_derive_key(password, salt)).encrypt(nonce, data, None)
+    return _Volumes(_MAGIC + salt + nonce, ciphertext, volume_bytes)
 
 
 def join_and_decrypt(parts: list[bytes], password: str) -> bytes:
@@ -88,7 +118,7 @@ async def send_message(token: str, chat_id: str, text: str) -> bool:
 
 
 async def send_volumes(
-    token: str, chat_id: str, parts: list[bytes], filename_base: str, caption: str
+    token: str, chat_id: str, parts: Sequence[bytes], filename_base: str, caption: str
 ) -> None:
     """Залить тома в канал по порядку с ретраями. Кидает RuntimeError при провале."""
     async with httpx.AsyncClient(timeout=600) as client:

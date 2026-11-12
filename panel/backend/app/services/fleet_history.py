@@ -10,13 +10,12 @@ per-server истории (`metrics_snapshots` и `aggregated_metrics`) двум
 
 CPU и память взвешиваются ёмкостью ноды: 100% на 8 ядрах весят больше, чем на
 двух. Ёмкость в истории не хранится, поэтому берётся текущая — из последнего
-ответа ноды (`Server.last_metrics`). Ресайз VPS переписывает вес всей его
+ответа ноды (хранилище `latest_metrics`). Ресайз VPS переписывает вес всей его
 истории задним числом; для обзорного графика парка это дешевле, чем колонки
 ёмкости в каждой строке снапшотов.
 """
 
 import asyncio
-import json
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -27,6 +26,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Server, ServerDowntime
+from app.services.latest_metrics import get_latest_metrics
 from app.services.metrics_history import (
     DAY_SEC,
     GAP_MIN_SEC,
@@ -56,7 +56,9 @@ FLEET_PERIODS: dict[str, PeriodSpec] = {
 
 # Ответ читает снапшоты всего парка — без кэша каждая открытая вкладка
 # дашборда гоняла бы запрос заново. TTL — не чаще появления новой точки.
-CACHE_TTL_SEC: dict[str, float] = {"1h": 30.0, "24h": 60.0, "7d": 300.0, "30d": 300.0, "365d": 300.0}
+# У суток он равен бакету: пересборка читает сырые снапшоты за 24 часа, на
+# большом парке это секунды, а новой точки раньше всё равно не появится.
+CACHE_TTL_SEC: dict[str, float] = {"1h": 30.0, "24h": 300.0, "7d": 300.0, "30d": 300.0, "365d": 300.0}
 
 # Простой самой панели (перерыва в сборе) — единственное, что рвёт линию парка:
 # падение одной ноды просто вычитает её из суммы. Строка пишется на каждый
@@ -172,31 +174,25 @@ def _positive(value: Any) -> Optional[float]:
     return float(value) if value > 0 else None
 
 
-def node_capacity(last_metrics: Optional[str]) -> tuple[float, float]:
+def node_capacity(metrics: Optional[Mapping[str, Any]]) -> tuple[float, float]:
     """Ядра и объём RAM ноды из её последнего ответа.
 
     Нулевой вес памяти у ноды, чьей ёмкости не знаем, — она не участвует в
     средневзвешенном по памяти, но остаётся в суммах скоростей.
     """
-    if not last_metrics:
-        return DEFAULT_CORES, 0.0
-    try:
-        metrics = json.loads(last_metrics)
-    except (TypeError, ValueError):
-        return DEFAULT_CORES, 0.0
-    if not isinstance(metrics, Mapping):
+    if not metrics:
         return DEFAULT_CORES, 0.0
     cores = _positive(_section(metrics, "cpu").get("cores_logical")) or DEFAULT_CORES
     ram = _positive(_section(metrics, "memory", "ram").get("total")) or 0.0
     return cores, ram
 
 
-def build_capacity(rows: Iterable[tuple[int, Optional[str]]]) -> FleetCapacity:
+def build_capacity(rows: Iterable[tuple[int, Optional[Mapping[str, Any]]]]) -> FleetCapacity:
     ids: list[int] = []
     cores: list[float] = []
     ram: list[float] = []
-    for server_id, last_metrics in rows:
-        node_cores, node_ram = node_capacity(last_metrics)
+    for server_id, metrics in rows:
+        node_cores, node_ram = node_capacity(metrics)
         ids.append(server_id)
         cores.append(node_cores)
         ram.append(node_ram)
@@ -222,11 +218,12 @@ def fleet_point(row: Mapping[str, Any]) -> dict[str, Any]:
 
 async def load_capacity(db: AsyncSession, folder: Optional[str]) -> FleetCapacity:
     """Ёмкость активных нод парка, а с `folder` — только нод этой папки."""
-    query = select(Server.id, Server.last_metrics).where(Server.is_active == True)  # noqa: E712
+    query = select(Server.id).where(Server.is_active == True)  # noqa: E712
     if folder is not None:
         query = query.where(Server.folder == folder)
-    result = await db.execute(query)
-    return build_capacity(result.all())
+    server_ids = (await db.execute(query)).scalars().all()
+    latest = get_latest_metrics()
+    return build_capacity((server_id, latest.get(server_id)) for server_id in server_ids)
 
 
 async def load_panel_downtime(
@@ -299,7 +296,9 @@ async def _build_history(db: AsyncSession, period: FleetPeriod, folder: Optional
 CacheKey = tuple[str, Optional[str]]
 
 _cache: dict[CacheKey, tuple[float, dict[str, Any]]] = {}
-_cache_lock = asyncio.Lock()
+# Лок на ключ, а не один на всех: холодная сборка суток не должна держать в
+# очереди остальные периоды и папки.
+_build_locks: dict[CacheKey, asyncio.Lock] = {}
 
 
 def _is_fresh(key: CacheKey, stored_at: float, now: float) -> bool:
@@ -316,11 +315,13 @@ def _cached(key: CacheKey) -> Optional[dict[str, Any]]:
 
 def _store(key: CacheKey, payload: dict[str, Any]) -> None:
     # Папки переименовывают и удаляют — без чистки ключи старых имён копились бы
-    # до перезапуска панели.
+    # до перезапуска панели. Вместе с записью кэша уходит и её лок, если он свободен.
     now = time.monotonic()
     for stale in [k for k, (stored_at, _) in _cache.items() if not _is_fresh(k, stored_at, now)]:
         del _cache[stale]
     _cache[key] = (now, payload)
+    for idle in [k for k, lock in _build_locks.items() if k not in _cache and not lock.locked()]:
+        del _build_locks[idle]
 
 
 async def load_fleet_history(
@@ -331,7 +332,7 @@ async def load_fleet_history(
     if payload is not None:
         return payload
 
-    async with _cache_lock:
+    async with _build_locks.setdefault(key, asyncio.Lock()):
         # Пока ждали лок, другой запрос мог пересобрать кэш.
         payload = _cached(key)
         if payload is not None:

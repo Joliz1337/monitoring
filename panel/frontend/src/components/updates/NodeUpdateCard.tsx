@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { motion } from 'framer-motion'
 import {
   Download,
@@ -22,7 +23,7 @@ import { Skeleton } from '../ui/Skeleton'
 import { Tooltip } from '../ui/Tooltip'
 import { Checkbox } from '../ui/Checkbox'
 
-export type NodeLoadState = 'pending' | 'loading' | 'loaded' | 'error'
+export type NodeLoadState = 'pending' | 'loaded' | 'error'
 
 export interface NodeState {
   id: number
@@ -87,21 +88,28 @@ interface Props {
   deliveryJob?: ImageDeliveryJobInfo
   haproxyJob?: RemnawaveInstallJobInfo
   selected: boolean
-  onToggleSelect: () => void
-  onUpdate: () => void
-  onOpenDelivery: () => void
-  onOpenHAProxy: () => void
-  onOpenProxy: () => void
+  // Обработчики получают ноду аргументом: страница передаёт всем карточкам одни и те же функции,
+  // и memo пропускает карточки, у которых ничего не изменилось
+  onToggleSelect: (nodeId: number, on: boolean) => void
+  onUpdate: (node: NodeState) => void
+  onOpenDelivery: (node: NodeState) => void
+  onOpenHAProxy: (node: NodeState, jobId: string | null) => void
+  onOpenProxy: (node: NodeState) => void
 }
 
-export default function NodeUpdateCard({
+function NodeUpdateCard({
   node, index, needsUpdate, isDevChannel, isUpdating, updateResult, agentUpdate, deliveryJob, haproxyJob,
   selected, onToggleSelect, onUpdate, onOpenDelivery, onOpenHAProxy, onOpenProxy,
 }: Props) {
   const { t } = useTranslation()
-  const isNodeLoading = node.loadState === 'pending' || node.loadState === 'loading'
+  const isNodeLoading = node.loadState === 'pending'
   const isOnline = node.status === 'online'
   const isBusy = isUpdating || !!agentUpdate
+  const toggleSelect = () => onToggleSelect(node.id, !selected)
+  const update = () => onUpdate(node)
+  const openDelivery = () => onOpenDelivery(node)
+  const openHAProxy = () => onOpenHAProxy(node, haproxyJob?.job_id ?? null)
+  const openProxy = () => onOpenProxy(node)
 
   // Идущее обновление — отдельной строкой на всю ширину карточки, чтобы этап и «N/4» не обрезались
   const progressView = (): ProgressView | null => {
@@ -116,7 +124,7 @@ export default function NodeUpdateCard({
         total: DELIVERY_STEPS.length,
         percent,
         tooltip: t('imageDelivery.open_log'),
-        onClick: onOpenDelivery,
+        onClick: openDelivery,
       }
     }
     if (!agentUpdate || isUpdating || deliveryJob) return null
@@ -162,7 +170,7 @@ export default function NodeUpdateCard({
     return (
       <Tooltip label={job.error || t('imageDelivery.open_log')} maxWidth={320}>
         <button
-          onClick={onOpenDelivery}
+          onClick={openDelivery}
           className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg w-fit max-w-full hover:brightness-125 transition ${chip.className}`}
         >
           <Icon className={`w-3.5 h-3.5 shrink-0 ${chip.spin ? 'animate-spin' : ''}`} />
@@ -184,7 +192,7 @@ export default function NodeUpdateCard({
       const Icon = chip.icon
       return (
         <Tooltip label={haproxyJob.error || t('updates.haproxy_open_log')} maxWidth={320}>
-          <button onClick={onOpenHAProxy} className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md hover:brightness-125 transition ${chip.className}`}>
+          <button onClick={openHAProxy} className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md hover:brightness-125 transition ${chip.className}`}>
             <Icon className={`w-3.5 h-3.5 ${chip.spin ? 'animate-spin' : ''}`} />
             {t(`updates.haproxy_status_${haproxyJob.status}`)}
           </button>
@@ -195,7 +203,7 @@ export default function NodeUpdateCard({
     return (
       <Tooltip label={t('updates.haproxy_upgrade_hint', { version: node.haproxyTarget })} maxWidth={300}>
         <button
-          onClick={onOpenHAProxy}
+          onClick={openHAProxy}
           className="flex items-center gap-1 px-1.5 py-0.5 rounded-md font-mono text-accent-400 bg-accent-500/10 hover:bg-accent-500/20 transition"
         >
           <ArrowUpCircle className="w-3.5 h-3.5" />
@@ -271,7 +279,7 @@ export default function NodeUpdateCard({
       transition={{ delay: Math.min(index, 20) * 0.03 }}
     >
       <div className="flex items-center gap-3">
-        <Checkbox checked={selected} onChange={onToggleSelect} />
+        <Checkbox checked={selected} onChange={toggleSelect} />
         <motion.div
           className={`w-10 h-10 rounded-xl flex items-center justify-center border flex-shrink-0
             ${isNodeLoading
@@ -316,7 +324,7 @@ export default function NodeUpdateCard({
           {!isNodeLoading && !!node.downloadProxy?.urls.length && (
             <Tooltip label={t('updates.proxy_found_hint')} maxWidth={300}>
               <button
-                onClick={onOpenProxy}
+                onClick={openProxy}
                 className="flex items-center gap-1.5 text-xs text-warning mt-0.5 max-w-full hover:brightness-125 transition"
               >
                 <Globe className="w-3.5 h-3.5 shrink-0" />
@@ -340,7 +348,7 @@ export default function NodeUpdateCard({
           {!isNodeLoading && isOnline && node.downloadProxy && (
             <Tooltip label={t('updates.proxy_open')} maxWidth={280}>
               <motion.button
-                onClick={onOpenProxy}
+                onClick={openProxy}
                 disabled={isUpdating}
                 className="btn btn-secondary text-xs px-2.5 py-1.5"
                 whileHover={{ scale: 1.05 }}
@@ -353,7 +361,7 @@ export default function NodeUpdateCard({
           {!isNodeLoading && (
             <Tooltip label={t('imageDelivery.deliver_hint')} maxWidth={280}>
               <motion.button
-                onClick={onOpenDelivery}
+                onClick={openDelivery}
                 disabled={isUpdating}
                 className="btn btn-secondary text-xs px-2.5 py-1.5"
                 whileHover={{ scale: 1.05 }}
@@ -364,7 +372,7 @@ export default function NodeUpdateCard({
             </Tooltip>
           )}
           <motion.button
-            onClick={onUpdate}
+            onClick={update}
             disabled={isBusy || isNodeLoading || !isOnline || (!needsUpdate && !isDevChannel)}
             className="btn btn-secondary text-xs px-3 py-1.5"
             whileHover={{ scale: 1.05 }}
@@ -378,3 +386,5 @@ export default function NodeUpdateCard({
     </motion.div>
   )
 }
+
+export default memo(NodeUpdateCard)

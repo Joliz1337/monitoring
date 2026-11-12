@@ -1,17 +1,21 @@
 import asyncio
+import html
 import json
 import logging
 import time
-from dataclasses import asdict
+from collections import deque
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from typing import Optional
 
 from sqlalchemy import select, delete, func
+from sqlalchemy.orm import defer
 
 from app.database import async_session
 from app.models import Server, AlertSettings, AlertHistory, PacketLossEpisode, PacketLossRelayIncident
 from app.services.http_client import get_node_client, node_auth_headers, sanitize_proxy
+from app.services.latest_metrics import get_latest_metrics
 from app.services.loss_alerts import (
     AlertEvent,
     Episode,
@@ -25,8 +29,11 @@ from app.services.loss_alerts import (
 )
 from app.services.loss_registry import get_loss_registry
 from app.services.metrics_rates import node_steal_percent
+from app.services import panel_host_alerts
+from app.services.panel_host_alerts import PanelHostWatch, PanelReading, PanelResource
+from app.services.panel_host_metrics import load_recent_host_load, read_host_disk
 from app.services.socks_probe import ProxyFault, find_proxy_fault
-from app.services.steal_alerts import StealEvent, StealPolicy, StealWatch
+from app.services.threshold_watch import ThresholdEvent, ThresholdPolicy, ThresholdWatch
 from app.services.traffic_ingest import get_traffic_ingest
 
 ALERT_HISTORY_RETENTION_DAYS = 30
@@ -35,6 +42,7 @@ API_PROBE_TIMEOUT = 5.0
 # Рукопожатие SOCKS5 таймаутами httpx не покрыто: без потолка зависший прокси
 # подвесил бы пробу, а с ней и проверку всех серверов
 API_PROBE_HARD_TIMEOUT = 10.0
+OFFLINE_PROBE_CONCURRENCY = 50
 PROXY_CHECK_TIMEOUT = 5.0
 
 PROXY_FAULT_REASONS = {
@@ -57,6 +65,11 @@ logger = logging.getLogger(__name__)
 # Ниже этого steal в CPU-алерте не упоминается: пара процентов — фон любой ВМ
 STEAL_NOTE_MIN_PERCENT = 5.0
 
+STEAL_ALERT_TYPES = {
+    ThresholdEvent.HIGH: "steal_high",
+    ThresholdEvent.RECOVERED: "steal_recovered",
+}
+
 # Пары «проблема → снята»: если последней по серверу в истории была проблема,
 # после рестарта она ещё открыта — «снята» должно прийти при восстановлении
 PAIRED_ALERT_OPENER = {
@@ -64,6 +77,65 @@ PAIRED_ALERT_OPENER = {
     "recovery": "offline",
     "steal_high": "steal_high",
     "steal_recovered": "steal_high",
+    **panel_host_alerts.PAIRED_ALERT_OPENER,
+}
+
+# Один и тот же алерт за обход подняли больше стольких серверов — это массовое
+# событие (упал хостер), и уходит оно одной сводкой. Группе Telegram даёт ~20
+# сообщений в минуту: сотня одинаковых шла бы минутами и задерживала остальные
+ALERT_DIGEST_THRESHOLD = 10
+# Имя сервера — до 100 символов, так что столько имён заведомо входят
+# в сообщение Telegram (4096 символов)
+ALERT_DIGEST_NAMES_SHOWN = 30
+ALERT_DIGEST_TITLES = {
+    "ru": {
+        "offline": "Недоступны",
+        "recovery": "Снова онлайн",
+        "cpu_critical": "CPU критический",
+        "cpu_spike": "Скачок CPU",
+        "ram_critical": "RAM критический",
+        "ram_spike": "Скачок RAM",
+        "network_spike": "Скачок Network",
+        "network_drop": "Падение Network",
+        "tcp_established_spike": "Скачок TCP Established",
+        "tcp_established_drop": "Падение TCP Established",
+        "tcp_listen_spike": "Скачок TCP Listen",
+        "tcp_timewait_spike": "Скачок TCP Time Wait",
+        "tcp_closewait_spike": "Скачок TCP Close Wait",
+        "tcp_synsent_spike": "Скачок TCP SYN Sent",
+        "tcp_synrecv_spike": "Скачок TCP SYN Recv",
+        "tcp_finwait_spike": "Скачок TCP FIN Wait",
+        "load_avg_high": "Load Average высокий",
+        "steal_high": "Хостер забирает процессор",
+        "steal_recovered": "Steal в норме",
+        "antiddos_stuck": "Антиddos в аварийном режиме больше 30 минут",
+        "antiddos_flap": "Антиddos срабатывает слишком часто",
+        "conntrack_high": "Conntrack заполнен выше порога",
+    },
+    "en": {
+        "offline": "Offline",
+        "recovery": "Back online",
+        "cpu_critical": "CPU critical",
+        "cpu_spike": "CPU spike",
+        "ram_critical": "RAM critical",
+        "ram_spike": "RAM spike",
+        "network_spike": "Network spike",
+        "network_drop": "Network drop",
+        "tcp_established_spike": "TCP Established spike",
+        "tcp_established_drop": "TCP Established drop",
+        "tcp_listen_spike": "TCP Listen spike",
+        "tcp_timewait_spike": "TCP Time Wait spike",
+        "tcp_closewait_spike": "TCP Close Wait spike",
+        "tcp_synsent_spike": "TCP SYN Sent spike",
+        "tcp_synrecv_spike": "TCP SYN Recv spike",
+        "tcp_finwait_spike": "TCP FIN Wait spike",
+        "load_avg_high": "Load Average high",
+        "steal_high": "The hoster is taking CPU",
+        "steal_recovered": "Steal is back to normal",
+        "antiddos_stuck": "Anti-DDoS in emergency mode for over 30 minutes",
+        "antiddos_flap": "Anti-DDoS is triggering repeatedly",
+        "conntrack_high": "Conntrack table above the threshold",
+    },
 }
 
 EMA_WINDOW = 30
@@ -96,7 +168,7 @@ class ServerAlertState:
         self.ema_tcp_finwait: float = 0.0
 
         self.load_avg_fail_count: int = 0
-        self.steal = StealWatch()
+        self.steal = ThresholdWatch()
 
         self.alert_start: dict[str, float] = {}
         self.last_alert: dict[str, float] = {}
@@ -110,6 +182,20 @@ class ServerAlertState:
 
     def is_warmed(self) -> bool:
         return self.samples >= MIN_EMA_SAMPLES
+
+
+@dataclass(frozen=True)
+class DueAlert:
+    """Алерт, поднятый проверкой сервера: ждёт конца обхода, где решается,
+    уйдёт он своим сообщением или в сводке."""
+
+    settings: AlertSettings
+    server_id: int
+    server_name: str
+    alert_type: str
+    severity: str
+    message: str
+    details: dict
 
 
 class ServerAlerter:
@@ -126,6 +212,8 @@ class ServerAlerter:
         # хранится последний записанный набор, чтобы писать только изменения
         self._loss = LossTracker()
         self._loss_persisted: Optional[dict] = None
+        self._panel = PanelHostWatch()
+        self._due: deque[DueAlert] = deque()
 
     async def start(self):
         if self._running:
@@ -184,7 +272,7 @@ class ServerAlerter:
 
             now_ts = time.time()
             now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-            last_paired_event: dict[tuple[int, str], tuple[datetime, str]] = {}
+            last_paired_event: dict[tuple[Optional[int], str], tuple[datetime, str]] = {}
 
             for server_id, alert_type, created_at in rows:
                 if created_at is None:
@@ -192,8 +280,12 @@ class ServerAlerter:
                 if created_at.tzinfo is not None:
                     created_at = created_at.replace(tzinfo=None)
 
-                state = self._states.setdefault(server_id, ServerAlertState())
-                state.last_alert[alert_type] = now_ts - (now_utc - created_at).total_seconds()
+                # server_id пуст у алертов о хосте самой панели
+                last_alert = (
+                    self._panel.last_alert if server_id is None
+                    else self._states.setdefault(server_id, ServerAlertState()).last_alert
+                )
+                last_alert[alert_type] = now_ts - (now_utc - created_at).total_seconds()
 
                 opener = PAIRED_ALERT_OPENER.get(alert_type)
                 if opener:
@@ -207,7 +299,9 @@ class ServerAlerter:
             for (server_id, opener), (_, alert_type) in last_paired_event.items():
                 if alert_type != opener:
                     continue
-                if opener == "offline":
+                if server_id is None:
+                    self._panel.restore_alerted(opener)
+                elif opener == "offline":
                     self._states[server_id].was_offline = True
                 else:
                     self._states[server_id].steal.alerted = True
@@ -288,6 +382,8 @@ class ServerAlerter:
         now = time.time()
         self._last_check = datetime.now(timezone.utc).replace(tzinfo=None)
 
+        await self._check_panel_host(settings, now)
+
         excluded_ids = self._parse_id_list(settings.excluded_server_ids)
 
         self._trigger_excluded = {
@@ -303,11 +399,18 @@ class ServerAlerter:
         }
 
         async with async_session() as db:
+            # Метрики берутся из памяти (latest_metrics): копия в базе отстаёт на
+            # минуты, а тянуть её — десятки килобайт на сервер каждый обход
             result = await db.execute(
-                select(Server).where(Server.is_active == True)  # noqa: E712
+                select(Server)
+                .options(defer(Server.last_metrics))
+                .where(Server.is_active == True)  # noqa: E712
             )
             servers = result.scalars().all()
 
+        probes = await self._probe_offline_candidates(servers, excluded_ids, settings)
+
+        failed_checks = 0
         for srv in servers:
             if srv.id in excluded_ids:
                 continue
@@ -315,7 +418,18 @@ class ServerAlerter:
                 self._states[srv.id] = ServerAlertState()
             state = self._states[srv.id]
 
-            await self._check_server(srv, state, settings, now)
+            # Кривые метрики одной ноды не должны оставлять без проверки весь парк за ней
+            try:
+                await self._check_server(srv, state, settings, now, probes.get(srv.id))
+            except Exception as e:
+                # Трассировка — одна на обход: общий для парка сбой иначе вытеснил бы из лога всё остальное
+                logger.error(
+                    f"Alert check failed for server {srv.name}: {type(e).__name__}: {e}",
+                    exc_info=failed_checks == 0,
+                )
+                failed_checks += 1
+
+        await self._deliver_due_alerts()
 
         monitored_ids = {s.id for s in servers} - excluded_ids
         stale = [k for k in self._states if k not in monitored_ids]
@@ -324,27 +438,51 @@ class ServerAlerter:
 
         await self._check_packet_loss(settings, excluded_ids, now)
 
+    async def _probe_offline_candidates(
+        self, servers: list[Server], excluded_ids: set[int], settings: AlertSettings,
+    ) -> dict[int, tuple[bool, bool | None]]:
+        """Активные пробы всех только что пропавших нод — разом, до обхода парка.
+
+        Проба одной ноды длится 20–40 секунд. По очереди внутри обхода падение
+        сотни нод одного хостера растягивало его на час: алерты опаздывали,
+        а снимок last_seen успевал устареть, и живые ноды выглядели пропавшими.
+        """
+        if not settings.offline_enabled:
+            return {}
+
+        skipped = excluded_ids | self._trigger_excluded["offline"]
+        candidates = [
+            srv for srv in servers
+            if srv.id not in skipped
+            and not self._server_is_online(srv, settings)
+            and not (srv.id in self._states and self._states[srv.id].was_offline)
+        ]
+        if not candidates:
+            return {}
+
+        semaphore = asyncio.Semaphore(OFFLINE_PROBE_CONCURRENCY)
+
+        async def probe(srv: Server) -> tuple[int, tuple[bool, bool | None]]:
+            async with semaphore:
+                return srv.id, await self._active_probe_sequence(srv)
+
+        return dict(await asyncio.gather(*[probe(srv) for srv in candidates]))
+
     async def _check_server(
         self,
         srv: Server,
         state: ServerAlertState,
         settings: AlertSettings,
         now: float,
+        offline_probe: Optional[tuple[bool, bool | None]] = None,
     ):
-        metrics_json = srv.last_metrics
-        metrics = None
-        if metrics_json:
-            try:
-                metrics = json.loads(metrics_json)
-            except (json.JSONDecodeError, TypeError):
-                pass
-
+        metrics = get_latest_metrics().get(srv.id)
         is_online = self._server_is_online(srv, settings)
         tex = self._trigger_excluded
 
         # --- Offline / Recovery ---
         if settings.offline_enabled and srv.id not in tex["offline"]:
-            await self._check_offline(srv, state, settings, is_online, now)
+            await self._check_offline(srv, state, settings, is_online, now, offline_probe)
 
         if not is_online or not metrics:
             return
@@ -618,6 +756,21 @@ class ServerAlerter:
             return f"Load Average высокий на {srv.name}: {load_avg:.2f} (порог {threshold:.1f}, ядер: {cores})"
         return f"Load Average high on {srv.name}: {load_avg:.2f} (threshold {threshold:.1f}, cores: {cores})"
 
+    def _msg_digest(self, settings: AlertSettings, alert_type: str, names: list[str]) -> str:
+        """Сводка вместо сообщения на каждый сервер; подробности по серверам остаются в истории."""
+        lang = "ru" if self._lang(settings) == "ru" else "en"
+        title = ALERT_DIGEST_TITLES[lang].get(alert_type, alert_type)
+        # База отдаёт серверы в произвольном порядке, а по алфавиту ноды одного хостера стоят рядом.
+        # Имя с «<» без экранирования Telegram отверг бы вместе со всей сводкой
+        ordered = sorted(names, key=str.casefold)
+        shown = ", ".join(html.escape(name) for name in ordered[:ALERT_DIGEST_NAMES_SHOWN])
+        hidden = len(names) - ALERT_DIGEST_NAMES_SHOWN
+        if lang == "ru":
+            more = f"\n… ещё {hidden}" if hidden > 0 else ""
+            return f"{title} — серверов: {len(names)}\n{shown}{more}"
+        more = f"\n… and {hidden} more" if hidden > 0 else ""
+        return f"{title} — servers: {len(names)}\n{shown}{more}"
+
     # ------------------------------------------------------------------
     # Anti-DDoS
     # ------------------------------------------------------------------
@@ -836,6 +989,59 @@ class ServerAlerter:
             logger.error(f"Failed to save packet loss episodes: {e}")
 
     # ------------------------------------------------------------------
+    # Хост самой панели
+    # ------------------------------------------------------------------
+    async def _check_panel_host(self, settings: AlertSettings, now: float):
+        if not settings.panel_host_enabled:
+            self._panel.reset()
+            return
+        # Сбой чтения хоста не должен срывать проверку серверов после него
+        try:
+            readings = await self._panel_host_readings()
+        except Exception as e:
+            logger.warning(f"Panel host readings failed: {e}")
+            return
+
+        thresholds = {
+            PanelResource.CPU: settings.panel_cpu_threshold or 90.0,
+            PanelResource.RAM: settings.panel_ram_threshold or 90.0,
+            PanelResource.DISK: settings.panel_disk_threshold or 90.0,
+        }
+        sustained = settings.panel_host_sustained_seconds or 300
+        cooldown = settings.alert_cooldown or 1800
+        lang = panel_host_alerts.language(self._lang(settings))
+
+        for reading in readings:
+            threshold = thresholds[reading.resource]
+            policy = ThresholdPolicy(threshold=threshold, sustained_sec=sustained)
+            event = self._panel.evaluate(reading, policy, now, cooldown)
+            if event is None:
+                continue
+            minutes = self._panel.high_minutes(reading.resource, now)
+            message = panel_host_alerts.format_message(reading, event, threshold, minutes, lang)
+            severity = panel_host_alerts.SEVERITY[event]
+            notified = await self._notify(settings, severity, message, panel_host_alerts.HEADER[lang])
+            await self._save_history(
+                None, panel_host_alerts.SERVER_NAME[lang],
+                panel_host_alerts.alert_type(reading.resource, event), severity, message,
+                panel_host_alerts.history_details(reading, threshold), notified,
+            )
+
+    async def _panel_host_readings(self) -> list[PanelReading]:
+        async with async_session() as db:
+            load = await load_recent_host_load(db, self._check_interval)
+        disk = await asyncio.to_thread(read_host_disk)
+
+        readings = [PanelReading(PanelResource.DISK, disk.percent, free_bytes=disk.free, total_bytes=disk.total)]
+        # Нет снапшотов — CPU и память пропускаются, их эпизоды ждут данных
+        if load is not None:
+            readings += [
+                PanelReading(PanelResource.CPU, load.cpu_percent),
+                PanelReading(PanelResource.RAM, load.memory_percent, free_bytes=load.memory_available),
+            ]
+        return readings
+
+    # ------------------------------------------------------------------
     # Steal
     # ------------------------------------------------------------------
     async def _check_steal(
@@ -856,24 +1062,27 @@ class ServerAlerter:
             return
 
         threshold = settings.steal_threshold or 20.0
-        policy = StealPolicy(threshold=threshold, sustained_sec=settings.steal_sustained_seconds or 300)
+        policy = ThresholdPolicy(threshold=threshold, sustained_sec=settings.steal_sustained_seconds or 300)
         event = watch.evaluate(steal, now, policy)
+        if event is None:
+            return
+        alert_type = STEAL_ALERT_TYPES[event]
         details = {"steal": round(steal, 1), "cpu": round(cpu, 1), "threshold": threshold}
 
-        if event is StealEvent.HIGH:
-            if not self._cooldown_ok(state, event.value, now, settings.alert_cooldown or 1800):
+        if event is ThresholdEvent.HIGH:
+            if not self._cooldown_ok(state, alert_type, now, settings.alert_cooldown or 1800):
                 return
-            state.last_alert[event.value] = now
+            state.last_alert[alert_type] = now
             watch.alerted = True
             minutes = max(1, round(watch.high_for(now) / 60))
             await self._send_and_save(
-                srv, settings, event.value, "warning",
+                srv, settings, alert_type, "warning",
                 self._msg_steal_high(srv, settings, steal, threshold, minutes, max(cpu - steal, 0.0)),
                 details,
             )
-        elif event is StealEvent.RECOVERED:
+        else:
             await self._send_and_save(
-                srv, settings, event.value, "info",
+                srv, settings, alert_type, "info",
                 self._msg_steal_recovered(srv, settings, steal, threshold),
                 details,
             )
@@ -922,13 +1131,16 @@ class ServerAlerter:
         settings: AlertSettings,
         is_online: bool,
         now: float,
+        probe: Optional[tuple[bool, bool | None]] = None,
     ):
         cooldown = settings.alert_cooldown or 1800
 
         if not is_online:
             if not state.was_offline:
-                logger.info(f"Server {srv.name} appears offline, starting active probe")
-                is_dead, icmp_reachable = await self._active_probe_sequence(srv)
+                if probe is None:
+                    logger.info(f"Server {srv.name} appears offline, starting active probe")
+                    probe = await self._active_probe_sequence(srv)
+                is_dead, icmp_reachable = probe
 
                 if not is_dead:
                     logger.info(f"Server {srv.name} responded during probe, not offline")
@@ -1287,29 +1499,75 @@ class ServerAlerter:
         message: str,
         details: dict,
     ):
-        notified = False
-        if settings.telegram_bot_token and settings.telegram_chat_id:
-            severity_map = {"critical": "\U0001f534", "warning": "\U0001f7e1", "info": "\U0001f7e2"}
-            emoji = severity_map.get(severity, "\u2139\ufe0f")
-            header = self._msg_header(settings)
-            text = f"{emoji} <b>{header}</b>\n\n{message}"
-            from app.services.telegram_bot import get_telegram_bot_service
-            notified = await get_telegram_bot_service().send_message(
-                settings.telegram_bot_token, settings.telegram_chat_id, text,
+        """Алерт уходит не сразу, а в конце обхода: только там видно, сколько
+        серверов подняли такой же (см. _deliver_due_alerts)."""
+        self._due.append(DueAlert(settings, srv.id, srv.name, alert_type, severity, message, details))
+
+    async def _deliver_due_alerts(self) -> None:
+        """Отправить и записать в историю всё, что набрал обход.
+
+        Алерт, который разом подняли больше ALERT_DIGEST_THRESHOLD серверов, уходит
+        одной сводкой на месте первого из них. В историю каждый пишется своей
+        строкой и со своим текстом — как при отправке по одному.
+        """
+        names_by_type: dict[str, list[str]] = {}
+        for alert in self._due:
+            names_by_type.setdefault(alert.alert_type, []).append(alert.server_name)
+        digest_notified: dict[str, bool] = {}
+
+        # Алерт покидает очередь до своей отправки: сбой на нём не теряет
+        # остальные — они уйдут следующим обходом
+        while self._due:
+            alert = self._due.popleft()
+            header = self._msg_header(alert.settings)
+            names = names_by_type[alert.alert_type]
+            if len(names) <= ALERT_DIGEST_THRESHOLD:
+                notified = await self._notify(alert.settings, alert.severity, alert.message, header)
+            else:
+                if alert.alert_type not in digest_notified:
+                    digest = self._msg_digest(alert.settings, alert.alert_type, names)
+                    digest_notified[alert.alert_type] = await self._notify(
+                        alert.settings, alert.severity, digest, header,
+                    )
+                notified = digest_notified[alert.alert_type]
+            await self._save_history(
+                alert.server_id, alert.server_name, alert.alert_type,
+                alert.severity, alert.message, alert.details, notified,
             )
 
+    @staticmethod
+    async def _notify(settings: AlertSettings, severity: str, message: str, header: str) -> bool:
+        if not (settings.telegram_bot_token and settings.telegram_chat_id):
+            return False
+        severity_map = {"critical": "\U0001f534", "warning": "\U0001f7e1", "info": "\U0001f7e2"}
+        emoji = severity_map.get(severity, "\u2139\ufe0f")
+        text = f"{emoji} <b>{header}</b>\n\n{message}"
+        from app.services.telegram_bot import get_telegram_bot_service
+        return await get_telegram_bot_service().send_message(
+            settings.telegram_bot_token, settings.telegram_chat_id, text,
+        )
+
+    @staticmethod
+    async def _save_history(
+        server_id: Optional[int],
+        server_name: str,
+        alert_type: str,
+        severity: str,
+        message: str,
+        details: dict,
+        notified: bool,
+    ):
         try:
             async with async_session() as db:
-                entry = AlertHistory(
-                    server_id=srv.id,
-                    server_name=srv.name,
+                db.add(AlertHistory(
+                    server_id=server_id,
+                    server_name=server_name,
                     alert_type=alert_type,
                     severity=severity,
                     message=message,
                     details=json.dumps(details, ensure_ascii=False),
                     notified=notified,
-                )
-                db.add(entry)
+                ))
                 await db.commit()
         except Exception as e:
             logger.error(f"Failed to save alert history: {e}")

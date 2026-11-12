@@ -15,8 +15,11 @@ from app.models import Server, HAProxyConfigProfile, HAProxySyncLog
 from app.services.haproxy_addresses import ServerAddresses, load_ips, missing_on_node, render_for_server
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.node_capabilities import Capability, denied_message, server_allows
+from app.services.rollout_guard import RolloutGuard
 
 logger = logging.getLogger(__name__)
+
+rollout_guard = RolloutGuard()
 
 MAX_CONCURRENT_SYNCS = 10
 
@@ -277,7 +280,8 @@ async def sync_profile_to_servers(
                 server, rendered[server.id], hashes[server.id], profile.id, ensure_started,
             )
 
-    online_results = await asyncio.gather(*[_guarded(s) for s in online])
+    with rollout_guard.hold(s.id for s in online):
+        online_results = await asyncio.gather(*[_guarded(s) for s in online])
     results.extend(online_results)
     return results
 
@@ -295,6 +299,10 @@ async def retry_pending_haproxy_syncs(db: AsyncSession) -> int:
         )
     )
     revived = [s for s in result.scalars().all() if is_server_online(s)]
+    # «pending» у сервера и пока до него не дошла идущая раскатка: повтор поверх неё
+    # слал бы конфиг второй раз, с ensure_started — то есть с reload даже без правок
+    waiting = set(rollout_guard.idle(s.id for s in revived))
+    revived = [s for s in revived if s.id in waiting]
     if not revived:
         return 0
 

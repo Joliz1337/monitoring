@@ -4,7 +4,6 @@
 и на ноды исполнитель (`haproxy_load_weights_runner`).
 """
 
-import json
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Mapping, Optional, Sequence
@@ -181,18 +180,15 @@ def should_push(
     )
 
 
-def nic_speed_mbps(last_metrics: Optional[str]) -> Optional[int]:
-    """Скорость карты, через которую идёт трафик: подсказка к каналу сервера.
+def nic_speed_mbps(metrics: Optional[dict]) -> Optional[int]:
+    """Скорость карты, через которую идёт трафик, из последнего ответа ноды:
+    подсказка к каналу сервера.
 
     Виртуальные интерфейсы (docker0, veth) отчитываются фиктивными 10 Гбит/с,
     поэтому берётся невиртуальный с наибольшим трафиком."""
-    if not last_metrics:
+    if not metrics:
         return None
-    try:
-        metrics = json.loads(last_metrics)
-    except json.JSONDecodeError:
-        return None
-    network = metrics.get("network") if isinstance(metrics, dict) else None
+    network = metrics.get("network")
     interfaces = network.get("interfaces") if isinstance(network, dict) else None
     candidates = [
         interface for interface in interfaces or []

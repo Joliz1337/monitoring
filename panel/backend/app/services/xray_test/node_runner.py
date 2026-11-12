@@ -21,6 +21,7 @@ import httpx
 
 from app.models import Server
 from app.services.http_client import get_external_client, get_node_client, node_auth_headers
+from app.services.latest_metrics import get_latest_metrics
 from app.services.node_capabilities import learn_from_denial
 from app.services.update_channel import current_branch, github_configs_base
 from app.services.xray_test import bundle, core_manager, core_output, probes
@@ -273,10 +274,11 @@ class NodeCoreRunner:
 def _node_capacity(server: Server) -> int:
     """Сколько проверок нода потянет одновременно — по числу её ядер."""
     cores = 0
-    if server.last_metrics:
+    metrics = get_latest_metrics().get(server.id)
+    if metrics:
         try:
-            cores = int(json.loads(server.last_metrics).get("cpu", {}).get("cores_logical") or 0)
-        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            cores = int(metrics.get("cpu", {}).get("cores_logical") or 0)
+        except (AttributeError, TypeError, ValueError):
             cores = 0
 
     # Потолок — сам пул: каждая одновременная проверка занимает один порт

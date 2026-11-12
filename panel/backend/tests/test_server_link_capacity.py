@@ -7,7 +7,6 @@ Runnable with plain stdlib:  python -m unittest discover -s panel/backend/tests
 который реально идёт трафик, а не с docker0 со своими фиктивными 10 Гбит/с.
 """
 
-import json
 import os
 import sys
 import unittest
@@ -37,8 +36,8 @@ class CapacityModelTests(unittest.TestCase):
 
 class NicSpeedTests(unittest.TestCase):
     @staticmethod
-    def metrics(*interfaces) -> str:
-        return json.dumps({"network": {"interfaces": list(interfaces)}})
+    def metrics(*interfaces) -> dict:
+        return {"network": {"interfaces": list(interfaces)}}
 
     @staticmethod
     def iface(name, speed, traffic, virtual=False) -> dict:
@@ -55,7 +54,9 @@ class NicSpeedTests(unittest.TestCase):
 
     def test_unknown_speed_and_garbage(self):
         self.assertIsNone(nic_speed_mbps(self.metrics(self.iface("eth0", None, 10))))
-        self.assertIsNone(nic_speed_mbps("{not json"))
+        self.assertIsNone(nic_speed_mbps(self.metrics("eth0")))
+        self.assertIsNone(nic_speed_mbps({"network": None}))
+        self.assertIsNone(nic_speed_mbps({}))
         self.assertIsNone(nic_speed_mbps(None))
 
 

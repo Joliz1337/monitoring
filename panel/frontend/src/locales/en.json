@@ -2003,6 +2003,12 @@
     "trigger_steal": "Steal (hoster takes the CPU)",
     "steal_hint": "Steal is the share of CPU the hoster's hypervisor gives to other machines: the physical host under the VM is overloaded by its neighbours. It cannot be fixed from inside the server — only the hoster can move the VM to another host. A message comes when steal stays above the threshold and repeats no more often than the cooldown until it goes away; once steal stays below the threshold for the same time, a \"back to normal\" message follows. CPU alerts mention steal too. Requires node 10.34.0.",
     "steal_threshold": "Steal threshold",
+    "trigger_panel_host": "Panel server",
+    "panel_host_hint": "Watches the server the panel itself runs on — no need to open the panel to learn about a problem. CPU and memory are averaged over the check interval, disk is how full the database partition is. A message comes when a value stays above its threshold and repeats no more often than the cooldown; once it stays below the threshold for the same time, a \"back to normal\" message follows. Server exclusions do not apply to this block.",
+    "panel_cpu_threshold": "CPU threshold",
+    "panel_ram_threshold": "Memory threshold",
+    "panel_disk_threshold": "Disk threshold",
+    "panel_server": "Panel server",
     "trigger_packet_loss": "Relay packet loss",
     "packet_loss_hint": "Relays probe their own HAProxy backends and DNAT targets. A message comes only when an address changes status: new loss, got worse (50%, 90%) or recovered — after the calm period on every relay. When three or more addresses are lost by a single relay while the others reach them, one message about that relay comes instead of the address list. A flapping address does not send on/off pairs, and a panel restart does not repeat what is already known. Requires node 10.31.0.",
     "packet_loss_calm": "Calm period before \"recovered\"",
@@ -2044,6 +2050,12 @@
     "type_node_update_failed": "Node update failed",
     "type_gre_silent": "GRE tunnel is silent",
     "type_gre_recovered": "GRE tunnel is back",
+    "type_panel_cpu_high": "Panel: CPU",
+    "type_panel_cpu_recovered": "Panel: CPU back to normal",
+    "type_panel_ram_high": "Panel: memory",
+    "type_panel_ram_recovered": "Panel: memory back to normal",
+    "type_panel_disk_high": "Panel: disk",
+    "type_panel_disk_recovered": "Panel: disk back to normal",
     "settings_saved": "Alert settings saved",
     "settings_save_failed": "Failed to save settings",
     "excluded_servers": "Excluded Servers",
@@ -2336,6 +2348,13 @@
     "overview_sshd_down": "SSH down",
     "overview_offline": "Node offline",
     "overview_outdated": "Update node"
+  },
+  "ip_search": {
+    "title": "IP Search",
+    "subtitle": "Picking IP addresses from the subnets you need in VK Cloud, Yandex Cloud, Cloud.ru and Selectel"
+  },
+  "cloud_bandwidth": {
+    "title": "Cloud.ru Bandwidth"
   },
   "wildcard_ssl": {
     "title": "Wildcard SSL",

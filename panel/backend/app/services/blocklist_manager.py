@@ -7,20 +7,24 @@ Handles:
 """
 
 import asyncio
+import contextlib
 import hashlib
 import ipaddress
 import json
 import logging
 import time
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from functools import cached_property, partial
+from typing import Awaitable, Callable, Iterable, Optional
 
 import httpx
 from sqlalchemy import select, and_
 
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_external_client, node_auth_headers
+from app.services.latest_metrics import get_latest_metrics
 from app.services.net_utils import is_public_range, resolve_panel_ip
 from app.services.node_ips import collect_node_ips
 from app.services.node_capabilities import Capability, server_allows
@@ -45,6 +49,10 @@ ALLOW_SYNC_TIMEOUT = 20.0
 # Три запроса: белый список in, out и настройка ping
 ALLOW_PUSH_BUDGET = 3 * ALLOW_SYNC_TIMEOUT + 5
 SYNC_TIMEOUT_IPS_PER_SEC = 40_000  # +1 сек к таймауту синка на каждые 40k IP
+SYNC_BUDGET_SLACK = 10.0  # запас бюджета ноды поверх суммы таймаутов её запросов
+# Сколько живут собранные общие списки: ожившие ноды синхронизируются по одной,
+# и при массовом восстановлении каждая пересобирала бы их заново
+SHARED_LISTS_TTL_SECONDS = 60
 # Страховочная сверка белого списка: IP ноды по DNS-имени, адреса на её
 # интерфейсах и IP панели меняются без единой правки в панели
 ALLOWLIST_CHECK_INTERVAL = 300
@@ -54,6 +62,7 @@ DIRECTIONS = ("in", "out")
 QUEUED_MESSAGE = "Сервер офлайн — синхронизация отложена до восстановления"
 DENIED_MESSAGE = "Нода закрыла блокировку IP в своих настройках"
 ALLOW_FAILED_MESSAGE = "Нода не приняла белый список"
+UNCHANGED_MESSAGE = "Список не менялся — нода уже его приняла"
 
 DEFAULT_SOURCES = [
     {
@@ -84,9 +93,35 @@ class AllowPolicy:
     def blocks_ping(self, server: Server) -> bool:
         return self.ping_scope.covers(server.id, server.folder)
 
+    @cached_property
+    def list_digests(self) -> dict[str, str]:
+        """Хэш белого списка каждого направления — по нему видно, приняла ли
+        нода именно этот список."""
+        return {
+            direction: hashlib.sha256("\n".join(ips).encode()).hexdigest()
+            for direction, ips in self.ips.items()
+        }
+
     def digest(self) -> str:
         payload = {"ips": self.ips, "ping_blocked": sorted(self.ping_blocked_ids)}
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+@dataclass
+class DeliveredLists:
+    """Хэши списков, которые нода приняла последними, по направлениям.
+
+    Блок-лист и белый список порознь: белый рассылается и сам по себе.
+    Направления нет — что на ноде лежит, неизвестно, и список уйдёт заново."""
+    block: dict[str, str] = field(default_factory=dict)
+    allow: dict[str, str] = field(default_factory=dict)
+
+    def complete(self) -> bool:
+        return all(
+            direction in part
+            for part in (self.block, self.allow)
+            for direction in DIRECTIONS
+        )
 
 
 class BlocklistSourceUnavailableError(Exception):
@@ -138,6 +173,20 @@ class BlocklistManager:
         # Растёт, когда синк блок-листа доставил части нод белый список,
         # отличный от разосланного на весь парк
         self._allowlist_epoch = 0
+        # Что приняла каждая нода, по server_id. Записи нет — что на ноде
+        # лежит, неизвестно: новая нода, сбой доставки, рестарт панели
+        self._delivered: defaultdict[int, DeliveredLists] = defaultdict(DeliveredLists)
+        # Синки блок-листа идут одной ноде строго по очереди: вперемешку они
+        # оставили бы на ноде список одного, а в памяти — хэш другого
+        self._node_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Собранные общие списки, таймер их сброса и сборка, идущая прямо сейчас
+        self._shared_cache: Optional[dict] = None
+        self._shared_expiry: Optional[asyncio.TimerHandle] = None
+        self._shared_build: Optional[asyncio.Task] = None
+        # Парку причитается полный синк: источник сменился либо прошлый синк
+        # сорвался целиком (недоступен источник, сбой БД), и до нод это ещё
+        # не дошло — суточный цикл досинхронизирует
+        self._fleet_sync_owed = False
     
     def _validate_ip_cidr(self, ip: str) -> bool:
         ip = ip.strip()
@@ -280,6 +329,8 @@ class BlocklistManager:
     async def get_global_rules(
         self, db: AsyncSession, direction: str = "in", list_type: str = "block"
     ) -> list[str]:
+        # Порядок строк входит в хэш тела синка: без ORDER BY тот же список
+        # в другом порядке считался бы новым и ушёл бы на весь парк заново
         result = await db.execute(
             select(BlocklistRule).where(
                 and_(
@@ -288,7 +339,7 @@ class BlocklistManager:
                     BlocklistRule.direction == direction,
                     BlocklistRule.list_type == list_type
                 )
-            )
+            ).order_by(BlocklistRule.id)
         )
         rules = result.scalars().all()
         return [r.ip_cidr for r in rules]
@@ -300,7 +351,7 @@ class BlocklistManager:
         поэтому управляющий трафик не попадёт под DROP даже при плохом блок-листе."""
         async with async_session() as db:
             servers = (await db.execute(
-                select(Server.id, Server.url, Server.folder, Server.last_metrics, Server.dedicated_cert)
+                select(Server.id, Server.url, Server.folder, Server.dedicated_cert)
                 .where(Server.is_active == True)  # noqa: E712
             )).all()
             manual = {
@@ -309,8 +360,13 @@ class BlocklistManager:
             }
             ping_scope = await load_scope(db)
 
+        # Адреса интерфейсов — из последних ответов нод в памяти: колонка
+        # servers.last_metrics обновляется редко. Словари общие, только читаем
+        metrics = get_latest_metrics().get_many(row.id for row in servers)
         # Резолв — после закрытия сессии: медленный DNS не держит коннект пула
-        auto = await collect_node_ips((row.url, row.last_metrics, row.dedicated_cert) for row in servers)
+        auto = await collect_node_ips(
+            (row.url, metrics.get(row.id), row.dedicated_cert) for row in servers
+        )
         panel_ip = await resolve_panel_ip()
         if panel_ip:
             auto.add(panel_ip)
@@ -337,13 +393,16 @@ class BlocklistManager:
         return [r.ip_cidr for r in rules]
     
     async def get_auto_list_ips(self, db: AsyncSession, direction: str = "in") -> list[str]:
+        # Строка источника переписывается при каждом обновлении и переезжает
+        # в таблице — без ORDER BY источники менялись бы местами, а с ними
+        # и порядок адресов в теле синка (см. get_global_rules)
         result = await db.execute(
             select(BlocklistSource).where(
                 and_(
                     BlocklistSource.enabled == True,
                     BlocklistSource.direction == direction
                 )
-            )
+            ).order_by(BlocklistSource.id)
         )
         sources = result.scalars().all()
         all_ips = []
@@ -445,10 +504,51 @@ class BlocklistManager:
                     "block_set": block_set,
                     "count": len(block),
                     "body": body,
+                    "digest": (await asyncio.to_thread(hashlib.sha256, body)).hexdigest(),
                     "allow": policy.ips[direction],
+                    "allow_digest": policy.list_digests[direction],
                 }
         return shared
     
+    async def _shared_lists(self) -> dict:
+        """Общие списки из кэша; сборку, которая уже идёт, все ждут вместе.
+
+        Синк одной ноды иначе пересобирал бы их под себя: при массовом
+        восстановлении это тысячи сборок на сотни тысяч адресов."""
+        if self._shared_cache is not None:
+            return self._shared_cache
+        if self._shared_build is None:
+            self._shared_build = asyncio.create_task(self._build_and_keep_shared())
+        # Отмена одного из ждущих не должна оборвать сборку остальным
+        return await asyncio.shield(self._shared_build)
+
+    async def _build_and_keep_shared(self) -> dict:
+        this_build = asyncio.current_task()
+        try:
+            shared = await self.build_shared_lists()
+            # Сброшенная по ходу сборка могла прочитать старые правила — не храним
+            if self._shared_build is this_build:
+                self._shared_cache = shared
+                # Списки на миллионы адресов — сотни мегабайт: по истечении срока
+                # их надо отпустить, а не держать до следующего синка
+                self._shared_expiry = asyncio.get_running_loop().call_later(
+                    SHARED_LISTS_TTL_SECONDS, self.invalidate_shared_lists
+                )
+            return shared
+        finally:
+            if self._shared_build is this_build:
+                self._shared_build = None
+
+    def invalidate_shared_lists(self) -> None:
+        """Забыть собранные общие списки: сменились правила, источники или белый список.
+
+        Идущую сборку новые вызовы тоже не ждут — она началась до правки."""
+        self._shared_cache = None
+        self._shared_build = None
+        if self._shared_expiry is not None:
+            self._shared_expiry.cancel()
+            self._shared_expiry = None
+
     @staticmethod
     def _sync_timeout(ip_count: int) -> float:
         """Таймаут синка растёт со списком: ноде нужно время распарсить и применить."""
@@ -538,14 +638,103 @@ class BlocklistManager:
             return False, f"HTTP {response.status_code}"
         return True, "Ping blocked" if block else "Ping allowed"
 
+    async def _load_extras(self, server: Server, shared: dict) -> dict[str, list[str]]:
+        """Свои правила ноды, которых нет в общем списке.
+
+        Короткая сессия БД под семафором освобождается до медленных HTTP-синков,
+        иначе пул PostgreSQL исчерпывается при fan-out."""
+        extras = {}
+        async with self._db_sem:
+            async with async_session() as db:
+                for direction in DIRECTIONS:
+                    server_rules = await self.get_server_rules(server.id, db, direction)
+                    extras[direction] = [
+                        ip for ip in self.deduplicate_ips(server_rules)
+                        if is_public_range(ip) and ip not in shared[direction]["block_set"]
+                    ]
+        return extras
+
     async def _sync_one_server(self, server: Server, shared: dict) -> dict:
         """Sync both directions for a single server.
 
         `shared` — предвычисленные общие списки и JSON-тела из build_shared_lists();
         нода без своих правил получает общее тело как есть — ни одной копии списка.
-        Короткая сессия БД под семафором освобождается до медленных HTTP-синков,
-        иначе пул PostgreSQL исчерпывается при fan-out.
+        Бюджет времени отсчитывается только на саму доставку: чтение правил и
+        очередь за слотом под отдельное тело в него не входят.
         """
+        try:
+            extras = await self._load_extras(server, shared)
+        except Exception as e:
+            logger.error(f"Failed to load blocklist IPs for {server.name}: {e}")
+            return self._failed_result(server, str(e))
+
+        known = self._delivered[server.id]
+        block_digests = {
+            direction: self._block_digest(shared[direction]["digest"], extras[direction])
+            for direction in DIRECTIONS
+        }
+        # Отдельное тело на миллионах адресов весит десятки мегабайт: слот
+        # держится до конца отправки, чтобы такие тела не копились по числу нод
+        needs_own_body = any(
+            extras[direction] and known.block.get(direction) != block_digests[direction]
+            for direction in DIRECTIONS
+        )
+        body_slot = self._extra_body_sem if needs_own_body else contextlib.nullcontext()
+        try:
+            async with body_slot:
+                return await asyncio.wait_for(
+                    self._deliver(server, shared, extras, block_digests, known),
+                    timeout=self._sync_budget(shared),
+                )
+        except asyncio.TimeoutError:
+            return self._failed_result(server, "Timeout")
+
+    @staticmethod
+    def _block_digest(shared_digest: str, extra: list[str]) -> str:
+        """Хэш блок-листа ноды: общий список плюс её собственные правила.
+        Свои правила сортируются — база отдаёт их без порядка."""
+        if not extra:
+            return shared_digest
+        return hashlib.sha256("\n".join([shared_digest, *sorted(extra)]).encode()).hexdigest()
+
+    @staticmethod
+    async def _send_if_changed(
+        delivered: dict[str, str],
+        direction: str,
+        digest: str,
+        send: Callable[[], Awaitable[tuple[bool, str, dict]]],
+    ) -> tuple[bool, str, dict]:
+        """Отправить ноде список, если она ещё не подтвердила именно его."""
+        if delivered.get(direction) == digest:
+            return True, UNCHANGED_MESSAGE, {}
+        # Пока нода не подтвердила доставку, что на ней лежит — неизвестно:
+        # сбой, таймаут и отмена посреди отправки оставляют список без хэша,
+        # и в следующий раз он уйдёт заново
+        delivered.pop(direction, None)
+        accepted, message, data = await send()
+        if accepted:
+            delivered[direction] = digest
+        return accepted, message, data
+
+    async def _send_block(
+        self, server: Server, lists: dict, extra: list[str], direction: str
+    ) -> tuple[bool, str, dict]:
+        ip_count = lists["count"] + len(extra)
+        if not extra:
+            return await self.sync_to_node(server, lists["body"], ip_count)
+        # У ноды свои правила — общее тело ей не подходит, собирается своё
+        body = await asyncio.to_thread(self._build_sync_body, lists["block"] + extra, direction)
+        return await self.sync_to_node(server, body, ip_count)
+
+    async def _deliver(
+        self,
+        server: Server,
+        shared: dict,
+        extras: dict[str, list[str]],
+        block_digests: dict[str, str],
+        known: DeliveredLists,
+    ) -> dict:
+        """Отправить ноде списки, которых на ней ещё нет, и настройку ping."""
         server_result = {
             "server_id": server.id,
             "server_name": server.name,
@@ -554,114 +743,81 @@ class BlocklistManager:
             "out": {},
         }
 
-        try:
-            extras = {}
-            async with self._db_sem:
-                async with async_session() as db:
-                    for direction in ("in", "out"):
-                        server_rules = await self.get_server_rules(server.id, db, direction)
-                        extras[direction] = [
-                            ip for ip in self.deduplicate_ips(server_rules)
-                            if is_public_range(ip) and ip not in shared[direction]["block_set"]
-                        ]
-        except Exception as e:
-            logger.error(f"Failed to load blocklist IPs for {server.name}: {e}")
-            for direction in ("in", "out"):
-                server_result[direction] = {"success": False, "message": str(e), "ip_count": 0}
-            server_result["success"] = False
-            return server_result
+        for direction in DIRECTIONS:
+            lists = shared[direction]
+            extra = extras[direction]
+            allow_ips = lists["allow"]
+            try:
+                success, message, data = await self._send_if_changed(
+                    known.block, direction, block_digests[direction],
+                    partial(self._send_block, server, lists, extra, direction),
+                )
+                allow_ok, allow_msg, allow_data = await self._send_if_changed(
+                    known.allow, direction, lists["allow_digest"],
+                    partial(self.sync_allow_to_node, server, allow_ips, direction=direction),
+                )
 
-        async with self._http_sem:
-            for direction in ("in", "out"):
-                try:
-                    extra = extras[direction]
-                    ip_count = shared[direction]["count"] + len(extra)
-
-                    if extra:
-                        # У ноды свои правила — собираем отдельное тело; семафор
-                        # держит его до конца отправки, чтобы гигантские тела
-                        # не копились в памяти по числу таких нод
-                        async with self._extra_body_sem:
-                            body = await asyncio.to_thread(
-                                self._build_sync_body,
-                                shared[direction]["block"] + extra,
-                                direction,
-                            )
-                            success, message, data = await self.sync_to_node(
-                                server, body, ip_count
-                            )
-                            del body
-                    else:
-                        success, message, data = await self.sync_to_node(
-                            server, shared[direction]["body"], ip_count
-                        )
-
-                    allow_ips = shared[direction]["allow"]
-                    allow_ok, allow_msg, allow_data = await self.sync_allow_to_node(
-                        server, allow_ips, direction=direction
-                    )
-
-                    server_result[direction] = {
-                        "success": success and allow_ok,
-                        "message": message,
-                        "ip_count": ip_count,
-                        "added": data.get("added", 0),
-                        "removed": data.get("removed", 0),
-                        "allow": {
-                            "success": allow_ok,
-                            "message": allow_msg,
-                            "ip_count": len(allow_ips),
-                            "added": allow_data.get("added", 0),
-                            "removed": allow_data.get("removed", 0),
-                        },
-                    }
-                    if not (success and allow_ok):
-                        server_result["success"] = False
-                except Exception as e:
-                    logger.error(f"Failed to sync {direction} to {server.name}: {e}")
-                    server_result[direction] = {
-                        "success": False,
-                        "message": str(e),
-                        "ip_count": 0,
-                    }
+                server_result[direction] = {
+                    "success": success and allow_ok,
+                    "message": message,
+                    "ip_count": lists["count"] + len(extra),
+                    "added": data.get("added", 0),
+                    "removed": data.get("removed", 0),
+                    "allow": {
+                        "success": allow_ok,
+                        "message": allow_msg,
+                        "ip_count": len(allow_ips),
+                        "added": allow_data.get("added", 0),
+                        "removed": allow_data.get("removed", 0),
+                    },
+                }
+                if not (success and allow_ok):
                     server_result["success"] = False
-
-            # Правило ping ссылается на белый список — после него
-            block_ping = shared["allow_policy"].blocks_ping(server)
-            ping_ok, ping_msg = await self.sync_ping_to_node(server, block_ping)
-            server_result["ping"] = {"success": ping_ok, "message": ping_msg, "blocked": block_ping}
-            if not ping_ok:
+            except Exception as e:
+                logger.error(f"Failed to sync {direction} to {server.name}: {e}")
+                server_result[direction] = {
+                    "success": False,
+                    "message": str(e),
+                    "ip_count": 0,
+                }
                 server_result["success"] = False
+
+        # Правило ping ссылается на белый список — после него
+        block_ping = shared["allow_policy"].blocks_ping(server)
+        ping_ok, ping_msg = await self.sync_ping_to_node(server, block_ping)
+        server_result["ping"] = {"success": ping_ok, "message": ping_msg, "blocked": block_ping}
+        if not ping_ok:
+            server_result["success"] = False
         return server_result
 
-    async def _sync_one_server_safe(self, server: Server, shared: dict) -> dict:
-        """Sync one server with a global timeout wrapper — never raises."""
-        # Бюджет масштабируется под размер списков: фиксированные 30с обрубали
-        # синк крупных блок-листов на середине
-        budget = 10.0 + ALLOW_SYNC_TIMEOUT + sum(
-            self._sync_timeout(shared[d]["count"]) + ALLOW_SYNC_TIMEOUT
-            for d in ("in", "out")
+    def _sync_budget(self, shared: dict) -> float:
+        """Потолок времени на одну ноду. Масштабируется под размер списков:
+        фиксированные 30с обрубали синк крупных блок-листов на середине."""
+        return SYNC_BUDGET_SLACK + ALLOW_SYNC_TIMEOUT + sum(
+            self._sync_timeout(shared[direction]["count"]) + ALLOW_SYNC_TIMEOUT
+            for direction in DIRECTIONS
         )
+
+    async def _sync_one_server_safe(self, server: Server, shared: dict) -> dict:
+        """Sync one server — never raises."""
         try:
-            return await asyncio.wait_for(
-                self._sync_one_server(server, shared), timeout=budget
-            )
-        except asyncio.TimeoutError:
-            return {
-                "server_id": server.id,
-                "server_name": server.name,
-                "success": False,
-                "in": {"success": False, "message": "Timeout", "ip_count": 0},
-                "out": {"success": False, "message": "Timeout", "ip_count": 0},
-            }
+            # Слот и очередь к ноде занимаются до отсчёта бюджета: при 2000 нодах
+            # на 50 слотов хвост ждёт дольше самой доставки и получал ложный Timeout
+            async with self._http_sem, self._node_locks[server.id]:
+                return await self._sync_one_server(server, shared)
         except Exception as e:
-            return {
-                "server_id": server.id,
-                "server_name": server.name,
-                "success": False,
-                "in": {"success": False, "message": str(e), "ip_count": 0},
-                "out": {"success": False, "message": str(e), "ip_count": 0},
-            }
+            return self._failed_result(server, str(e))
+
+    @staticmethod
+    def _failed_result(server: Server, message: str) -> dict:
+        failed = {"success": False, "message": message, "ip_count": 0}
+        return {
+            "server_id": server.id,
+            "server_name": server.name,
+            "success": False,
+            "in": dict(failed),
+            "out": dict(failed),
+        }
 
     def _store_sync_result(self, results: dict, error: Optional[str] = None):
         self._last_sync = {
@@ -717,16 +873,34 @@ class BlocklistManager:
         а очередь доставит список сама, как только они вернутся в сеть."""
         if not servers:
             return {}
+        # За время простоя ноду могли переустановить или откатить из снимка
+        self._forget_delivered(s.id for s in servers)
         await enqueue([s.id for s in servers], KIND_BLOCKLIST, QUEUED_MESSAGE)
         return {s.id: self._queued_result(s) for s in servers}
+
+    def _forget_delivered(self, server_ids: Iterable[int]) -> None:
+        """Что лежит на этих нодах, больше не известно — следующая доставка
+        отправит им списки целиком.
+
+        Запись выбрасывается, а не чистится: доставка, идущая ноде прямо
+        сейчас, допишет хэши в выброшенную, и они не засчитаются."""
+        for server_id in server_ids:
+            self._delivered.pop(server_id, None)
 
     async def sync_all_nodes(self) -> dict:
         """Sync blocklists to all active nodes in parallel (both directions).
 
         Под замком: параллельные полные синки (ручной + автообновление) не
-        дублируют работу, второй вызов дождётся первого и прогонит свежие данные."""
+        дублируют работу, второй вызов дождётся первого и прогонит свежие данные.
+        Нода получает только те списки, которых на ней ещё нет."""
+        # Сюда приходят сразу после правки правил и источников — списки,
+        # собранные до неё, этой правки не содержат
+        self.invalidate_shared_lists()
         async with self._sync_lock:
             self._sync_in_progress = True
+            # Долг перед парком закрывается до сборки списков: источник,
+            # сменившийся уже по ходу синка, поднимет его снова
+            self._fleet_sync_owed = False
             results = {}
             error = None
             try:
@@ -752,7 +926,7 @@ class BlocklistManager:
                 ))
 
                 if online:
-                    shared = await self.build_shared_lists()
+                    shared = await self._shared_lists()
                     tasks = [self._sync_one_server_safe(s, shared) for s in online]
                     done = await asyncio.gather(*tasks)
 
@@ -771,6 +945,8 @@ class BlocklistManager:
                 error = str(e)
                 logger.error(f"sync_all_nodes failed: {e}")
             finally:
+                if error is not None:
+                    self._fleet_sync_owed = True
                 self._store_sync_result(results, error)
             return results
 
@@ -811,7 +987,7 @@ class BlocklistManager:
             return results
 
         try:
-            shared = await self.build_shared_lists()
+            shared = await self._shared_lists()
         except BlocklistSourceUnavailableError as e:
             # Неполный список снял бы блокировки — ждём восстановления источника.
             return {**results, **{s.id: str(e) for s in servers}}
@@ -846,6 +1022,9 @@ class BlocklistManager:
     async def sync_single_node_by_id(self, server_id: int) -> dict:
         """Sync one server by ID (both directions). Returns per-server result."""
         self._sync_in_progress = True
+        # Сюда приходят ожившие, новые и перенастроенные ноды: что на них лежит,
+        # неизвестно, поэтому списки уходят целиком, даже если не менялись
+        self._forget_delivered([server_id])
         try:
             async with async_session() as db:
                 result = await db.execute(
@@ -872,7 +1051,7 @@ class BlocklistManager:
                 self._store_sync_result(prev)
                 return sr
 
-            shared = await self.build_shared_lists()
+            shared = await self._shared_lists()
             sr = await self._sync_one_server_safe(server, shared)
             self._note_allow_sent(shared["allow_policy"].digest())
             if not sr.get("success"):
@@ -896,6 +1075,8 @@ class BlocklistManager:
 
         Не ждёт рассылки. Правки, пришедшие пачкой, схлопываются в одну
         рассылку, а список, который не изменился, не рассылается вовсе."""
+        # Белый список входит в общие списки полного синка
+        self.invalidate_shared_lists()
         self._allowlist_requested.set()
 
     def _note_allow_sent(self, digest: str) -> None:
@@ -903,7 +1084,10 @@ class BlocklistManager:
 
         Снимок, не совпавший с разосланным на весь парк, мог устареть за время
         долгого синка и лечь на ноду поверх свежего — тогда разослать заново."""
-        if digest in (self._allowlist_pushed_hash, self._allowlist_inflight_hash):
+        # Пока идёт рассылка, сверяемся с ней: прежняя политика, которую она
+        # заменяет, — уже устаревший снимок
+        current = self._allowlist_inflight_hash or self._allowlist_pushed_hash
+        if digest == current:
             return
         self._allowlist_pushed_hash = None
         self._allowlist_epoch += 1
@@ -915,6 +1099,9 @@ class BlocklistManager:
         digest = policy.digest()
         if digest == self._allowlist_pushed_hash:
             return
+        # Адрес ноды мог смениться без правок в панели — в общих списках
+        # полного синка остался бы прежний белый список
+        self.invalidate_shared_lists()
         self._allowlist_inflight_hash = digest
         try:
             await self._push_allowlist(policy)
@@ -939,6 +1126,7 @@ class BlocklistManager:
         # Долг офлайн-ноды закрывает полный синк блок-листа: он соберёт
         # белый список, актуальный на момент её возвращения
         if offline:
+            self._forget_delivered(offline)
             await enqueue(offline, KIND_BLOCKLIST, QUEUED_MESSAGE)
 
         done = await asyncio.gather(*(self._push_allow_one(s, policy) for s in online))
@@ -953,7 +1141,14 @@ class BlocklistManager:
         )
 
     async def _push_allow_one(self, server: Server, policy: AllowPolicy) -> tuple[int, bool]:
+        # Очередь к ноде (_node_locks) рассылка не занимает: ждать, пока нода
+        # применит блок-лист, ей незачем, а снимок полного синка, лёгший
+        # поверх свежего списка, закрывает _note_allow_sent
         async with self._allow_http_sem:
+            known = self._delivered[server.id]
+            # Пока нода не подтвердила новый белый список, что на ней лежит —
+            # неизвестно: после сбоя долг из очереди отправит его заново
+            known.allow.clear()
             try:
                 ok = await asyncio.wait_for(
                     self._send_allow(server, policy), timeout=ALLOW_PUSH_BUDGET
@@ -961,6 +1156,8 @@ class BlocklistManager:
             except asyncio.TimeoutError:
                 logger.warning(f"Allowlist push to {server.name} timed out")
                 ok = False
+            if ok:
+                known.allow.update(policy.list_digests)
         return server.id, ok
 
     async def _send_allow(self, server: Server, policy: AllowPolicy) -> bool:
@@ -993,6 +1190,13 @@ class BlocklistManager:
             except Exception as e:
                 logger.error(f"Allowlist push failed: {e}")
 
+    def _source_changed(self) -> None:
+        """Источник в синке стал другим: собранные списки устарели, а парку
+        причитается полный синк — даже если тот, кто скачал источник, до синка
+        не дойдёт (обновление источников оборвалось на следующем)."""
+        self.invalidate_shared_lists()
+        self._fleet_sync_owed = True
+
     async def refresh_source(self, source_id: int) -> tuple[bool, str, int, bool]:
         async with async_session() as db:
             result = await db.execute(
@@ -1003,6 +1207,9 @@ class BlocklistManager:
                 return False, "Source not found", 0, False
             
             success, ips, error = await self.fetch_github_list(source.url, use_cache=False)
+            # Источник, не помещавшийся в лимит ноды, в синк не шёл, а его хэш
+            # всё это время не обновлялся — о возврате в синк хэш не скажет
+            was_excluded = (source.ip_count or 0) > NODE_MAX_IPSET_ENTRIES
             if success and len(ips) > NODE_MAX_IPSET_ENTRIES:
                 source.ip_count = len(ips)
                 source.last_updated = datetime.now(timezone.utc)
@@ -1010,17 +1217,20 @@ class BlocklistManager:
                     f"{len(ips)} IPs exceeds node limit of {NODE_MAX_IPSET_ENTRIES:,} — excluded from sync"
                 )
                 await db.commit()
+                if not was_excluded:
+                    self._source_changed()
                 return False, source.error_message, len(ips), False
             if success:
                 # Хэш миллионов записей — CPU-bound, в поток
                 new_hash = await asyncio.to_thread(self.calculate_hash, ips)
-                changed = source.last_hash != new_hash
+                changed = was_excluded or source.last_hash != new_hash
                 source.last_hash = new_hash
                 source.last_updated = datetime.now(timezone.utc)
                 source.ip_count = len(ips)
                 source.error_message = None
                 await db.commit()
                 if changed:
+                    self._source_changed()
                     return True, f"Updated: {len(ips)} IPs (changed)", len(ips), True
                 return True, f"Checked: {len(ips)} IPs (no changes)", len(ips), False
             else:
@@ -1070,6 +1280,44 @@ class BlocklistManager:
                     logger.info(f"Added default source: {source_data['name']}")
             await db.commit()
     
+    async def _refresh_and_sync(self) -> None:
+        """Проход автообновления: скачать источники и обойти парк, если нодам
+        есть что досылать. Обход без повода на 2000 нодах — тысячи запросов
+        ради списков, которые они уже приняли."""
+        logger.info("Starting auto-update of blocklist sources")
+        results, sources_changed = await self.refresh_all_sources()
+
+        for r in results.values():
+            if r.get("changed"):
+                logger.info(f"Source '{r['name']}' changed: {r['ip_count']} IPs")
+            elif r.get("success"):
+                logger.debug(f"Source '{r['name']}' unchanged: {r['ip_count']} IPs")
+            else:
+                logger.warning(f"Source '{r['name']}' failed: {r['message']}")
+
+        if not (sources_changed or self._fleet_sync_owed or await self._online_node_awaits_lists()):
+            logger.info("Blocklist sources unchanged, nodes already have the lists — sync skipped")
+            return
+
+        # refresh_all_sources уже положил свежие списки в кэш —
+        # прежний clear_cache() заставлял скачивать миллионы IP второй раз
+        logger.info("Syncing blocklists to all nodes")
+        await self.sync_all_nodes()
+
+    async def _online_node_awaits_lists(self) -> bool:
+        """Есть ли живая нода, про которую неизвестно, что на ней лежит: новая,
+        не принявшая прошлую доставку, либо панель перезапускалась."""
+        async with async_session() as db:
+            servers = (await db.execute(
+                select(Server.id, Server.last_seen, Server.node_capabilities)
+                .where(Server.is_active == True)  # noqa: E712
+            )).all()
+        return any(
+            server.id not in self._delivered or not self._delivered[server.id].complete()
+            for server in servers
+            if server_allows(server, Capability.IPSET, write=True) and is_server_online(server)
+        )
+
     async def _update_loop(self):
         await asyncio.sleep(60)
         
@@ -1083,23 +1331,9 @@ class BlocklistManager:
                     continue
                 
                 interval = settings.get("auto_update_interval", UPDATE_INTERVAL)
-                
-                logger.info("Starting auto-update of blocklist sources")
-                results, _ = await self.refresh_all_sources()
-                
-                for source_id, r in results.items():
-                    if r.get("changed"):
-                        logger.info(f"Source '{r['name']}' changed: {r['ip_count']} IPs")
-                    elif r.get("success"):
-                        logger.debug(f"Source '{r['name']}' unchanged: {r['ip_count']} IPs")
-                    else:
-                        logger.warning(f"Source '{r['name']}' failed: {r['message']}")
-                
-                # refresh_all_sources уже положил свежие списки в кэш —
-                # прежний clear_cache() заставлял скачивать миллионы IP второй раз
-                logger.info("Syncing blocklists to all nodes")
-                await self.sync_all_nodes()
-                
+
+                await self._refresh_and_sync()
+
                 await asyncio.sleep(interval)
                 
             except asyncio.CancelledError:

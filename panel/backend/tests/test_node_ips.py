@@ -3,7 +3,6 @@
 Runnable with plain stdlib:  python -m unittest discover -s panel/backend/tests
 """
 
-import json
 import os
 import sys
 import unittest
@@ -14,15 +13,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.services.node_ips import MAX_METRIC_ADDRESSES_PER_NODE, collect_node_ips, public_interface_ipv4  # noqa: E402
 
 
-def metrics_with(*interfaces: list[dict]) -> str:
-    return json.dumps({
+def metrics_with(*interfaces: list[dict]) -> dict:
+    return {
         "network": {
             "interfaces": [
                 {"name": f"eth{i}", "addresses": addresses}
                 for i, addresses in enumerate(interfaces)
             ],
         },
-    })
+    }
 
 
 def ipv4(address: str) -> dict:
@@ -60,11 +59,11 @@ class PublicInterfaceIpv4Test(unittest.TestCase):
                 metrics = metrics_with([{**ipv4("192.168.0.106"), "public_address": public_address}])
                 self.assertEqual(public_interface_ipv4(metrics), [])
 
-    def test_broken_metrics_give_nothing(self):
-        for raw in (None, "", "{not json", json.dumps(["x"]), json.dumps({"network": None}),
-                    json.dumps({"network": {"interfaces": ["eth0", {"addresses": ["5.9.0.10"]}]}})):
-            with self.subTest(raw=raw):
-                self.assertEqual(public_interface_ipv4(raw), [])
+    def test_missing_or_malformed_metrics_give_nothing(self):
+        for metrics in (None, {}, {"network": None}, {"network": {"interfaces": None}},
+                        {"network": {"interfaces": ["eth0", {"addresses": ["5.9.0.10"]}]}}):
+            with self.subTest(metrics=metrics):
+                self.assertEqual(public_interface_ipv4(metrics), [])
 
 
 class CollectNodeIpsTest(unittest.IsolatedAsyncioTestCase):

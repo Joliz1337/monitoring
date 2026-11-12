@@ -1,19 +1,10 @@
 import { Outlet, NavLink, useParams, useLocation, Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  LayoutDashboard,
-  Server,
-  Settings,
   Menu,
   Activity,
   X,
   Sparkles,
-  Package,
-  Layers,
-  Search,
-  Shield,
-  Radio,
-  Gauge,
   StickyNote,
   ChevronDown,
   type LucideIcon
@@ -21,7 +12,6 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import type { TFunction } from 'i18next'
 import type { UpdateSummary } from '../../api/client'
-import { useExtStore } from '../../stores/_extStore'
 import { useNotesStore } from '../../stores/notesStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useUpdateSummaryStore } from '../../stores/updateSummaryStore'
@@ -33,18 +23,6 @@ import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import NotesDrawer from '../Notes/NotesDrawer'
 import { FAQDrawer } from '../FAQ'
-
-const iconMap: Record<string, LucideIcon> = {
-  Search,
-  LayoutDashboard,
-  Server,
-  Settings,
-  Package,
-  Layers,
-  Shield,
-  Radio,
-  Gauge
-}
 
 const overlayVariants = {
   hidden: { opacity: 0 },
@@ -60,9 +38,6 @@ const navItemVariants = {
     transition: { delay: i * 0.1, duration: 0.3 }
   })
 }
-
-/** Отдельные пункты из стора встают сразу после «Массовых операций» */
-const EXTRA_NAV_ITEM_INDEX = 3
 
 // Версии на GitHub панель кэширует на 5 минут — чаще спрашивать сводку незачем
 const UPDATE_SUMMARY_POLL_MS = 5 * 60_000
@@ -219,7 +194,6 @@ function SidebarGroup({ group, items, expanded, onToggle, onNavigate }: SidebarG
 export default function Layout() {
   const { uid } = useParams()
   const location = useLocation()
-  const extNavItems = useExtStore(s => s.navItems)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const toggleNotes = useNotesStore(s => s.toggle)
   const notesOpen = useNotesStore(s => s.isOpen)
@@ -270,10 +244,6 @@ export default function Layout() {
       ? { kind: 'link', item: moduleLink(entry.module) }
       : { kind: 'group', group: entry.group, items: entry.modules.map(moduleLink) }
   )
-  sidebarEntries.splice(EXTRA_NAV_ITEM_INDEX, 0, ...extNavItems.map((navItem): SidebarEntry => ({
-    kind: 'link',
-    item: toNavLink(`/${uid}/${navItem.path}`, iconMap[navItem.icon] || Search, navItem.label, false),
-  })))
 
   const activeGroupId = sidebarEntries.find(
     (entry): entry is Extract<SidebarEntry, { kind: 'group' }> =>

@@ -17,7 +17,6 @@
 
 import asyncio
 import ipaddress
-import json
 from itertools import islice
 from typing import Iterable, Optional
 from urllib.parse import urlparse
@@ -34,16 +33,13 @@ def url_host(url: str) -> Optional[str]:
         return None
 
 
-def public_interface_ipv4(last_metrics: Optional[str]) -> list[str]:
-    """Публичные IPv4 всех интерфейсов в порядке появления, без повторов:
-    адреса карт и адреса, под которыми приватные выходят через NAT."""
-    if not last_metrics:
+def public_interface_ipv4(metrics: Optional[dict]) -> list[str]:
+    """Публичные IPv4 всех интерфейсов из последнего ответа ноды в порядке
+    появления, без повторов: адреса карт и адреса, под которыми приватные
+    выходят через NAT."""
+    if not metrics:
         return []
-    try:
-        metrics = json.loads(last_metrics)
-    except json.JSONDecodeError:
-        return []
-    network = metrics.get("network") if isinstance(metrics, dict) else None
+    network = metrics.get("network")
     interfaces = network.get("interfaces") if isinstance(network, dict) else None
     # Один адрес бывает на двух интерфейсах
     return list(dict.fromkeys(
@@ -57,8 +53,8 @@ def public_interface_ipv4(last_metrics: Optional[str]) -> list[str]:
     ))
 
 
-async def collect_node_ips(nodes: Iterable[tuple[str, Optional[str], bool]]) -> set[str]:
-    """Все адреса нод для белых списков по тройкам (url, last_metrics, dedicated_cert).
+async def collect_node_ips(nodes: Iterable[tuple[str, Optional[dict], bool]]) -> set[str]:
+    """Все адреса нод для белых списков по тройкам (url, последний ответ ноды, dedicated_cert).
 
     Сюда попадают доп. адреса и вторые карты — трафик ноды с них не должен
     упираться в блок-лист или лимиты Анти-DDoS соседей. Домены из URL
@@ -66,10 +62,10 @@ async def collect_node_ips(nodes: Iterable[tuple[str, Optional[str], bool]]) -> 
     nodes = list(nodes)
     resolved = await asyncio.gather(*(host_to_ip(url_host(url) or "") for url, _, _ in nodes))
     ips = {ip for ip in resolved if ip}
-    for _, last_metrics, dedicated_cert in nodes:
+    for _, metrics, dedicated_cert in nodes:
         if dedicated_cert:
             continue
-        ips.update(islice(public_interface_ipv4(last_metrics), MAX_METRIC_ADDRESSES_PER_NODE))
+        ips.update(islice(public_interface_ipv4(metrics), MAX_METRIC_ADDRESSES_PER_NODE))
     return ips
 
 

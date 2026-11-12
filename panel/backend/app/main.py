@@ -1,4 +1,3 @@
-import importlib
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -16,7 +15,7 @@ logging.basicConfig(
 from app.database import init_db, async_session
 from app.config import get_settings
 from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles, reserved_ports, node_image, remnawave_install, haproxy_upgrade, xray_test, exit_proxy, source_pool, loss, port_usage
-from app.routers import gre
+from app.routers import gre, ip_search
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.xray_stats_collector import start_xray_stats_collector, stop_xray_stats_collector
@@ -68,23 +67,6 @@ async def cleanup_expired_bans():
         logger.error(f"Error cleaning up expired bans: {e}")
 
 
-async def _init_optional_module(module_name: str, entrypoint: str) -> None:
-    """Опциональные модули: отсутствие — штатная ситуация, а вот сбой инициализации
-    установленного молча выключал бы функциональность без единой строки в логе."""
-    from app.database import engine
-
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError:
-        logger.debug(f"Optional module {module_name} is not installed")
-        return
-
-    try:
-        await getattr(module, entrypoint)(engine)
-    except Exception as e:
-        logger.error(f"Optional module {module_name} failed to initialize: {e}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Гарантируем ключ шифрования до миграций/чтения секретов — бэкенд не должен
@@ -102,9 +84,6 @@ async def lifespan(app: FastAPI):
         await load_xray_test_versions(db)
         await load_loss_exclusions(db)
     logger.info(f"Update channel: {branch}")
-    
-    await _init_optional_module("app.services._ext", "init_ext_db")
-    await _init_optional_module("app.services._yc", "init_yc_db")
 
     await start_telegram_bot_service()
     await start_collector()
@@ -202,11 +181,16 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
+# Сжатие идёт в event loop. Уровень 9 (умолчание Starlette) на ответе в десятки
+# мегабайт втрое дороже пятого при том же размере результата.
+GZIP_LEVEL = 5
+
+
 class GZipMiddlewareNoSSE:
     """GZip that bypasses streaming SSE endpoints to avoid buffering"""
     def __init__(self, app):
         self.app = app
-        self.gzip = GZipMiddleware(app, minimum_size=1024)
+        self.gzip = GZipMiddleware(app, minimum_size=1024, compresslevel=GZIP_LEVEL)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
@@ -264,14 +248,8 @@ app.include_router(source_pool.router)
 app.include_router(gre.router)
 app.include_router(loss.router)
 
-try:
-    from app.routers._internal import router as ext_router
-    if ext_router.routes:
-        app.include_router(ext_router, prefix="/_int", tags=["internal"])
-except ImportError:
-    logger.debug("Optional router app.routers._internal is not installed")
-except Exception as e:
-    logger.error(f"Optional router app.routers._internal failed to load: {e}")
+# Префикс менять нельзя: по нему воркеры поиска IP стучатся в панель изнутри контейнера
+app.include_router(ip_search.router, prefix="/_int", tags=["ip-search"])
 
 
 @app.get("/health")

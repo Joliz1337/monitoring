@@ -21,6 +21,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.models import Server  # noqa: E402
+from app.services.latest_metrics import LatestMetrics  # noqa: E402
 from app.services.xray_test import node_runner, probes  # noqa: E402
 from app.services.xray_test.bundle import BundleTicket  # noqa: E402
 from app.services.xray_test.config_builder import (  # noqa: E402
@@ -670,7 +671,27 @@ class ChunkDispatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(peak, limit)
 
 
-class NodeCapacityTest(unittest.TestCase):
+class NodeMetricsCase(unittest.TestCase):
+    """Число ядер ноды раннер берёт из её последнего ответа в памяти панели."""
+
+    def setUp(self) -> None:
+        self.latest = LatestMetrics()
+        store_patch = mock.patch.object(node_runner, "get_latest_metrics", return_value=self.latest)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
+
+    def _server(self, metrics: dict | None) -> Server:
+        server = Server(id=1, name="n", url="https://n.example")
+        self.latest.forget(server.id)
+        if metrics is not None:
+            self.latest.put(server.id, metrics)
+        return server
+
+    def _server_with_cores(self, cores: int) -> Server:
+        return self._server({"cpu": {"cores_logical": cores}})
+
+
+class NodeCapacityTest(NodeMetricsCase):
     """Потолок проверок на ноде считается по её процессору.
 
     Замер на боевой ноде: 64 проверки разом дали load average 14 и продолжали
@@ -678,30 +699,19 @@ class NodeCapacityTest(unittest.TestCase):
     пул портов вслепую нельзя — проверки от нехватки CPU идут только медленнее.
     """
 
-    @staticmethod
-    def _server(cores):
-        metrics = json.dumps({"cpu": {"cores_logical": cores}}) if cores is not None else None
-        return Server(id=1, name="n", url="https://n.example", last_metrics=metrics)
+    def _capacity(self, cores: int) -> int:
+        return node_runner._node_capacity(self._server_with_cores(cores))
 
     def test_scales_with_cores(self):
-        self.assertLess(
-            node_runner._node_capacity(self._server(2)),
-            node_runner._node_capacity(self._server(8)),
-        )
+        self.assertLess(self._capacity(2), self._capacity(8))
 
     def test_never_exceeds_port_pool(self):
-        huge = node_runner._node_capacity(self._server(256))
-        self.assertLessEqual(huge, len(node_runner.PORT_POOL))
+        self.assertLessEqual(self._capacity(256), len(node_runner.PORT_POOL))
 
     def test_weak_node_never_below_minimum(self):
         """Даже одноядерной ноде даём работать, просто немного."""
-        self.assertGreaterEqual(
-            node_runner._node_capacity(self._server(1)), node_runner.MIN_NODE_CONCURRENCY
-        )
-        self.assertLess(
-            node_runner._node_capacity(self._server(1)),
-            node_runner._node_capacity(self._server(4)),
-        )
+        self.assertGreaterEqual(self._capacity(1), node_runner.MIN_NODE_CONCURRENCY)
+        self.assertLess(self._capacity(1), self._capacity(4))
 
     def test_unknown_cores_fall_back(self):
         """Метрик ещё нет — берём осторожно, а не весь пул."""
@@ -709,25 +719,23 @@ class NodeCapacityTest(unittest.TestCase):
         self.assertEqual(capacity, node_runner.NODE_FALLBACK_CONCURRENCY)
         self.assertLess(capacity, len(node_runner.PORT_POOL))
 
-    def test_broken_metrics_do_not_crash(self):
-        server = Server(id=1, name="n", url="https://n.example", last_metrics="не json")
-        self.assertEqual(
-            node_runner._node_capacity(server), node_runner.NODE_FALLBACK_CONCURRENCY
-        )
+    def test_malformed_metrics_do_not_crash(self):
+        for metrics in ({"cpu": None}, {"cpu": {"cores_logical": "много"}}, {"cpu": {"cores_logical": [8]}}):
+            with self.subTest(metrics=metrics):
+                self.assertEqual(
+                    node_runner._node_capacity(self._server(metrics)), node_runner.NODE_FALLBACK_CONCURRENCY
+                )
 
 
-class BatchAccountingTest(unittest.TestCase):
+class BatchAccountingTest(NodeMetricsCase):
     """Одновременных проверок ровно `capacity`, и портов на них хватает.
 
     Задание держит свои порты целиком, поэтому число заданий и размер задания
     должны в произведении давать потолок, а не превышать пул.
     """
 
-    @staticmethod
-    def _runner(cores):
-        server = Server(id=1, name="n", url="https://n.example",
-                        last_metrics=json.dumps({"cpu": {"cores_logical": cores}}))
-        return NodeCoreRunner(server)
+    def _runner(self, cores: int) -> NodeCoreRunner:
+        return NodeCoreRunner(self._server_with_cores(cores))
 
     def test_jobs_times_batch_equals_capacity(self):
         for cores in (1, 2, 4, 8, 16, 64):
@@ -745,9 +753,7 @@ class BatchAccountingTest(unittest.TestCase):
 
     def test_speed_measurement_limits_parallel_checks(self):
         """Закачки делят канал ноды: при десятках сразу каждая мерила бы свою долю."""
-        server = Server(id=1, name="n", url="https://n.example",
-                        last_metrics=json.dumps({"cpu": {"cores_logical": 16}}))
-        r = NodeCoreRunner(server, measure_speed=True)
+        r = NodeCoreRunner(self._server_with_cores(16), measure_speed=True)
 
         self.assertEqual(r.capacity, probes.SPEED_CONCURRENCY)
         self.assertLessEqual(r.workers * r.batch_size, r.capacity)

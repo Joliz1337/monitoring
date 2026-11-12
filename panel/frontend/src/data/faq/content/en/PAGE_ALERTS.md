@@ -15,6 +15,7 @@ A background check runs every minute across all active servers. Each trigger has
 
 ## What is monitored
 
+- **Panel server** — CPU, memory and disk of the server the panel itself runs on: Telegram reports an overload even if nobody opens the panel, and sends "back to normal" once the load drops.
 - **Availability** — the server missed several checks in a row; a separate message arrives when it returns.
 - **CPU, RAM, load average** — threshold breaches and unusual growth.
 - **Network** — spikes and, conversely, suspicious silence.

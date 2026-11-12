@@ -2,9 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 from typing import Optional, Any, AsyncGenerator
 from datetime import datetime
 import asyncio
+import copy
 import httpx
 import json
 import logging
@@ -16,6 +18,7 @@ from app.database import get_db
 from app.models import Server, ServerCache, MetricsSnapshot
 from app.auth import verify_auth
 from app.services import node_update_watcher, update_channel, upstream_commit
+from app.services.latest_metrics import get_latest_metrics
 from app.services.metrics_history import HistoryPeriod, load_history
 from app.services.metrics_rates import enrich_metrics_with_speeds
 from app.services.node_capabilities import (
@@ -62,7 +65,11 @@ def to_iso_utc(dt: Optional[datetime]) -> Optional[str]:
 
 
 async def get_server_by_id(server_id: int, db: AsyncSession) -> Server:
-    result = await db.execute(select(Server).where(Server.id == server_id))
+    # Без last_metrics: ответ ноды читается из памяти, а этот запрос стоит
+    # перед каждым обращением к ноде и тянул бы с собой десятки килобайт JSON
+    result = await db.execute(
+        select(Server).options(defer(Server.last_metrics)).where(Server.id == server_id)
+    )
     server = result.scalar_one_or_none()
     if not server:
         raise HTTPException(status_code=404)
@@ -213,22 +220,22 @@ async def get_metrics(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    """Get cached metrics from panel's database (collected by background worker).
+    """Get the node's latest answer kept in panel memory (collected by background worker).
     This avoids additional load on nodes when viewing dashboard.
     Enriches metrics with calculated network/disk speeds from latest snapshot.
     """
-    server = await get_server_by_id(server_id, db)
-    
-    if server.last_metrics:
-        try:
-            metrics = json.loads(server.last_metrics)
-            snapshot = await get_latest_snapshot(server_id, db)
-            return enrich_metrics_with_speeds(metrics, snapshot)
-        except json.JSONDecodeError:
-            pass
-    
-    # No cached data
-    raise HTTPException(status_code=503)
+    await get_server_by_id(server_id, db)
+
+    metrics = get_latest_metrics().get(server_id)
+    if not metrics:
+        # No cached data
+        raise HTTPException(status_code=503)
+    # Скорости из снапшота нужны только старому агенту: остальные присылают свои
+    snapshot = None if metrics.get("live_rates") else await get_latest_snapshot(server_id, db)
+    if not snapshot:
+        return metrics
+    # Скорости дописываются прямо в словарь, а он общий для всех читателей хранилища
+    return enrich_metrics_with_speeds(copy.deepcopy(metrics), snapshot)
 
 
 @router.get("/{server_id}/metrics/live")

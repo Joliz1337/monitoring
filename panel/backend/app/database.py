@@ -435,6 +435,21 @@ async def run_migrations(conn):
                 except Exception:
                     pass
 
+        panel_host_columns = [
+            ("panel_host_enabled", "BOOLEAN DEFAULT TRUE"),
+            ("panel_cpu_threshold", "FLOAT DEFAULT 90.0"),
+            ("panel_ram_threshold", "FLOAT DEFAULT 90.0"),
+            ("panel_disk_threshold", "FLOAT DEFAULT 90.0"),
+            ("panel_host_sustained_seconds", "INTEGER DEFAULT 300"),
+        ]
+        for col_name, col_type in panel_host_columns:
+            if col_name not in alert_columns:
+                try:
+                    await conn.execute(text(f'ALTER TABLE alert_settings ADD COLUMN "{col_name}" {col_type}'))
+                    logger.info(f"Added column: alert_settings.{col_name}")
+                except Exception:
+                    pass
+
         # Подтянуть старые дефолты шумовых порогов к новым значениям.
         # Срабатывает только если пользователь не менял значения вручную —
         # т.е. они точно равны предыдущим встроенным дефолтам.
@@ -449,7 +464,14 @@ async def run_migrations(conn):
             ))
         except Exception:
             pass
-    
+
+    # Алерты о хосте панели пишутся без сервера. Выполняется на каждом старте:
+    # восстановленный бэкап старой версии возвращает NOT NULL из своей схемы
+    try:
+        await conn.execute(text("ALTER TABLE alert_history ALTER COLUMN server_id DROP NOT NULL"))
+    except Exception as e:
+        logger.debug(f"alert_history.server_id DROP NOT NULL: {e}")
+
     # Add webhook columns to torrent_blocker_settings
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns

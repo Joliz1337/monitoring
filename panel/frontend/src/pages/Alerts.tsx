@@ -5,7 +5,7 @@ import {
   Bell, Bot, Send, CheckCircle2, XCircle, Loader2,
   ChevronDown, ChevronRight, Trash2, Server, ShieldOff,
   Cpu, MemoryStick, Network, Cable, Power, Activity, Layers,
-  RefreshCw, Clock, X, Radar, ServerCrash,
+  RefreshCw, Clock, X, Radar, ServerCrash, Gauge,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { alertsApi, serversApi, AlertSettingsData, AlertHistoryItem, AlertStatus, Server as ServerType } from '../api/client'
@@ -14,7 +14,13 @@ import { Tooltip } from '../components/ui/Tooltip'
 import { SecretInput } from '../components/ui/SecretInput'
 import { FAQIcon, type FAQScreen } from '../components/FAQ'
 
-type TriggerSection = 'offline' | 'cpu' | 'steal' | 'ram' | 'network' | 'load_avg' | 'conntrack' | 'packet_loss' | 'tcp'
+type TriggerSection = 'panel_host' | 'offline' | 'cpu' | 'steal' | 'ram' | 'network' | 'load_avg' | 'conntrack' | 'packet_loss' | 'tcp'
+
+const PANEL_ALERT_TYPES = [
+  'panel_cpu_high', 'panel_cpu_recovered',
+  'panel_ram_high', 'panel_ram_recovered',
+  'panel_disk_high', 'panel_disk_recovered',
+] as const
 
 export default function Alerts() {
   const { t } = useTranslation()
@@ -175,6 +181,7 @@ export default function Alerts() {
       node_update_failed: t('alerts.type_node_update_failed'),
       gre_silent: t('alerts.type_gre_silent'),
       gre_recovered: t('alerts.type_gre_recovered'),
+      ...Object.fromEntries(PANEL_ALERT_TYPES.map(type => [type, t(`alerts.type_${type}`)])),
     }
     return map[t_] || t_
   }
@@ -328,6 +335,22 @@ export default function Alerts() {
       <div className="space-y-3">
         <h2 className="text-sm font-medium text-dark-300 uppercase tracking-wider">{t('alerts.triggers')}</h2>
         <div className="grid grid-cols-[repeat(auto-fill,minmax(400px,1fr))] gap-3">
+
+        {/* Сервер самой панели */}
+        <TriggerBlock
+          title={t('alerts.trigger_panel_host')}
+          icon={<Gauge className="w-4 h-4" />}
+          enabled={settings.panel_host_enabled}
+          onToggle={v => save({ panel_host_enabled: v })}
+          expanded={expanded.has('panel_host')}
+          onExpand={() => toggle('panel_host')}
+        >
+          <p className="text-xs text-dark-500">{t('alerts.panel_host_hint')}</p>
+          <SliderRow label={t('alerts.panel_cpu_threshold')} value={settings.panel_cpu_threshold} min={50} max={100} step={5} format={v => `${v}%`} onSave={v => save({ panel_cpu_threshold: v })} />
+          <SliderRow label={t('alerts.panel_ram_threshold')} value={settings.panel_ram_threshold} min={50} max={100} step={5} format={v => `${v}%`} onSave={v => save({ panel_ram_threshold: v })} />
+          <SliderRow label={t('alerts.panel_disk_threshold')} value={settings.panel_disk_threshold} min={50} max={100} step={5} format={v => `${v}%`} onSave={v => save({ panel_disk_threshold: v })} />
+          <SliderRow label={t('alerts.sustained')} value={settings.panel_host_sustained_seconds} min={60} max={1800} step={60} format={v => `${v / 60} ${t('alerts.minutes_short')}`} onSave={v => save({ panel_host_sustained_seconds: v })} />
+        </TriggerBlock>
 
         {/* Offline */}
         <TriggerBlock
@@ -639,6 +662,9 @@ export default function Alerts() {
               <option value="packet_loss">{t('alerts.type_packet_loss')}</option>
               <option value="packet_loss_recovery">{t('alerts.type_packet_loss_recovery')}</option>
               <option value="node_update_failed">{t('alerts.type_node_update_failed')}</option>
+              {PANEL_ALERT_TYPES.map(type => (
+                <option key={type} value={type}>{t(`alerts.type_${type}`)}</option>
+              ))}
             </select>
             <button
               onClick={handleClearHistory}
@@ -677,8 +703,17 @@ export default function Alerts() {
                     <span className="text-xs font-medium text-dark-300">{alertTypeLabel(item.alert_type)}</span>
                     <span className="text-xs text-dark-500">|</span>
                     <span className="text-xs text-dark-400 flex items-center gap-1">
-                      <Server className="w-3.5 h-3.5" />
-                      {item.server_name}
+                      {item.server_id === null ? (
+                        <>
+                          <Gauge className="w-3.5 h-3.5" />
+                          {t('alerts.panel_server')}
+                        </>
+                      ) : (
+                        <>
+                          <Server className="w-3.5 h-3.5" />
+                          {item.server_name}
+                        </>
+                      )}
                     </span>
                     {item.notified && (
                       <span className="text-xs text-accent-500">TG</span>

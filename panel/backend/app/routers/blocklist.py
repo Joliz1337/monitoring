@@ -11,7 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, and_, delete
+from sqlalchemy import select, and_, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
@@ -314,8 +314,10 @@ async def manager_sync_single(server_id: int):
 async def _build_server_rules_payload(
     db: AsyncSession, server_id: int, direction: str
 ) -> dict:
-    result = await db.execute(select(Server).where(Server.id == server_id))
-    if not result.scalar_one_or_none():
+    # Страница запрашивает это по два раза на каждый сервер парка: строка сервера
+    # с метриками и все глобальные правила ради одного числа здесь не нужны
+    result = await db.execute(select(Server.id).where(Server.id == server_id))
+    if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Server not found")
 
     result = await db.execute(
@@ -329,14 +331,14 @@ async def _build_server_rules_payload(
     rules = result.scalars().all()
 
     global_result = await db.execute(
-        select(BlocklistRule).where(
+        select(func.count()).select_from(BlocklistRule).where(
             and_(
                 BlocklistRule.server_id.is_(None),
                 BlocklistRule.direction == direction
             )
         )
     )
-    global_count = len(global_result.scalars().all())
+    global_count = global_result.scalar_one()
 
     return {
         "server_id": server_id,

@@ -26,6 +26,7 @@ from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory, An
 from app.services.gre.render import whitelist_entries as gre_whitelist_entries
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_node_apply_client, get_external_client, node_auth_headers
+from app.services.latest_metrics import get_latest_metrics
 from app.services.node_capabilities import Capability, denied_message, server_allows
 from app.services.net_utils import resolve_panel_ip
 from app.services.node_ips import collect_node_ips
@@ -36,6 +37,9 @@ logger = logging.getLogger(__name__)
 
 FILES_CACHE_TTL = 300   # seconds
 SOURCE_CACHE_TTL = 300  # seconds — cache fetched source lists
+# Дольше ждать нечего: nginx ноды обрывает этот запрос через те же 30 секунд
+WHITELIST_SYNC_TIMEOUT = 30.0
+NODE_CONNECT_TIMEOUT = 3.0
 
 # Extract IPv4 / IPv4-CIDR from any response body (JSON, plain text, HTML) so a
 # whitelist source works regardless of format (Cloudflare list, Yandex yc.json…).
@@ -95,9 +99,12 @@ class AntiDdosManager:
         """Auto (all node addresses + panel IP + DDoS-Guard GRE endpoints and health
         networks) + manual (user CIDRs) + auto-source lists."""
         servers = (await db.execute(
-            select(Server.url, Server.last_metrics, Server.dedicated_cert).where(Server.is_active == True)  # noqa: E712
+            select(Server.id, Server.url, Server.dedicated_cert).where(Server.is_active == True)  # noqa: E712
         )).all()
-        ips = await collect_node_ips(servers)
+        latest = get_latest_metrics()
+        ips = await collect_node_ips(
+            (url, latest.get(server_id), dedicated_cert) for server_id, url, dedicated_cert in servers
+        )
 
         panel_ip = await resolve_panel_ip()
         if panel_ip:
@@ -191,7 +198,19 @@ class AntiDdosManager:
 
     # ── node calls ─────────────────────────────────────────────────────────
 
-    async def sync_whitelist_to_node(self, server: Server, ips: list[str], timeout: float = 30.0) -> tuple[bool, str]:
+    @staticmethod
+    def _whitelist_rejected_by_node(resp: httpx.Response) -> Optional[str]:
+        """Причина отказа из тела ответа. Нода старой версии на сбой применения
+        списка отвечает HTTP 200 с success=false — по одному коду этого не видно."""
+        try:
+            body = resp.json()
+        except ValueError:
+            return None
+        if isinstance(body, dict) and body.get("success") is False:
+            return str(body.get("message") or "node failed to apply the whitelist")
+        return None
+
+    async def sync_whitelist_to_node(self, server: Server, ips: list[str]) -> tuple[bool, str]:
         # Как и с нодой без эндпоинта: не ошибка, а «доставлять некуда».
         # Иначе push_whitelist_all запишет в очередь долг, который не закроется.
         if not server_allows(server, Capability.ANTIDDOS, write=True):
@@ -202,9 +221,12 @@ class AntiDdosManager:
                 f"{server.url}/api/antiddos/whitelist/sync",
                 headers=node_auth_headers(server),
                 json={"ips": ips},
-                timeout=timeout,
+                timeout=httpx.Timeout(WHITELIST_SYNC_TIMEOUT, connect=NODE_CONNECT_TIMEOUT),
             )
             if resp.status_code == 200:
+                rejected = self._whitelist_rejected_by_node(resp)
+                if rejected:
+                    return False, rejected
                 return True, "synced"
             if resp.status_code == 404:
                 return True, "node has no antiddos endpoint (old version)"

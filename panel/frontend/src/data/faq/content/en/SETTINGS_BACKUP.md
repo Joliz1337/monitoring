@@ -18,6 +18,6 @@ Restart the panel afterwards (`docker compose restart`) so the restored login an
 
 ## Good to know
 
-- Metric history lives in the same database and is restored along with everything else.
+- Metric history is restored along with everything else, except the most detailed samples of the last 24 hours: they are left out of the backup, otherwise a copy of a large fleet would take gigabytes. After a restore the 1-hour and 24-hour charts stay empty until the panel collects data again; the week, month and year charts and all traffic history are in place.
 - Take a copy before risky changes (mass profile rollouts, blocklist experiments): rolling back takes a minute.
 - The file is an ordinary PostgreSQL dump — keep it in your own storage and restore it on another machine if needed.

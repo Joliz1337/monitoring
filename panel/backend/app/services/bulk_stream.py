@@ -14,6 +14,10 @@ from app.models import Server
 
 logger = logging.getLogger(__name__)
 
+# Работа по всем нодам сразу — это тысячи одновременных соединений к нодам
+# и столько же сессий базы в один момент
+MAX_PARALLEL_NODES = 30
+
 
 def ndjson_line(obj: dict) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode()
@@ -21,11 +25,14 @@ def ndjson_line(obj: dict) -> bytes:
 
 def stream_ndjson(servers: list[Server], worker, log_action: str | None = None) -> StreamingResponse:
     """Стримит NDJSON: start → result по каждой ноде (по мере готовности) → done."""
+    semaphore = asyncio.Semaphore(MAX_PARALLEL_NODES)
+
     async def safe_worker(server):
         # Граница стрима: необработанное исключение одной ноды не должно
         # обрывать соединение — иначе остальные строки навсегда зависают в «загрузке»
         try:
-            return await worker(server)
+            async with semaphore:
+                return await worker(server)
         except Exception as e:
             logger.exception("bulk_stream_worker_failed", extra={"server_id": server.id})
             return {

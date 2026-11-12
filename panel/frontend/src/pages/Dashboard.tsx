@@ -29,6 +29,7 @@ import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useFolderBoard, FOLDER_SORTABLE_PREFIX } from '../hooks/useFolderBoard'
 import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import ServerCard, { ServerCardOverlay } from '../components/Dashboard/ServerCard'
+import LazyServerCard, { useCardPlaceholder } from '../components/Dashboard/LazyServerCard'
 import FleetSummary from '../components/Dashboard/FleetSummary'
 import { FolderLoadBadges, FolderLoadChart, FolderStatusCounts } from '../components/Dashboard/FolderStats'
 import type { LoadMetric } from '../components/Dashboard/LoadHistoryPanel'
@@ -43,6 +44,11 @@ import { matchesServerSearch } from '../utils/serverSearch'
 
 const COLLAPSED_KEY = 'dashboard_collapsed_folders'
 
+// Больше стольких показанных серверов карточки монтируются только рядом с экраном:
+// каждая — это useSortable, тултипы и сотня DOM-узлов, и пара тысяч разом вешают
+// вкладку на секунды. До порога дашборд работает как раньше, без наблюдателей
+const LAZY_CARDS_MIN_SERVERS = 300
+
 type StatusFilter = 'online' | 'offline' | 'disabled'
 
 const STATUS_FILTERS: { key: StatusFilter; Icon: LucideIcon; text: string; active: string }[] = [
@@ -52,6 +58,7 @@ const STATUS_FILTERS: { key: StatusFilter; Icon: LucideIcon; text: string; activ
 ]
 
 const NO_SERVERS: ServerWithMetrics[] = []
+const NO_IDS: number[] = []
 
 export default function Dashboard() {
   const { uid } = useParams()
@@ -137,6 +144,9 @@ export default function Dashboard() {
     [statusServers, isSearching, normalizedQuery],
   )
 
+  const lazyCards = visibleServers.length > LAZY_CARDS_MIN_SERVERS
+  const cardPlaceholder = useCardPlaceholder(compactView, detailLevel, cardScale)
+
   // При поиске и фильтре пустые папки не показываем — в них нечего искать
   const folders = useMemo(
     () => collectFolders(visibleServers, isFiltering ? [] : board.emptyFolders, board.folderOrder),
@@ -149,6 +159,15 @@ export default function Dashboard() {
   )
 
   const grouped = useMemo(() => groupByFolder(visibleServers), [visibleServers])
+
+  // SortableContext кладёт items в свой контекст: массив, собранный прямо в JSX, новый
+  // на каждом рендере, и все карточки перерисовывались в обход memo — даже когда
+  // менялось что-то постороннее (флаг загрузки, открытый график папки)
+  const sortableIds = useMemo(() => {
+    const ids = new Map<string | null, number[]>()
+    grouped.forEach((list, folder) => ids.set(folder, list.map(s => s.id)))
+    return ids
+  }, [grouped])
 
   // Бейджи папки описывают её целиком, как счётчики в шапке: поиск и фильтр
   // меняют только показанные карточки
@@ -175,6 +194,22 @@ export default function Dashboard() {
         : 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5'
 
   const unfolderedServers = grouped.get(null) || []
+
+  const isDragActive = board.activeServerId !== null || activeFolderName !== null
+
+  const renderCard = (server: ServerWithMetrics, index: number) => lazyCards ? (
+    <LazyServerCard
+      key={server.id}
+      server={server}
+      compact={compactView}
+      detailLevel={detailLevel}
+      placeholder={cardPlaceholder}
+      holdMounted={isDragActive}
+      dragged={server.id === board.activeServerId}
+    />
+  ) : (
+    <ServerCard key={server.id} server={server} compact={compactView} detailLevel={detailLevel} index={index} />
+  )
 
   return (
     <div className="animate-page-enter">
@@ -392,11 +427,9 @@ export default function Dashboard() {
                       panel={<FolderLoadChart servers={folderActiveServers} folder={folderName} chart={folderChart} />}
                     >
                       {folderServers.length > 0 ? (
-                        <SortableContext items={folderServers.map(s => s.id)} strategy={rectSortingStrategy}>
+                        <SortableContext items={sortableIds.get(folderName) ?? NO_IDS} strategy={rectSortingStrategy}>
                           <div className={gridClass}>
-                            {folderServers.map((server, index) => (
-                              <ServerCard key={server.id} server={server} compact={compactView} detailLevel={detailLevel} index={index} />
-                            ))}
+                            {folderServers.map(renderCard)}
                           </div>
                         </SortableContext>
                       ) : (
@@ -409,11 +442,9 @@ export default function Dashboard() {
 
               {/* Servers without folder */}
               <UnfolderDropZone isOver={board.isDropTarget(null)} hasServers={unfolderedServers.length > 0} hasFolders={folders.length > 0}>
-                <SortableContext items={unfolderedServers.map(s => s.id)} strategy={rectSortingStrategy}>
+                <SortableContext items={sortableIds.get(null) ?? NO_IDS} strategy={rectSortingStrategy}>
                   <div className={gridClass}>
-                    {unfolderedServers.map((server, index) => (
-                      <ServerCard key={server.id} server={server} compact={compactView} detailLevel={detailLevel} index={index} />
-                    ))}
+                    {unfolderedServers.map(renderCard)}
                   </div>
                 </SortableContext>
             </UnfolderDropZone>

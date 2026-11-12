@@ -839,6 +839,14 @@ class AlertSettings(Base):
     # Напоминание об открытых эпизодах; 0 — выключено
     packet_loss_reminder_hours = Column(Integer, default=0)
 
+    # Хост самой панели (см. panel_host_alerts): CPU и память — среднее
+    # за интервал проверки, диск — заполнение раздела с базой
+    panel_host_enabled = Column(Boolean, default=True)
+    panel_cpu_threshold = Column(Float, default=90.0)
+    panel_ram_threshold = Column(Float, default=90.0)
+    panel_disk_threshold = Column(Float, default=90.0)
+    panel_host_sustained_seconds = Column(Integer, default=300)
+
     # Excluded servers (JSON array of server IDs)
     excluded_server_ids = Column(Text, nullable=True)
 
@@ -886,7 +894,8 @@ class AlertHistory(Base):
     __tablename__ = "alert_history"
     
     id = Column(Integer, primary_key=True)
-    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, index=True)
+    # NULL — алерт о хосте самой панели, его нет в списке серверов
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=True, index=True)
     server_name = Column(String(100), nullable=False)
     alert_type = Column(String(50), nullable=False)
     severity = Column(String(20), default="warning")

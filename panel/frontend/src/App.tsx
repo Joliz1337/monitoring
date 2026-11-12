@@ -4,14 +4,12 @@ import { Activity } from 'lucide-react'
 import { Toaster, toast } from 'sonner'
 import { useAuthStore } from './stores/authStore'
 import { useSettingsStore } from './stores/settingsStore'
-import { useExtStore } from './stores/_extStore'
 import { useTranslation } from 'react-i18next'
 import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/Layout/Layout'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Servers from './pages/Servers'
-import { isExtEnabled } from './pages/_internal'
 
 function lazyRetry<T extends React.ComponentType<unknown>>(
   factory: () => Promise<{ default: T }>,
@@ -55,10 +53,9 @@ const Loss = lazyRetry(() => import('./pages/Loss'))
 const Dnat = lazyRetry(() => import('./pages/Dnat'))
 const SourcePool = lazyRetry(() => import('./pages/SourcePool'))
 const GreTunnels = lazyRetry(() => import('./pages/GreTunnels'))
-
-const ExtPageLazy = isExtEnabled 
-  ? lazyRetry(() => import('./pages/_internal/ExtPage'))
-  : null
+const IPSearch = lazyRetry(() => import('./pages/IPSearch'))
+// Обе страницы живут в одном файле и делят его компоненты
+const CloudBandwidth = lazyRetry(() => import('./pages/IPSearch').then(m => ({ default: m.CloudBandwidthPage })))
 
 function LoadingScreen() {
   const { t } = useTranslation()
@@ -109,16 +106,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     checkAuth()
   }, [checkAuth])
-  
-  useEffect(() => {
-    if (isAuthenticated && isExtEnabled) {
-      const state = useExtStore.getState() as unknown as Record<string, unknown>
-      if (typeof state.initExt === 'function') {
-        (state.initExt as () => Promise<void>)()
-      }
-    }
-  }, [isAuthenticated])
-  
+
   if (isLoading) {
     return <LoadingScreen />
   }
@@ -229,17 +217,8 @@ export default function App() {
           <Route path="xray-test" element={<ModuleGuard id="xray-test"><SuspenseWithBoundary><XrayTest /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="remnawave-nginx" element={<ModuleGuard id="remnawave-nginx"><SuspenseWithBoundary><RemnawaveNginx /></SuspenseWithBoundary></ModuleGuard>} />
           <Route path="exit-proxy" element={<ModuleGuard id="exit-proxy"><SuspenseWithBoundary><ExitProxy /></SuspenseWithBoundary></ModuleGuard>} />
-          {ExtPageLazy && ['ip-search', 'ext/*'].map(path => (
-            <Route
-              key={path}
-              path={path}
-              element={
-                <SuspenseWithBoundary>
-                  <ExtPageLazy />
-                </SuspenseWithBoundary>
-              }
-            />
-          ))}
+          <Route path="ip-search" element={<ModuleGuard id="ip-search"><SuspenseWithBoundary><IPSearch /></SuspenseWithBoundary></ModuleGuard>} />
+          <Route path="cloud-bandwidth" element={<ModuleGuard id="cloud-bandwidth"><SuspenseWithBoundary><CloudBandwidth /></SuspenseWithBoundary></ModuleGuard>} />
         </Route>
       </Routes>
     </ErrorBoundary>

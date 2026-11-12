@@ -40,6 +40,10 @@ SNAPSHOT_INTERVAL_SEC = 10
 RETENTION = timedelta(days=30)
 CLEANUP_INTERVAL_SEC = 3600
 
+# Корень контейнера — overlay поверх раздела хоста с /var/lib/docker:
+# там же лежит том PostgreSQL, его заполнение и роняет панель
+DISK_PATH = "/"
+
 HostHistoryPeriod = Literal["1h", "24h", "7d", "30d"]
 
 
@@ -70,6 +74,20 @@ class HostSample:
     memory_used: int
     memory_available: int
     load_avg_1: float
+
+
+@dataclass(frozen=True)
+class RecentHostLoad:
+    cpu_percent: float
+    memory_percent: float
+    memory_available: int
+
+
+@dataclass(frozen=True)
+class HostDisk:
+    percent: float
+    free: int
+    total: int
 
 
 def summarize_samples(samples: Sequence[HostSample]) -> dict[str, Any]:
@@ -129,6 +147,12 @@ def read_host_sample(previous_cpu_times: Any) -> tuple[HostSample, Any]:
         load_avg_1=psutil.getloadavg()[0],
     )
     return sample, cpu_times
+
+
+def read_host_disk() -> HostDisk:
+    """Блокирующее чтение statfs — вызывать через to_thread."""
+    usage = psutil.disk_usage(DISK_PATH)
+    return HostDisk(percent=usage.percent, free=usage.free, total=usage.total)
 
 
 class PanelHostSampler:
@@ -225,6 +249,34 @@ BUCKETS_SQL = text("""
     GROUP BY 1
     ORDER BY 1
 """)
+
+
+RECENT_LOAD_SQL = text("""
+    SELECT COUNT(*) AS data_points,
+           AVG(cpu_usage) AS cpu_usage,
+           AVG(memory_percent) AS memory_percent,
+           AVG(memory_available)::float8 AS memory_available
+    FROM panel_host_metrics
+    WHERE timestamp >= :start
+""")
+
+
+async def load_recent_host_load(db: AsyncSession, window_sec: float) -> Optional[RecentHostLoad]:
+    """Средняя нагрузка хоста за последние window_sec по записанным снапшотам.
+
+    Не меньше двух снапшотов: окно короче интервала записи могло бы оказаться
+    пустым. None — снапшотов нет (сэмплер только стартовал или встал).
+    """
+    window_sec = max(window_sec, 2 * SNAPSHOT_INTERVAL_SEC)
+    start = _utcnow() - timedelta(seconds=window_sec)
+    row = (await db.execute(RECENT_LOAD_SQL, {"start": _as_db_param(start)})).one()
+    if not row.data_points:
+        return None
+    return RecentHostLoad(
+        cpu_percent=row.cpu_usage,
+        memory_percent=row.memory_percent,
+        memory_available=round(row.memory_available),
+    )
 
 
 def history_point(row: Any, data_points: int) -> dict[str, Any]:

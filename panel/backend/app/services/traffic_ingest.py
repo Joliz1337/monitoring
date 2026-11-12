@@ -17,17 +17,55 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Iterator, Optional
 
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.database import async_session
-from app.models import Server, ServerTraffic, ServerTrafficCounter
+from app.models import Server, ServerTrafficCounter
 
 logger = logging.getLogger(__name__)
 
 FLUSH_INTERVAL_SECONDS = 60
-UPSERT_BATCH_SIZE = 500
+UPSERT_BATCH_SIZE = 5000
+
+# Строки уходят массивами по колонкам, а текст запроса постоянен. Многострочный VALUES
+# SQLAlchemy собирает и компилирует заново на каждый батч: на парке в тысячи нод это
+# секунды процессора бэкенда каждую минуту.
+_BUCKET_COLUMNS = (
+    "server_id", "period_type", "scope", "scope_key", "bucket",
+    "rx_bytes", "tx_bytes", "covered_seconds", "source",
+)
+_COUNTER_COLUMNS = (
+    "server_id", "scope", "scope_key", "rx_value", "tx_value", "observed_at", "boot_id", "boot_at",
+)
+_UPSERT_BUCKETS = text("""
+    INSERT INTO server_traffic
+        (server_id, period_type, scope, scope_key, bucket, rx_bytes, tx_bytes, covered_seconds, source)
+    SELECT * FROM unnest(
+        CAST(:server_id AS int[]), CAST(:period_type AS varchar[]), CAST(:scope AS varchar[]),
+        CAST(:scope_key AS varchar[]), CAST(:bucket AS timestamp[]), CAST(:rx_bytes AS bigint[]),
+        CAST(:tx_bytes AS bigint[]), CAST(:covered_seconds AS int[]), CAST(:source AS varchar[])
+    )
+    ON CONFLICT ON CONSTRAINT uq_server_traffic DO UPDATE SET
+        rx_bytes = server_traffic.rx_bytes + EXCLUDED.rx_bytes,
+        tx_bytes = server_traffic.tx_bytes + EXCLUDED.tx_bytes,
+        covered_seconds = server_traffic.covered_seconds + EXCLUDED.covered_seconds
+""")
+_UPSERT_COUNTERS = text("""
+    INSERT INTO server_traffic_counters
+        (server_id, scope, scope_key, rx_value, tx_value, observed_at, boot_id, boot_at)
+    SELECT * FROM unnest(
+        CAST(:server_id AS int[]), CAST(:scope AS varchar[]), CAST(:scope_key AS varchar[]),
+        CAST(:rx_value AS bigint[]), CAST(:tx_value AS bigint[]), CAST(:observed_at AS timestamp[]),
+        CAST(:boot_id AS varchar[]), CAST(:boot_at AS timestamp[])
+    )
+    ON CONFLICT (server_id, scope, scope_key) DO UPDATE SET
+        rx_value = EXCLUDED.rx_value,
+        tx_value = EXCLUDED.tx_value,
+        observed_at = EXCLUDED.observed_at,
+        boot_id = EXCLUDED.boot_id,
+        boot_at = EXCLUDED.boot_at
+""")
 
 # Дельта старше этого окна не раскладывается целиком: панель могла простоять неделями,
 # и заливать историю за всё это время по одному наблюдению бессмысленно.
@@ -290,6 +328,15 @@ def _batched(rows: list[dict], size: int) -> Iterator[list[dict]]:
         yield rows[start:start + size]
 
 
+def _plain(value):
+    """Scope и Period — str-перечисления, а драйверу в массиве нужна обычная строка."""
+    return value.value if isinstance(value, Enum) else value
+
+
+def _as_columns(rows: list[dict], columns: tuple[str, ...]) -> dict[str, list]:
+    return {column: [_plain(row[column]) for row in rows] for column in columns}
+
+
 class TrafficIngest:
 
     def __init__(self):
@@ -434,25 +481,10 @@ class TrafficIngest:
     async def _write(self, bucket_rows: list[dict], counter_rows: list[dict]) -> None:
         async with async_session() as db:
             for batch in _batched(bucket_rows, UPSERT_BATCH_SIZE):
-                stmt = pg_insert(ServerTraffic).values(batch)
-                await db.execute(stmt.on_conflict_do_update(
-                    constraint="uq_server_traffic",
-                    set_={
-                        "rx_bytes": ServerTraffic.rx_bytes + stmt.excluded.rx_bytes,
-                        "tx_bytes": ServerTraffic.tx_bytes + stmt.excluded.tx_bytes,
-                        "covered_seconds": ServerTraffic.covered_seconds + stmt.excluded.covered_seconds,
-                    },
-                ))
+                await db.execute(_UPSERT_BUCKETS, _as_columns(batch, _BUCKET_COLUMNS))
 
             for batch in _batched(counter_rows, UPSERT_BATCH_SIZE):
-                stmt = pg_insert(ServerTrafficCounter).values(batch)
-                await db.execute(stmt.on_conflict_do_update(
-                    index_elements=["server_id", "scope", "scope_key"],
-                    set_={
-                        col: getattr(stmt.excluded, col)
-                        for col in ("rx_value", "tx_value", "observed_at", "boot_id", "boot_at")
-                    },
-                ))
+                await db.execute(_UPSERT_COUNTERS, _as_columns(batch, _COUNTER_COLUMNS))
 
             await db.commit()
 

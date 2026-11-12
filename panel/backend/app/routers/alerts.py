@@ -91,6 +91,12 @@ class AlertSettingsUpdate(BaseModel):
     packet_loss_calm_seconds: Optional[int] = Field(None, ge=60, le=7200)
     packet_loss_reminder_hours: Optional[int] = Field(None, ge=0, le=168)
 
+    panel_host_enabled: Optional[bool] = None
+    panel_cpu_threshold: Optional[float] = Field(None, ge=50, le=100)
+    panel_ram_threshold: Optional[float] = Field(None, ge=50, le=100)
+    panel_disk_threshold: Optional[float] = Field(None, ge=50, le=100)
+    panel_host_sustained_seconds: Optional[int] = Field(None, ge=60, le=3600)
+
     excluded_server_ids: Optional[list[int]] = None
 
     offline_excluded_server_ids: Optional[list[int]] = None
@@ -171,6 +177,11 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "packet_loss_sustained_seconds": s.packet_loss_sustained_seconds,
         "packet_loss_calm_seconds": s.packet_loss_calm_seconds,
         "packet_loss_reminder_hours": s.packet_loss_reminder_hours,
+        "panel_host_enabled": s.panel_host_enabled,
+        "panel_cpu_threshold": s.panel_cpu_threshold,
+        "panel_ram_threshold": s.panel_ram_threshold,
+        "panel_disk_threshold": s.panel_disk_threshold,
+        "panel_host_sustained_seconds": s.panel_host_sustained_seconds,
         "excluded_server_ids": json.loads(s.excluded_server_ids) if s.excluded_server_ids else [],
         "offline_excluded_server_ids": json.loads(s.offline_excluded_server_ids) if s.offline_excluded_server_ids else [],
         "cpu_excluded_server_ids": json.loads(s.cpu_excluded_server_ids) if s.cpu_excluded_server_ids else [],

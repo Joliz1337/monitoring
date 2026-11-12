@@ -1,15 +1,18 @@
 """HTTP-клиенты к нодам: mTLS для новых, verify=False для legacy."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import shutil
 import ssl
 import stat
 import tempfile
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -19,11 +22,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_NODE_LIMITS = httpx.Limits(
-    max_connections=500,
-    max_keepalive_connections=100,
-    keepalive_expiry=30,
-)
+# У каждой ноды свой клиент, и лимиты ниже — на одну ноду. Общий на весь парк пул
+# httpx закрывает простаивающие соединения, как только всех соединений больше
+# max_keepalive_connections, и на каждый запрос дважды перебирает весь пул: дальше
+# сотни нод каждый опрос шёл через новое mTLS-рукопожатие, а сам перебор стоил
+# миллисекунд процессора на запрос. keepalive_expiry короче keepalive_timeout nginx
+# ноды (65 с) — иначе запрос уходит в соединение, которое нода уже закрыла.
+_NODE_LIMITS = httpx.Limits(max_connections=16, max_keepalive_connections=2, keepalive_expiry=45)
+_NODE_APPLY_LIMITS = httpx.Limits(max_connections=4, max_keepalive_connections=1, keepalive_expiry=30)
 
 _EXTERNAL_LIMITS = httpx.Limits(
     max_connections=20,
@@ -34,20 +40,39 @@ _EXTERNAL_LIMITS = httpx.Limits(
 _NODE_TIMEOUT = httpx.Timeout(connect=2.0, read=10.0, write=2.0, pool=2.0)
 _EXTERNAL_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
 
+# Долгие apply-запросы (firewall/haproxy profile apply) идут своим клиентом с read=300s,
+# чтобы не занимать соединения, по которым опрашиваются метрики.
 _APPLY_TIMEOUT = httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=5.0)
-_APPLY_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=30)
-# Через один SOCKS-прокси обычно ходит 1-2 ноды — пул скромнее общего (500)
+# Через один SOCKS-прокси обычно ходит 1-2 ноды, пул у них общий на прокси
 _PROXY_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=30)
+_PROXY_APPLY_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=30)
 
-_node_client_mtls: httpx.AsyncClient | None = None
-_node_client_legacy: httpx.AsyncClient | None = None
-# Отдельные клиенты для долгих apply-запросов: read=300s и свой пул соединений,
-# чтобы тяжёлые операции не конкурировали с потоком метрик за keepalive-слоты.
-_node_apply_client_mtls: httpx.AsyncClient | None = None
-_node_apply_client_legacy: httpx.AsyncClient | None = None
+# Клиент ноды, к которой давно не ходили (удалена, сменила адрес), закрывается
+NODE_CLIENT_IDLE_TTL = 900.0
+PRUNE_INTERVAL = 60.0
+
+# Keep-alive соединение на каждую ноду — это дескриптор на ноду, а мягкий лимит
+# в контейнере бывает 1024
+OPEN_FILES_TARGET = 65536
+OPEN_FILES_COMFORTABLE = 8192
+
+_monotonic = time.monotonic
+
+
+@dataclass
+class _NodeClient:
+    client: httpx.AsyncClient
+    last_used: float
+
+
+# Ключ: (адрес ноды, mTLS, apply)
+_node_clients: dict[tuple[str, bool, bool], _NodeClient] = {}
+_last_prune_at: float = 0.0
+_closing_tasks: set[asyncio.Task] = set()
 _external_client: httpx.AsyncClient | None = None
 _cert_tmpdir: Path | None = None
 _mtls_ctx: ssl.SSLContext | None = None
+_legacy_ctx: ssl.SSLContext | None = None
 # Клиенты через SOCKS5-прокси создаются лениво по мере обращения к нодам с proxy_url.
 # Ключ: (raw-строка прокси, mtls, apply). Старые записи живут до shutdown — рост ограничен
 # числом уникальных прокси, keepalive-соединения гаснут через 30с.
@@ -122,7 +147,7 @@ def _get_proxy_client(raw: str, *, mtls: bool, apply: bool) -> httpx.AsyncClient
         proxy=_proxy_raw_to_url(raw),
         verify=_mtls_ctx if mtls else False,
         timeout=_APPLY_TIMEOUT if apply else _NODE_TIMEOUT,
-        limits=_APPLY_LIMITS if apply else _PROXY_LIMITS,
+        limits=_PROXY_APPLY_LIMITS if apply else _PROXY_LIMITS,
         follow_redirects=False,
         http2=False,
         trust_env=False,
@@ -152,50 +177,109 @@ def _build_mtls_context(keygen: "PKIKeygenData") -> tuple[ssl.SSLContext, Path]:
     return ctx, tmpdir
 
 
+def _raise_open_files_limit() -> None:
+    """Поднять мягкий лимит открытых файлов процесса до жёсткого."""
+    try:
+        import resource
+    except ImportError:  # не Linux: локальный запуск и тесты
+        return
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    wanted = OPEN_FILES_TARGET if hard == resource.RLIM_INFINITY else min(hard, OPEN_FILES_TARGET)
+    if soft != resource.RLIM_INFINITY and soft < wanted:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+            soft = wanted
+        except (ValueError, OSError) as e:
+            logger.warning("Could not raise the open files limit from %d to %d: %s", soft, wanted, e)
+
+    if soft != resource.RLIM_INFINITY and soft < OPEN_FILES_COMFORTABLE:
+        logger.warning(
+            "Open files limit is %d: every node keeps its own connection, "
+            "a fleet of thousands of nodes needs at least %d", soft, OPEN_FILES_COMFORTABLE,
+        )
+
+
+def _node_origin(url: str) -> str:
+    """Адрес ноды без пути: по нему ноде выдаётся её клиент."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return url
+    if not parts.hostname:
+        return url
+    return f"{parts.scheme}://{parts.hostname}:{port or ''}"
+
+
+def _new_node_client(ctx: ssl.SSLContext, *, apply: bool) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        verify=ctx,
+        timeout=_APPLY_TIMEOUT if apply else _NODE_TIMEOUT,
+        limits=_NODE_APPLY_LIMITS if apply else _NODE_LIMITS,
+        follow_redirects=False,
+        http2=False,
+        trust_env=False,
+    )
+
+
+async def _close_clients(clients: list[httpx.AsyncClient]) -> None:
+    for client in clients:
+        try:
+            await client.aclose()
+        except Exception as e:  # noqa: BLE001 — закрытие чужого сокета не должно ронять остальные
+            logger.debug("Closing a node http client failed: %s", e)
+
+
+def _prune_idle_clients(now: float) -> None:
+    global _last_prune_at
+    if now - _last_prune_at < PRUNE_INTERVAL:
+        return
+    _last_prune_at = now
+
+    stale = [key for key, entry in _node_clients.items() if now - entry.last_used > NODE_CLIENT_IDLE_TTL]
+    if not stale:
+        return
+    clients = [_node_clients.pop(key).client for key in stale]
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # вне event loop у клиента не могло появиться соединений
+    task = loop.create_task(_close_clients(clients))
+    _closing_tasks.add(task)
+    task.add_done_callback(_closing_tasks.discard)
+
+
+def _direct_node_client(server: "Server", *, apply: bool) -> httpx.AsyncClient:
+    mtls = bool(getattr(server, "pki_enabled", False))
+    ctx = _mtls_ctx if mtls else _legacy_ctx
+    if ctx is None:
+        raise RuntimeError(
+            "mTLS http client is not initialized — PKI keygen missing at startup" if mtls
+            else "Legacy http client not initialized — call init_http_clients() first"
+        )
+
+    now = _monotonic()
+    _prune_idle_clients(now)
+    key = (_node_origin(server.url), mtls, apply)
+    entry = _node_clients.get(key)
+    if entry is None:
+        entry = _NodeClient(_new_node_client(ctx, apply=apply), now)
+        _node_clients[key] = entry
+    entry.last_used = now
+    return entry.client
+
+
 async def init_http_clients(keygen: "PKIKeygenData | None" = None) -> None:
-    global _node_client_mtls, _node_client_legacy, _external_client, _cert_tmpdir
-    global _node_apply_client_mtls, _node_apply_client_legacy, _mtls_ctx
+    global _external_client, _cert_tmpdir, _mtls_ctx, _legacy_ctx, _last_prune_at
 
-    _node_client_legacy = httpx.AsyncClient(
-        verify=False,
-        timeout=_NODE_TIMEOUT,
-        limits=_NODE_LIMITS,
-        follow_redirects=False,
-        http2=False,
-        trust_env=False,
-    )
-
-    # HTTP/1.1 клиент для длительных apply-запросов (firewall/haproxy profile apply).
-    # Свой пул limits=20 чтобы не блокировать основной канал коротких запросов.
-    _node_apply_client_legacy = httpx.AsyncClient(
-        verify=False,
-        timeout=_APPLY_TIMEOUT,
-        limits=_APPLY_LIMITS,
-        follow_redirects=False,
-        http2=False,
-        trust_env=False,
-    )
+    _raise_open_files_limit()
+    _last_prune_at = 0.0
+    # Один контекст на все legacy-ноды: verify=False у каждого клиента создавал бы свой
+    _legacy_ctx = httpx.create_ssl_context(verify=False)
 
     if keygen is not None:
-        ctx, tmpdir = _build_mtls_context(keygen)
-        _cert_tmpdir = tmpdir
-        _mtls_ctx = ctx
-        _node_client_mtls = httpx.AsyncClient(
-            verify=ctx,
-            timeout=_NODE_TIMEOUT,
-            limits=_NODE_LIMITS,
-            follow_redirects=False,
-            http2=False,
-            trust_env=False,
-        )
-        _node_apply_client_mtls = httpx.AsyncClient(
-            verify=ctx,
-            timeout=_APPLY_TIMEOUT,
-            limits=_APPLY_LIMITS,
-            follow_redirects=False,
-            http2=False,
-            trust_env=False,
-        )
+        _mtls_ctx, _cert_tmpdir = _build_mtls_context(keygen)
         logger.info("mTLS http clients initialized (http2=False on all node clients)")
     else:
         logger.warning("mTLS http client not initialized: keygen missing")
@@ -209,27 +293,16 @@ async def init_http_clients(keygen: "PKIKeygenData | None" = None) -> None:
 
 
 async def close_http_clients() -> None:
-    global _node_client_mtls, _node_client_legacy, _external_client, _cert_tmpdir
-    global _node_apply_client_mtls, _node_apply_client_legacy, _mtls_ctx
-    # Прокси-клиенты держат ссылку на mTLS-контекст — закрываем до его сброса
+    global _external_client, _cert_tmpdir, _mtls_ctx, _legacy_ctx
+    # Клиенты держат ссылку на mTLS-контекст — закрываем до его сброса
     # (restore бэкапа делает close+init, старый контекст не должен пережить рестарт клиентов)
-    for client in (*_proxy_clients.values(), *_external_proxy_clients.values()):
-        await client.aclose()
+    node_clients = [entry.client for entry in _node_clients.values()]
+    _node_clients.clear()
+    await _close_clients([*node_clients, *_proxy_clients.values(), *_external_proxy_clients.values()])
     _proxy_clients.clear()
     _external_proxy_clients.clear()
     _mtls_ctx = None
-    if _node_client_mtls:
-        await _node_client_mtls.aclose()
-        _node_client_mtls = None
-    if _node_client_legacy:
-        await _node_client_legacy.aclose()
-        _node_client_legacy = None
-    if _node_apply_client_mtls:
-        await _node_apply_client_mtls.aclose()
-        _node_apply_client_mtls = None
-    if _node_apply_client_legacy:
-        await _node_apply_client_legacy.aclose()
-        _node_apply_client_legacy = None
+    _legacy_ctx = None
     if _external_client:
         await _external_client.aclose()
         _external_client = None
@@ -238,45 +311,25 @@ async def close_http_clients() -> None:
         _cert_tmpdir = None
 
 
-def get_node_client(server: "Server | None" = None) -> httpx.AsyncClient:
-    """Вернуть клиент в зависимости от режима сервера.
-
-    server=None → legacy (обратная совместимость со старым кодом,
-    который вызывает get_node_client() без параметров).
-    """
-    proxy_raw = getattr(server, "proxy_url", None) if server is not None else None
+def get_node_client(server: "Server") -> httpx.AsyncClient:
+    """Клиент коротких запросов к ноде: свой у каждой ноды, общий у нод за одним прокси."""
+    proxy_raw = getattr(server, "proxy_url", None)
     if proxy_raw:
         return _get_proxy_client(
             proxy_raw, mtls=bool(getattr(server, "pki_enabled", False)), apply=False
         )
-    if server is not None and getattr(server, "pki_enabled", False):
-        if _node_client_mtls is None:
-            raise RuntimeError(
-                "mTLS http client is not initialized — PKI keygen missing at startup"
-            )
-        return _node_client_mtls
-    if _node_client_legacy is None:
-        raise RuntimeError("Legacy http client not initialized — call init_http_clients() first")
-    return _node_client_legacy
+    return _direct_node_client(server, apply=False)
 
 
-def get_node_apply_client(server: "Server | None" = None) -> httpx.AsyncClient:
+def get_node_apply_client(server: "Server") -> httpx.AsyncClient:
     """Клиент для долгих apply-запросов (firewall/haproxy profile apply) с read=300s
-    и отдельным пулом, чтобы не конкурировать с потоком коротких запросов метрик."""
-    proxy_raw = getattr(server, "proxy_url", None) if server is not None else None
+    и отдельными соединениями, чтобы не мешать потоку коротких запросов метрик."""
+    proxy_raw = getattr(server, "proxy_url", None)
     if proxy_raw:
         return _get_proxy_client(
             proxy_raw, mtls=bool(getattr(server, "pki_enabled", False)), apply=True
         )
-    if server is not None and getattr(server, "pki_enabled", False):
-        if _node_apply_client_mtls is None:
-            raise RuntimeError(
-                "mTLS apply client is not initialized — PKI keygen missing at startup"
-            )
-        return _node_apply_client_mtls
-    if _node_apply_client_legacy is None:
-        raise RuntimeError("Legacy apply client not initialized — call init_http_clients() first")
-    return _node_apply_client_legacy
+    return _direct_node_client(server, apply=True)
 
 
 def new_node_probe_client(server: "Server") -> httpx.AsyncClient:

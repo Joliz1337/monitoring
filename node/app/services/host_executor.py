@@ -50,6 +50,7 @@ class HostExecutor:
         timeout: int = DEFAULT_TIMEOUT,
         shell: str = "sh",
         log_label: Optional[str] = None,
+        stdin_data: Optional[str] = None,
     ) -> ExecuteResult:
         """
         Execute command on host system.
@@ -59,6 +60,8 @@ class HostExecutor:
             timeout: Timeout in seconds (max 600)
             shell: Shell to use (sh or bash)
             log_label: в лог вместо текста команды — для команд с секретами внутри
+            stdin_data: уходит команде на stdin — для данных, которым тесно в
+                командной строке: один аргумент execve ограничен 128 КБ
         
         Returns:
             ExecuteResult with stdout, stderr, exit_code and timing
@@ -92,15 +95,18 @@ class HostExecutor:
             shown = log_label or f"{command[:100]}{'...' if len(command) > 100 else ''}"
             logger.info(f"Executing on host: {shown}")
             
+            # Канал открывается только под данные: команды без них наследуют stdin агента
+            stdin_bytes = stdin_data.encode('utf-8') if stdin_data is not None else None
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
+                    process.communicate(stdin_bytes),
                     timeout=timeout
                 )
             except asyncio.TimeoutError:

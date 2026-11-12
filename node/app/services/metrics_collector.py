@@ -15,11 +15,12 @@ import platform
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 import psutil
 
 from app.config import get_settings
+from app.services.adaptive_cache import AdaptiveTtlCache
 from app.services.ephemeral_ports import (
     EphemeralPortsAggregator,
     read_kernel_settings,
@@ -58,6 +59,7 @@ class MetricsCollector:
         rate_sampler: Optional[RateSampler] = None,
         loss_probe: Optional[LossProbe] = None,
         nat_addresses: Optional[NatAddressProbe] = None,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.settings = get_settings()
         self._rate_sampler = rate_sampler or get_rate_sampler()
@@ -67,10 +69,13 @@ class MetricsCollector:
         self._processes_cache: list = []
         self._processes_cache_time: float = 0
         self._processes_cache_ttl: float = 5.0  # 5 seconds
-        # System info cache (connections parsing is heavy)
+        # Медленно меняющаяся часть блока system: os-release, open_files, таймзона
         self._system_cache: dict = {}
         self._system_cache_time: float = 0
         self._system_cache_ttl: float = 5.0  # 5 seconds
+        # Таблица сокетов кэшируется отдельно от неё: на ноде с сотнями тысяч
+        # сокетов разбор стоит доли секунды, и его срок жизни растёт с его ценой
+        self._socket_table = AdaptiveTtlCache(self._read_host_connections, clock=clock)
         # boot_id не меняется в пределах жизни хоста — читаем лениво один раз
         self._boot_id: Optional[str] = None
         # Раскладка памяти по сокетам меняется только сменой железа — с ребутом
@@ -572,21 +577,33 @@ class MetricsCollector:
             return None
     
     def get_system_info(self) -> dict:
-        """Get general system information with caching for heavy operations"""
-        current_time = time.time()
-        
-        # Return cached result if still valid
-        if current_time - self._system_cache_time < self._system_cache_ttl and self._system_cache:
-            # Update only lightweight fields
-            boot_time = datetime.fromtimestamp(psutil.boot_time())
-            uptime_seconds = (datetime.now() - boot_time).total_seconds()
-            self._system_cache["uptime_seconds"] = int(uptime_seconds)
-            self._system_cache["uptime_human"] = self._format_uptime(uptime_seconds)
-            return self._system_cache
-        
+        """Блок system: аптайм — на каждый вызов, остальное — из двух кэшей с разным
+        сроком жизни, чтобы дорогой разбор сокетов не старил дешёвые поля."""
         boot_time = datetime.fromtimestamp(psutil.boot_time())
         uptime_seconds = (datetime.now() - boot_time).total_seconds()
-        
+        socket_table = self._socket_table.get()
+        tcp_stats = socket_table['tcp']
+
+        return {
+            **self._slow_changing_system_info(boot_time),
+            "uptime_seconds": int(uptime_seconds),
+            "uptime_human": self._format_uptime(uptime_seconds),
+            # Legacy format for backward compatibility
+            "connections": {
+                "established": tcp_stats['established'],
+                "listen": tcp_stats['listen'],
+                "time_wait": tcp_stats['time_wait'],
+                "other": tcp_stats['other'],
+            },
+            "connections_detailed": {"tcp": tcp_stats, "udp": socket_table['udp']},
+            "ephemeral_ports": socket_table['ephemeral_ports'],
+        }
+
+    def _slow_changing_system_info(self, boot_time: datetime) -> dict:
+        current_time = time.time()
+        if self._system_cache and current_time - self._system_cache_time < self._system_cache_ttl:
+            return self._system_cache
+
         os_release = self._read_host_file("/etc/os-release")
         os_name = "Unknown"
         for line in os_release.split('\n'):
@@ -603,42 +620,21 @@ class MetricsCollector:
             open_files = len(psutil.Process().open_files())
         except Exception:
             open_files = 0
-        
-        # Get connections from host /proc/net/* (heavy operation)
-        conn_stats = self._read_host_connections()
-        ephemeral_ports = conn_stats.pop('ephemeral_ports', None)
 
-        # Legacy format for backward compatibility
-        connections = {
-            "established": conn_stats['tcp']['established'],
-            "listen": conn_stats['tcp']['listen'],
-            "time_wait": conn_stats['tcp']['time_wait'],
-            "other": conn_stats['tcp']['other'],
-        }
-        
-        result = {
+        self._system_cache = {
             "hostname": socket.gethostname(),
             "os": os_name,
             "kernel": kernel,
             "architecture": platform.machine(),
             "boot_time": boot_time.isoformat(),
-            "uptime_seconds": int(uptime_seconds),
-            "uptime_human": self._format_uptime(uptime_seconds),
             "open_files": open_files,
-            "connections": connections,
-            "connections_detailed": conn_stats,
-            "ephemeral_ports": ephemeral_ports,
             "server_name": self.settings.node_name,
             "timezone": self._get_timezone_info(),
             "boot_id": self._get_boot_id(),
         }
-        
-        # Cache the result
-        self._system_cache = result
         self._system_cache_time = current_time
-        
-        return result
-    
+        return self._system_cache
+
     def _get_boot_id(self) -> Optional[str]:
         """Идентификатор загрузки ядра — по нему панель отличает ребут от сбоя счётчика."""
         # Пустой результат не кэшируем: одна осечка на старте контейнера иначе навсегда

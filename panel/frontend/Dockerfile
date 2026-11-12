@@ -28,16 +28,9 @@ RUN echo "Cache bust: ${CACHE_BUST}" && npm run build
 
 FROM nginx:alpine
 
-RUN apk add --no-cache python3 py3-cryptography
-
 COPY --from=builder /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-COPY ext-dist.enc* /opt/
-COPY decrypt_dist.py /opt/decrypt_dist.py
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
 EXPOSE 80
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["nginx", "-g", "daemon off;"]

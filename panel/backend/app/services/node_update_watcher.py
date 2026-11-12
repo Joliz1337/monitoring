@@ -340,6 +340,11 @@ async def _close(attempt: NodeUpdateAttempt) -> bool:
     async with async_session() as db:
         result = await db.execute(delete(NodeUpdateAttempt).where(_same_attempt(attempt)))
         await db.commit()
+    # Версии ноды только что сменились, а страница «Обновления» перечитывает её сразу
+    # по завершении: из кэша она получила бы прежние. Импорт здесь — роутер сам
+    # импортирует этот модуль
+    from app.routers.system import invalidate_node_versions_cache
+    invalidate_node_versions_cache(attempt.server_id)
     return result.rowcount > 0
 
 

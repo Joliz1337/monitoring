@@ -26,7 +26,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import {
   systemApi, nodeImageApi, haproxyUpgradeApi, VersionBaseInfo, SingleNodeVersion, ImageDeliveryJobInfo, RemnawaveInstallJobInfo,
-  NodeUpdateProgress,
+  NodeUpdateProgress, VersionBaseNode,
 } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Tooltip } from '../components/ui/Tooltip'
@@ -47,6 +47,16 @@ import DownloadProxyModal, { DownloadProxyTarget } from '../components/updates/D
 const JOB_POLL_INTERVAL_MS = 3_000
 // После смены прокси нода перезапускает Docker — версию перечитываем, когда агент снова поднялся
 const PROXY_REFRESH_DELAY_MS = 40_000
+// Обход — живой запрос панели к каждой ноде. Запросы идут ограниченной пачкой: лавина
+// одновременных запросов забивает панель, и ноды мигают онлайн/оффлайн
+const NODE_SWEEP_POOL_SIZE = 12
+// На парке крупнее этого фоновое обновление страницы ноды не обходит: обход при каждом
+// обновлении — это тысячи живых запросов в минуту через панель. Версии там перечитывают
+// кнопка проверки и завершение обновления конкретной ноды
+const AUTO_SWEEP_MAX_NODES = 150
+// Ответы нод копятся и пишутся в состояние пачкой не чаще этого шага: иначе каждый ответ —
+// это копия всего списка нод и перерисовка страницы
+const NODE_STATE_FLUSH_MS = 150
 const COLLAPSED_FOLDERS_KEY = 'updates_collapsed_folders'
 const NODE_GRID_CLASS = 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
 
@@ -70,6 +80,62 @@ const toHAProxyTarget = (node: NodeState): HAProxyUpgradeTarget => ({
   id: node.id, name: node.name, version: node.haproxyVersion, targetVersion: node.haproxyTarget,
   hasSshCreds: node.hasSshCreds,
 })
+
+type NodeStatePatch = Partial<NodeState>
+
+// Запрос версии не прошёл: на карточке остаются последние известные версии, нода считается недоступной
+const NODE_REQUEST_FAILED: NodeStatePatch = { loadState: 'error', status: 'offline' }
+
+const versionToNodePatch = (data: SingleNodeVersion): NodeStatePatch => ({
+  name: data.name,
+  url: data.url,
+  loadState: 'loaded',
+  version: data.version,
+  status: data.status,
+  haproxyVersion: data.haproxy?.version ?? null,
+  haproxyTarget: data.haproxy?.target_version ?? null,
+  downloadProxy: data.download_proxy ?? null,
+})
+
+// Свежий список нод накладывается на известные. Версии и статус остаются последними полученными,
+// пока нода не ответит заново: карточки не мигают, счётчики папок не падают в ноль. Нода без
+// изменений остаётся тем же объектом, поэтому её карточка не перерисовывается
+function mergeBaseNodes(known: Map<number, NodeState>, listed: VersionBaseNode[]): Map<number, NodeState> {
+  const merged = new Map<number, NodeState>()
+  for (const { id, name, url, folder, has_ssh_creds: hasSshCreds } of listed) {
+    const node = known.get(id)
+    if (!node) {
+      merged.set(id, {
+        id,
+        name,
+        url,
+        folder,
+        hasSshCreds,
+        loadState: 'pending',
+        version: null,
+        status: 'offline',
+        haproxyVersion: null,
+        haproxyTarget: null,
+        downloadProxy: null,
+      })
+      continue
+    }
+    const unchanged = node.name === name && node.url === url && node.folder === folder
+      && node.hasSshCreds === hasSshCreds
+    merged.set(id, unchanged ? node : { ...node, name, url, folder, hasSshCreds })
+  }
+  return merged
+}
+
+function applyNodePatches(known: Map<number, NodeState>, patches: Map<number, NodeStatePatch>): Map<number, NodeState> {
+  const next = new Map(known)
+  for (const [nodeId, patch] of patches) {
+    const node = next.get(nodeId)
+    // Пока шёл запрос версии, ноду могли удалить на сервере
+    if (node) next.set(nodeId, { ...node, ...patch })
+  }
+  return next
+}
 
 // /health из браузера недоступен (nginx отдаёт его только внутренним IP), поэтому живость
 // бэкенда проверяем лёгким /api/auth/check напрямую через fetch — минуя axios-интерсепторы
@@ -130,7 +196,14 @@ export default function Updates() {
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [collapsedFolders, toggleFolderCollapsed] = useCollapsedFolders(COLLAPSED_FOLDERS_KEY)
 
-  const abortRef = useRef(false)
+  // Копия списка нод для фонового кода: ему нужно актуальное состояние, а не снимок из замыкания
+  const nodesRef = useRef(nodes)
+  // Идущий обход нод. Новая проверка и уход со страницы прерывают его: воркеры перестают
+  // брать ноды из очереди, а опоздавшие ответы в состояние не попадают
+  const sweepRef = useRef<AbortController | null>(null)
+  const pendingNodePatchesRef = useRef<Map<number, NodeStatePatch>>(new Map())
+  const nodeFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const unmountedRef = useRef(false)
   const rebootWaitCancelRef = useRef(false)
   const deliveryStatusRef = useRef<Map<string, ImageDeliveryJobInfo['status']>>(new Map())
   const haproxyStatusRef = useRef<Map<string, RemnawaveInstallJobInfo['status']>>(new Map())
@@ -148,107 +221,115 @@ export default function Updates() {
     return () => { events.forEach(e => document.removeEventListener(e, markActive)) }
   }, [])
 
-  const fetchNodeVersion = useCallback(async (nodeId: number) => {
-    setNodes(prev => {
-      const next = new Map(prev)
-      const existing = next.get(nodeId)
-      if (existing) next.set(nodeId, { ...existing, loadState: 'loading' })
-      return next
-    })
-
-    try {
-      const resp = await systemApi.getNodeVersionById(nodeId)
-      const data: SingleNodeVersion = resp.data
-
-      setNodes(prev => {
-        const existing = prev.get(nodeId)
-        if (!existing) return prev
-        const next = new Map(prev)
-        next.set(nodeId, {
-          ...existing,
-          name: data.name,
-          url: data.url,
-          loadState: 'loaded',
-          version: data.version,
-          status: data.status,
-          haproxyVersion: data.haproxy?.version ?? null,
-          haproxyTarget: data.haproxy?.target_version ?? null,
-          downloadProxy: data.download_proxy ?? null,
-        })
-        return next
-      })
-    } catch {
-      setNodes(prev => {
-        const next = new Map(prev)
-        const existing = next.get(nodeId)
-        if (existing) {
-          next.set(nodeId, { ...existing, loadState: 'error', status: 'offline' })
-        }
-        return next
-      })
-    }
+  const commitNodes = useCallback((next: Map<number, NodeState>) => {
+    nodesRef.current = next
+    setNodes(next)
   }, [])
 
-  const fetchBase = useCallback(async (showCheckingState = false) => {
+  const stopNodeFlushTimer = useCallback(() => {
+    if (nodeFlushTimerRef.current !== null) clearTimeout(nodeFlushTimerRef.current)
+    nodeFlushTimerRef.current = null
+  }, [])
+
+  const flushNodePatches = useCallback(() => {
+    stopNodeFlushTimer()
+    const patches = pendingNodePatchesRef.current
+    if (patches.size === 0) return
+    pendingNodePatchesRef.current = new Map()
+    commitNodes(applyNodePatches(nodesRef.current, patches))
+  }, [stopNodeFlushTimer, commitNodes])
+
+  useEffect(() => {
+    // В dev StrictMode снимает и заново ставит эффекты, а ref между этим не сбрасываются
+    unmountedRef.current = false
+    return () => {
+      unmountedRef.current = true
+      sweepRef.current?.abort()
+      sweepRef.current = null
+      stopNodeFlushTimer()
+    }
+  }, [stopNodeFlushTimer])
+
+  const fetchNodeVersion = useCallback(async (nodeId: number, sweep?: AbortSignal) => {
+    if (unmountedRef.current) return
+
+    let patch: NodeStatePatch
+    try {
+      const resp = await systemApi.getNodeVersionById(nodeId)
+      patch = versionToNodePatch(resp.data)
+    } catch {
+      patch = NODE_REQUEST_FAILED
+    }
+    // Пока шёл запрос, со страницы ушли или обход сменила новая проверка — ноду перечитает она
+    if (unmountedRef.current || sweep?.aborted) return
+
+    pendingNodePatchesRef.current.set(nodeId, patch)
+    if (nodeFlushTimerRef.current === null) {
+      nodeFlushTimerRef.current = setTimeout(flushNodePatches, NODE_STATE_FLUSH_MS)
+    }
+  }, [flushNodePatches])
+
+  const sweepNodes = useCallback(async (nodeIds: number[]) => {
+    sweepRef.current?.abort()
+    const sweep = new AbortController()
+    sweepRef.current = sweep
+
+    let nextIndex = 0
+    const worker = async () => {
+      while (!sweep.signal.aborted && nextIndex < nodeIds.length) {
+        await fetchNodeVersion(nodeIds[nextIndex++], sweep.signal)
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(NODE_SWEEP_POOL_SIZE, nodeIds.length) }, worker))
+
+    if (sweep.signal.aborted) return false
+    sweepRef.current = null
+    flushNodePatches()
+    return true
+  }, [fetchNodeVersion, flushNodePatches])
+
+  // Версии с GitHub и список нод из базы панели — один быстрый запрос, к нодам панель не ходит
+  const loadBase = useCallback(async () => {
     try {
       setError('')
-      if (showCheckingState) setIsChecking(true)
-      abortRef.current = false
-
       const resp = await systemApi.getVersionBase()
       const data = resp.data
       setBaseInfo(data)
       // Значок в меню догоняет то, что видно на странице, не дожидаясь своего опроса
       refreshUpdateSummary()
 
-      setNodes(prev => {
-        const initialNodes = new Map<number, NodeState>()
-        for (const n of data.nodes) {
-          const known = prev.get(n.id)
-          initialNodes.set(n.id, {
-            id: n.id,
-            name: n.name,
-            url: n.url,
-            folder: n.folder,
-            hasSshCreds: n.has_ssh_creds,
-            loadState: 'pending',
-            // Последние известные версии и статус: пока нода перечитывается, счётчики папок не падают в ноль
-            version: known?.version ?? null,
-            status: known?.status ?? 'offline',
-            haproxyVersion: known?.haproxyVersion ?? null,
-            haproxyTarget: known?.haproxyTarget ?? null,
-            downloadProxy: null,
-          })
-        }
-        return initialNodes
-      })
-
-      // Promise pool: ограничиваем параллельные запросы к нодам, иначе при 100+ нодах
-      // autorefresh каждые 12с создаёт лавину одновременных HTTP, и ноды мигают онлайн/оффлайн.
-      const queue = [...data.nodes]
-      const POOL_SIZE = 12
-      const worker = async () => {
-        while (queue.length > 0) {
-          if (abortRef.current) return
-          const node = queue.shift()
-          if (!node) return
-          await fetchNodeVersion(node.id)
-        }
-      }
-      const workers = Array.from({ length: Math.min(POOL_SIZE, queue.length) }, worker)
-      Promise.all(workers).catch(() => { /* per-node ошибки уже обработаны внутри fetchNodeVersion */ })
+      const fleet = mergeBaseNodes(nodesRef.current, data.nodes)
+      commitNodes(fleet)
+      return fleet
     } catch {
       setError(t('updates.failed_fetch'))
+      return null
     } finally {
       setLoading(false)
-      setIsChecking(false)
     }
-  }, [t, fetchNodeVersion, refreshUpdateSummary])
+  }, [t, refreshUpdateSummary, commitNodes])
+
+  const fetchBase = useCallback(async (manual = false) => {
+    if (manual) setIsChecking(true)
+
+    const fleet = await loadBase()
+    // Фоновое обновление идущий обход не прерывает и второй рядом с ним не запускает
+    const maySweep = manual || !sweepRef.current
+    if (fleet && maySweep) {
+      // На большом парке фоновое обновление версии не перечитывает, а только догружает ноды,
+      // от которых ещё не было ни одного ответа
+      const wholeFleet = manual || fleet.size <= AUTO_SWEEP_MAX_NODES
+      const targets = [...fleet.values()].filter(node => wholeFleet || node.loadState === 'pending')
+      const completed = await sweepNodes(targets.map(node => node.id))
+      // Прерванную проверку сменила новая — она и снимет отметку «идёт проверка»
+      if (!completed) return
+    }
+    if (manual) setIsChecking(false)
+  }, [loadBase, sweepNodes])
 
   useEffect(() => {
     fetchSettings()
     fetchBase()
-    return () => { abortRef.current = true }
   }, [fetchSettings, fetchBase])
 
   const fetchDeliveryJobs = useCallback(async () => {
@@ -347,7 +428,6 @@ export default function Updates() {
   }, [fetchBase, fetchDeliveryJobs, fetchNodeUpdates, updatingPanel, updatingNodes, updatingAll, updatingEverything, isChecking])
 
   const handleRefresh = useCallback(() => {
-    abortRef.current = true
     setUpdateResults({})
     fetchBase(true)
     fetchDeliveryJobs()
@@ -492,7 +572,7 @@ export default function Updates() {
     node.loadState === 'loaded' && node.status === 'online' && !nodeUpdates.has(node.id)
     && (isDevChannel || getNodeNeedsUpdate(node))
 
-  const toggleSelected = (ids: number[], on: boolean) => {
+  const toggleSelected = useCallback((ids: number[], on: boolean) => {
     setSelected(prev => {
       const next = new Set(prev)
       for (const id of ids) {
@@ -501,7 +581,7 @@ export default function Updates() {
       }
       return next
     })
-  }
+  }, [])
 
   const loadedNodes = Array.from(nodes.values())
   const nodesNeedUpdate = loadedNodes.filter(n =>
@@ -612,6 +692,27 @@ export default function Updates() {
     )
   }
 
+  // Обработчики карточек общие для всех нод и не меняются между рендерами: иначе memo
+  // у NodeUpdateCard не срабатывает, и каждая пачка ответов нод перерисовывает весь парк.
+  // handleUpdateNode читает состояние своего рендера, поэтому карточки зовут её через ref
+  const handleUpdateNodeRef = useRef(handleUpdateNode)
+  handleUpdateNodeRef.current = handleUpdateNode
+  const updateNodeFromCard = useCallback((node: NodeState) => {
+    handleUpdateNodeRef.current(node.id, node.name)
+  }, [])
+  const toggleNodeSelected = useCallback((nodeId: number, on: boolean) => {
+    toggleSelected([nodeId], on)
+  }, [toggleSelected])
+  const openDeliveryModal = useCallback((node: NodeState) => {
+    setDeliverTarget({ id: node.id, name: node.name })
+  }, [])
+  const openHAProxyModal = useCallback((node: NodeState, jobId: string | null) => {
+    setHaproxyModal({ targets: [toHAProxyTarget(node)], jobId })
+  }, [])
+  const openProxyModal = useCallback((node: NodeState) => {
+    setProxyModal([{ id: node.id, name: node.name }])
+  }, [])
+
   const renderNodeCard = (node: NodeState, index: number) => (
     <NodeUpdateCard
       key={node.id}
@@ -625,11 +726,11 @@ export default function Updates() {
       deliveryJob={visibleDeliveryJob(node.id)}
       haproxyJob={haproxyJobs.get(node.id)}
       selected={selected.has(node.id)}
-      onToggleSelect={() => toggleSelected([node.id], !selected.has(node.id))}
-      onUpdate={() => handleUpdateNode(node.id, node.name)}
-      onOpenDelivery={() => setDeliverTarget({ id: node.id, name: node.name })}
-      onOpenHAProxy={() => setHaproxyModal({ targets: [toHAProxyTarget(node)], jobId: haproxyJobs.get(node.id)?.job_id ?? null })}
-      onOpenProxy={() => setProxyModal([{ id: node.id, name: node.name }])}
+      onToggleSelect={toggleNodeSelected}
+      onUpdate={updateNodeFromCard}
+      onOpenDelivery={openDeliveryModal}
+      onOpenHAProxy={openHAProxyModal}
+      onOpenProxy={openProxyModal}
     />
   )
 
@@ -1083,7 +1184,7 @@ export default function Updates() {
           targets={proxyModal}
           onChanged={(ids) => {
             if (proxyModal.length > 1) setSelected(new Set())
-            setTimeout(() => ids.forEach(fetchNodeVersion), PROXY_REFRESH_DELAY_MS)
+            setTimeout(() => ids.forEach(id => fetchNodeVersion(id)), PROXY_REFRESH_DELAY_MS)
           }}
           onClose={() => setProxyModal(null)}
         />

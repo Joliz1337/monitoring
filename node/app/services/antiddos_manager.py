@@ -12,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from app.services.host_executor import get_host_executor
+from app.services.host_executor import HostExecutor, get_host_executor
 from app.services.host_files import write_host_file
 
 logger = logging.getLogger(__name__)
@@ -52,8 +52,8 @@ class AntiDdosStatus:
 class AntiDdosManager:
     """Thin async wrapper over ddos-watchdog.sh (runs on host via nsenter)."""
 
-    def __init__(self):
-        self._executor = get_host_executor()
+    def __init__(self, executor: HostExecutor):
+        self._executor = executor
 
     async def _run(self, verb: str, timeout: int = 20) -> tuple[bool, str, str]:
         result = await self._executor.execute(
@@ -113,12 +113,15 @@ class AntiDdosManager:
             return False, "watchdog not installed", 0
 
         valid = sorted({ip.strip() for ip in ips if _valid_ip_cidr(ip)})
-        # space-separated (json.dumps escapes newlines, the script splits on space)
-        payload = " ".join(valid)
-        cmd = f"printf '%s' {json.dumps(payload)} | {WATCHDOG_SCRIPT} whitelist-sync"
-        result = await self._executor.execute(cmd, timeout=60, shell="bash")
+        # Список идёт через stdin, а не в команде: она уходит в `bash -c` одним
+        # аргументом, а аргумент execve ограничен 128 КБ — список на 8–9 тысяч
+        # адресов в него не помещается, и запуск падает с E2BIG
+        result = await self._executor.execute(
+            f"{WATCHDOG_SCRIPT} whitelist-sync", timeout=60, shell="bash",
+            stdin_data="\n".join(valid),
+        )
         if not result.success:
-            return False, result.stderr or "sync failed", 0
+            return False, result.stderr or result.error or "sync failed", 0
         count = 0
         try:
             count = int(result.stdout.strip().splitlines()[-1])
@@ -175,5 +178,5 @@ _manager: AntiDdosManager | None = None
 def get_antiddos_manager() -> AntiDdosManager:
     global _manager
     if _manager is None:
-        _manager = AntiDdosManager()
+        _manager = AntiDdosManager(get_host_executor())
     return _manager

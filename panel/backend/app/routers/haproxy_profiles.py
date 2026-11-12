@@ -5,6 +5,7 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import select, update, func, and_, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 import json
@@ -40,6 +41,7 @@ from app.services.haproxy_config import (
 from app.services.haproxy_load_weights import nic_speed_mbps
 from app.services.haproxy_load_weights_runner import get_load_weights_runner
 from app.services.haproxy_validator import validate_config
+from app.services.latest_metrics import get_latest_metrics
 from app.services.reserved_ports_sync import _version_tuple
 from app.services.server_ip_owners import load_ip_owners
 
@@ -179,11 +181,10 @@ async def get_server_cores(
         return {}
 
     # Все серверы панели (backend-адреса могут указывать на любой сервер)
-    result = await db.execute(select(Server))
-    servers = list(result.scalars().all())
+    result = await db.execute(select(Server.id, Server.url))
+    servers = result.all()
     # Дальше только DNS-резолвы — освобождаем коннект пула, чтобы не держать его
-    # на всё время (возможно медленных) lookup'ов; expire_on_commit=False оставляет
-    # объекты servers доступными.
+    # на всё время (возможно медленных) lookup'ов.
     await db.commit()
     if not servers:
         return {}
@@ -212,18 +213,20 @@ async def get_server_cores(
                 return None
 
     # Хосты нод с известным числом ядер
+    latest = get_latest_metrics()
     node_hosts: list[tuple[str, int]] = []
-    for s in servers:
+    for server_id, url in servers:
         cores_val = None
-        if s.last_metrics:
+        metrics = latest.get(server_id)
+        if metrics:
             try:
-                cores_val = json.loads(s.last_metrics).get("cpu", {}).get("cores_logical")
-            except (json.JSONDecodeError, AttributeError):
+                cores_val = metrics.get("cpu", {}).get("cores_logical")
+            except AttributeError:
                 pass
         if not cores_val or cores_val <= 0:
             continue
         try:
-            host = urlparse(s.url).hostname or ""
+            host = urlparse(url).hostname or ""
         except Exception:
             continue
         if host:
@@ -255,10 +258,10 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
             Server.haproxy_sync_status,
             Server.folder,
             Server.link_capacity_mbit,
-            Server.last_metrics,
         )
         .order_by(Server.name)
     )
+    latest = get_latest_metrics()
     return [
         {
             "id": row[0],
@@ -268,7 +271,7 @@ async def get_available_servers(db: AsyncSession = Depends(get_db), _=Depends(ve
             "sync_status": row[4],
             "folder": row[5],
             "link_capacity_mbit": row[6],
-            "nic_speed_mbps": nic_speed_mbps(row[7]),
+            "nic_speed_mbps": nic_speed_mbps(latest.get(row[0])),
         }
         for row in result.fetchall()
     ]
@@ -939,8 +942,12 @@ async def delete_rule(profile_id: int, rule_name: str, bg: BackgroundTasks, db: 
 async def get_servers_status(profile_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
     await _get_profile(profile_id, db)
 
+    # Ответ ноды берётся из памяти — его копию из базы с серверами не грузим
     result = await db.execute(
-        select(Server).where(Server.active_haproxy_profile_id == profile_id).order_by(Server.name)
+        select(Server)
+        .options(defer(Server.last_metrics))
+        .where(Server.active_haproxy_profile_id == profile_id)
+        .order_by(Server.name)
     )
     servers = list(result.scalars().all())
     if not servers:
@@ -979,15 +986,16 @@ async def get_servers_status(profile_id: int, db: AsyncSession = Depends(get_db)
     )
     snap_map = {snap.server_id: snap for snap in snap_result.scalars().all()}
 
+    latest = get_latest_metrics()
     items = []
     for s in servers:
         metrics = None
         haproxy_running = None
 
         snap = snap_map.get(s.id)
-        if s.last_metrics:
+        m = latest.get(s.id)
+        if m:
             try:
-                m = json.loads(s.last_metrics)
                 cpu_data = m.get("cpu", {})
                 mem_data = m.get("memory", {}).get("ram", {})
                 metrics = {
@@ -998,7 +1006,7 @@ async def get_servers_status(profile_id: int, db: AsyncSession = Depends(get_db)
                     "la1": cpu_data.get("load_avg_1"),
                     "cores": cpu_data.get("cores_logical"),
                 }
-            except (json.JSONDecodeError, AttributeError):
+            except AttributeError:
                 pass
 
         cache = cache_map.get(s.id)

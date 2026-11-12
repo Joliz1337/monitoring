@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Server
+from app.services.latest_metrics import get_latest_metrics
 from app.services.node_ips import public_interface_ipv4, url_host
 
 
@@ -27,7 +28,8 @@ class ServerAddressSource:
     id: int
     name: str
     url: str
-    last_metrics: Optional[str]
+    # Последний ответ ноды; None — нода ещё ни разу не ответила
+    metrics: Optional[dict]
 
 
 @dataclass(frozen=True)
@@ -40,10 +42,14 @@ class IpOwner:
 
 async def load_ip_owners(db: AsyncSession) -> dict[str, IpOwner]:
     result = await db.execute(
-        select(Server.id, Server.name, Server.url, Server.last_metrics)
+        select(Server.id, Server.name, Server.url)
         .order_by(Server.position, Server.id)
     )
-    return build_ip_owners([ServerAddressSource(*row) for row in result.fetchall()])
+    latest = get_latest_metrics()
+    return build_ip_owners([
+        ServerAddressSource(server_id, name, url, latest.get(server_id))
+        for server_id, name, url in result.fetchall()
+    ])
 
 
 def build_ip_owners(servers: list[ServerAddressSource]) -> dict[str, IpOwner]:
@@ -56,7 +62,7 @@ def build_ip_owners(servers: list[ServerAddressSource]) -> dict[str, IpOwner]:
         if host:
             owners.setdefault(host, IpOwner(server.id, server.name))
     for server, host in zip(servers, hosts):
-        interface_ips = public_interface_ipv4(server.last_metrics)
+        interface_ips = public_interface_ipv4(server.metrics)
         for address, extra_number in _extra_numbers(interface_ips, host).items():
             owners.setdefault(address, IpOwner(server.id, server.name, extra_number))
     return owners

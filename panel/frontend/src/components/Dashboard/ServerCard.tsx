@@ -38,6 +38,10 @@ interface ServerTraffic {
   days: number
 }
 
+// Высота карточки сетки, пока настоящая неизвестна: столько места получает карточка,
+// которую браузер не рисует (content-visibility), и заглушка LazyServerCard до первого замера
+export const GRID_CARD_HEIGHT_ESTIMATE = 320
+
 function getLoadAvgColor(loadAvg: number, coresLogical: number): string {
   const percent = (loadAvg / coresLogical) * 100
   if (percent > 100) return 'text-danger'
@@ -45,7 +49,7 @@ function getLoadAvgColor(loadAvg: number, coresLogical: number): string {
   return 'text-success'
 }
 
-interface ServerCardProps {
+export interface ServerCardProps {
   server: Server & {
     metrics?: ServerMetrics | null
     traffic?: ServerTraffic | null
@@ -57,6 +61,8 @@ interface ServerCardProps {
   compact?: boolean
   detailLevel?: DetailLevel
   index?: number
+  /** Карточку монтируют только рядом с экраном (LazyServerCard) */
+  lazy?: boolean
 }
 
 interface DragHandle {
@@ -77,6 +83,7 @@ function ServerCardView({
   compact,
   detailLevel = 'standard',
   index = 0,
+  lazy = false,
   cardRef,
   dndStyle,
   isDragging = false,
@@ -95,8 +102,10 @@ function ServerCardView({
     animationDelay: `${Math.min(index, 20) * 30}ms`,
     // Виртуализация без удаления из DOM: браузер пропускает рендер/лейаут офф-скрин
     // карточек (критично на сотнях нод). При drag выключаем, чтобы не мешать перетаскиванию.
-    contentVisibility: isDragging || isOverlay ? 'visible' : 'auto',
-    containIntrinsicSize: 'auto 320px',
+    // Ленивая карточка и так живёт только у экрана, а пропущенная браузером занимала бы
+    // 320px вместо своей высоты — по ней заглушка получила бы неверный размер.
+    contentVisibility: isDragging || isOverlay || lazy ? 'visible' : 'auto',
+    containIntrinsicSize: `auto ${GRID_CARD_HEIGHT_ESTIMATE}px`,
   }
 
   // Во время drag настоящая карточка остаётся на месте приглушённым placeholder'ом,
@@ -117,7 +126,10 @@ function ServerCardView({
   // при перетаскивании. После завершения анимации снимаем класс с обёртки.
   // Карточка, перемонтированная посреди drag (перенос в другую папку), появляется
   // без entrance-анимации — иначе она снова глушит transform и мигает.
-  const [entered, setEntered] = useState(isOverlay || isDragging)
+  // Ленивая тоже: её монтирует прокрутка, а анимация меняет transform, из-за чего
+  // браузер отключает scroll anchoring — страница дёргалась, когда выше экрана
+  // монтировались карточки другой высоты.
+  const [entered, setEntered] = useState(isOverlay || isDragging || lazy)
   const wrapperProps = {
     style: sortableStyle,
     className: entered ? undefined : 'card-enter',
@@ -648,7 +660,7 @@ function SortableServerCard(props: ServerCardProps) {
   )
 }
 
-const ServerCard = memo(SortableServerCard, (prevProps, nextProps) => {
+export function areServerCardPropsEqual(prevProps: ServerCardProps, nextProps: ServerCardProps) {
   const a = prevProps.server
   const b = nextProps.server
   if (a.id !== b.id) return false
@@ -658,6 +670,7 @@ const ServerCard = memo(SortableServerCard, (prevProps, nextProps) => {
   if (prevProps.compact !== nextProps.compact) return false
   if (prevProps.detailLevel !== nextProps.detailLevel) return false
   if (prevProps.index !== nextProps.index) return false
+  if (prevProps.lazy !== nextProps.lazy) return false
   if (a.folder !== b.folder) return false
   if (a.note !== b.note) return false
 
@@ -686,7 +699,9 @@ const ServerCard = memo(SortableServerCard, (prevProps, nextProps) => {
   if (a.traffic?.tx_bytes !== b.traffic?.tx_bytes) return false
 
   return true
-})
+}
+
+const ServerCard = memo(SortableServerCard, areServerCardPropsEqual)
 
 export default ServerCard
 

@@ -2134,6 +2134,11 @@ export interface AlertSettingsData {
   packet_loss_sustained_seconds: number
   packet_loss_calm_seconds: number
   packet_loss_reminder_hours: number
+  panel_host_enabled: boolean
+  panel_cpu_threshold: number
+  panel_ram_threshold: number
+  panel_disk_threshold: number
+  panel_host_sustained_seconds: number
   excluded_server_ids: number[]
   offline_excluded_server_ids: number[]
   cpu_excluded_server_ids: number[]
@@ -2148,7 +2153,8 @@ export interface AlertSettingsData {
 
 export interface AlertHistoryItem {
   id: number
-  server_id: number
+  // null — алерт о хосте самой панели
+  server_id: number | null
   server_name: string
   alert_type: string
   severity: string

@@ -6,13 +6,17 @@
 каждую ноду) схлопываются в один разрыв.
 """
 
+import asyncio
 import os
 import sys
 import unittest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from sqlalchemy.dialects import postgresql  # noqa: E402
 
 from app.services.fleet_history import (  # noqa: E402
     CACHE_TTL_SEC,
@@ -25,6 +29,7 @@ from app.services.fleet_history import (  # noqa: E402
     node_capacity,
 )
 from app.services import fleet_history  # noqa: E402
+from app.services.latest_metrics import LatestMetrics  # noqa: E402
 from app.services.metrics_history import insert_gap_markers, merge_downtime  # noqa: E402
 
 
@@ -41,34 +46,34 @@ def row(bucket: datetime, **values) -> dict:
 
 class NodeCapacityTests(unittest.TestCase):
     def test_reads_cores_and_ram(self):
-        metrics = '{"cpu": {"cores_logical": 8}, "memory": {"ram": {"total": 16777216}}}'
+        metrics = {"cpu": {"cores_logical": 8}, "memory": {"ram": {"total": 16777216}}}
         self.assertEqual(node_capacity(metrics), (8.0, 16777216.0))
 
     def test_missing_metrics_fall_back_to_minimal_weight(self):
-        for value in (None, "", "not json", "[]", "null", "{}"):
+        for value in (None, {}):
             self.assertEqual(node_capacity(value), (DEFAULT_CORES, 0.0), value)
 
     def test_partial_metrics_keep_what_is_readable(self):
-        self.assertEqual(node_capacity('{"cpu": {"cores_logical": 4}}'), (4.0, 0.0))
+        self.assertEqual(node_capacity({"cpu": {"cores_logical": 4}}), (4.0, 0.0))
         self.assertEqual(
-            node_capacity('{"memory": {"ram": {"total": 2048}}}'), (DEFAULT_CORES, 2048.0)
+            node_capacity({"memory": {"ram": {"total": 2048}}}), (DEFAULT_CORES, 2048.0)
         )
 
     def test_nonpositive_and_nonnumeric_values_are_rejected(self):
-        self.assertEqual(node_capacity('{"cpu": {"cores_logical": 0}}'), (DEFAULT_CORES, 0.0))
-        self.assertEqual(node_capacity('{"cpu": {"cores_logical": -2}}'), (DEFAULT_CORES, 0.0))
-        self.assertEqual(node_capacity('{"cpu": {"cores_logical": "8"}}'), (DEFAULT_CORES, 0.0))
-        self.assertEqual(node_capacity('{"cpu": {"cores_logical": true}}'), (DEFAULT_CORES, 0.0))
+        self.assertEqual(node_capacity({"cpu": {"cores_logical": 0}}), (DEFAULT_CORES, 0.0))
+        self.assertEqual(node_capacity({"cpu": {"cores_logical": -2}}), (DEFAULT_CORES, 0.0))
+        self.assertEqual(node_capacity({"cpu": {"cores_logical": "8"}}), (DEFAULT_CORES, 0.0))
+        self.assertEqual(node_capacity({"cpu": {"cores_logical": True}}), (DEFAULT_CORES, 0.0))
 
     def test_wrong_shapes_do_not_raise(self):
-        self.assertEqual(node_capacity('{"cpu": 8, "memory": []}'), (DEFAULT_CORES, 0.0))
-        self.assertEqual(node_capacity('{"memory": {"ram": 16}}'), (DEFAULT_CORES, 0.0))
+        self.assertEqual(node_capacity({"cpu": 8, "memory": []}), (DEFAULT_CORES, 0.0))
+        self.assertEqual(node_capacity({"memory": {"ram": 16}}), (DEFAULT_CORES, 0.0))
 
 
 class BuildCapacityTests(unittest.TestCase):
     def test_arrays_stay_aligned_with_ids(self):
         capacity = build_capacity([
-            (7, '{"cpu": {"cores_logical": 2}, "memory": {"ram": {"total": 100}}}'),
+            (7, {"cpu": {"cores_logical": 2}, "memory": {"ram": {"total": 100}}}),
             (3, None),
         ])
         self.assertEqual(capacity.ids, [7, 3])
@@ -78,6 +83,45 @@ class BuildCapacityTests(unittest.TestCase):
     def test_empty_fleet_is_falsy(self):
         self.assertFalse(build_capacity([]))
         self.assertTrue(build_capacity([(1, None)]))
+
+
+class RecordingSession:
+    """Сессия без базы: отдаёт id активных серверов и запоминает текст запросов."""
+
+    def __init__(self, server_ids: list[int]) -> None:
+        self._server_ids = server_ids
+        self.queries: list[str] = []
+
+    async def execute(self, statement):
+        self.queries.append(str(statement.compile(dialect=postgresql.dialect())))
+        return SimpleNamespace(
+            all=lambda: [(server_id,) for server_id in self._server_ids],
+            scalars=lambda: SimpleNamespace(all=lambda: list(self._server_ids)),
+        )
+
+
+class LoadCapacityTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.latest = LatestMetrics()
+        store_patch = patch.object(fleet_history, "get_latest_metrics", return_value=self.latest)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
+
+    async def test_capacity_comes_from_the_latest_answers_in_memory(self):
+        self.latest.put(7, {"cpu": {"cores_logical": 2}, "memory": {"ram": {"total": 100}}})
+
+        capacity = await fleet_history.load_capacity(RecordingSession([7, 3]), None)
+
+        self.assertEqual(capacity.ids, [7, 3])
+        self.assertEqual(capacity.cores, [2.0, DEFAULT_CORES])
+        self.assertEqual(capacity.ram, [100.0, 0.0])
+
+    async def test_saved_answers_are_not_read_from_the_database(self):
+        db = RecordingSession([7])
+
+        await fleet_history.load_capacity(db, "EU")
+
+        self.assertFalse([query for query in db.queries if "last_metrics" in query])
 
 
 class FleetPointTests(unittest.TestCase):
@@ -139,6 +183,60 @@ class CacheTests(unittest.TestCase):
         self.monotonic.return_value = 1000.0 + CACHE_TTL_SEC["1h"]
         fleet_history._store(("1h", "new name"), {"scope": "new"})
         self.assertEqual(set(fleet_history._cache), {("1h", "new name")})
+
+    def test_day_history_is_kept_until_its_next_point_can_appear(self):
+        # Пересборка суток читает сырые снапшоты всего парка за 24 часа — секунды
+        # на большом парке, а новая точка появляется раз в бакет
+        fleet_history._store(("24h", None), {"scope": "fleet"})
+        self.monotonic.return_value = 1000.0 + FLEET_PERIODS["24h"].bucket_sec - 1
+        self.assertEqual(fleet_history._cached(("24h", None)), {"scope": "fleet"})
+
+
+class ColdBuildTests(unittest.IsolatedAsyncioTestCase):
+    """Сборка суток на большом парке идёт секунды: остальные периоды и папки
+    не должны стоять за ней в очереди."""
+
+    async def asyncSetUp(self) -> None:
+        for state in (fleet_history._cache, fleet_history._build_locks):
+            state.clear()
+            self.addCleanup(state.clear)
+        self.day_may_finish = asyncio.Event()
+        self.builds: list[tuple[str, str | None]] = []
+
+        async def build(db, period, folder):
+            self.builds.append((period, folder))
+            if period == "24h":
+                await self.day_may_finish.wait()
+            return {"period": period, "folder": folder}
+
+        build_patch = patch.object(fleet_history, "_build_history", build)
+        build_patch.start()
+        self.addCleanup(build_patch.stop)
+
+    async def test_slow_build_of_one_period_does_not_hold_another(self):
+        day = asyncio.create_task(fleet_history.load_fleet_history(None, "24h"))
+        await asyncio.sleep(0)
+        try:
+            hour = await asyncio.wait_for(fleet_history.load_fleet_history(None, "1h"), timeout=1.0)
+        finally:
+            self.day_may_finish.set()
+            await day
+        self.assertEqual(hour, {"period": "1h", "folder": None})
+
+    async def test_requests_for_the_same_key_still_build_it_once(self):
+        first = asyncio.create_task(fleet_history.load_fleet_history(None, "24h", "EU"))
+        second = asyncio.create_task(fleet_history.load_fleet_history(None, "24h", "EU"))
+        await asyncio.sleep(0)
+        self.day_may_finish.set()
+        self.assertEqual(await first, await second)
+        self.assertEqual(self.builds, [("24h", "EU")])
+
+    async def test_locks_of_renamed_folders_do_not_pile_up(self):
+        # Папки переименовывают и удаляют: лок на ключ старого имени больше никому не нужен
+        with patch.dict(fleet_history.CACHE_TTL_SEC, {"1h": 0.0}):
+            await fleet_history.load_fleet_history(None, "1h", "old name")
+            await fleet_history.load_fleet_history(None, "1h", "new name")
+        self.assertEqual(set(fleet_history._build_locks), {("1h", "new name")})
 
 
 class PanelDowntimeTests(unittest.TestCase):

@@ -1,7 +1,8 @@
 import asyncio
 import logging
 import time
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Awaitable, Callable, Optional
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
@@ -22,6 +23,16 @@ SETTINGS_CHECK_INTERVAL = 60
 # всплеск алертов иначе ловит 429 и теряется молча.
 MIN_SEND_INTERVAL = 0.05
 
+# Сколько отказов флуд-контроля подряд пережидаем, прежде чем признать сообщение
+# потерянным: в аварию отказы идут сериями, а потерянное сообщение — пропущенный алерт
+MAX_FLOOD_RETRIES = 5
+# Запас к названному Telegram ожиданию — на расхождение часов
+FLOOD_WAIT_MARGIN = 0.5
+# В группу Telegram принимает ~20 сообщений в минуту. Чат, упёршийся в лимит,
+# FLOOD_PACING_WINDOW секунд идёт в этом темпе: на обычном он получил бы отказ снова
+FLOOD_PACING_SECONDS = 3.1
+FLOOD_PACING_WINDOW = 600
+
 
 class TelegramSendError(Exception):
     """Сообщение не доставлено; `reason` — текст, пригодный для показа оператору."""
@@ -29,6 +40,27 @@ class TelegramSendError(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+@dataclass
+class _ChatPace:
+    """Очередь одного чата и его темп после отказа флуд-контроля."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    sent_at: float = 0.0
+    # Раньше этого момента Telegram сообщение в чат не примет
+    blocked_until: float = 0.0
+    slow_until: float = 0.0
+
+    def delay(self, now: float) -> float:
+        ready_at = self.blocked_until
+        if now < self.slow_until:
+            ready_at = max(ready_at, self.sent_at + FLOOD_PACING_SECONDS)
+        return max(0.0, ready_at - now)
+
+    def flood(self, now: float, retry_after: float) -> None:
+        self.blocked_until = now + retry_after + FLOOD_WAIT_MARGIN
+        self.slow_until = self.blocked_until + FLOOD_PACING_WINDOW
 
 
 class TelegramBotService:
@@ -40,7 +72,13 @@ class TelegramBotService:
     - Периодическая очистка устаревших ботов
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ):
+        self._clock = clock
+        self._sleep = sleep
         self._bots: dict[str, Bot] = {}
         self._poll_tasks: dict[str, asyncio.Task] = {}
         self._dp = Dispatcher()
@@ -51,6 +89,7 @@ class TelegramBotService:
         # Сериализация и пейсинг отправок по токену (защита от 429-burst)
         self._send_locks: dict[str, asyncio.Lock] = {}
         self._last_send_at: dict[str, float] = {}
+        self._chat_paces: dict[tuple[str, str], _ChatPace] = {}
 
     def _send_lock(self, token: str) -> asyncio.Lock:
         lock = self._send_locks.get(token)
@@ -58,6 +97,13 @@ class TelegramBotService:
             lock = asyncio.Lock()
             self._send_locks[token] = lock
         return lock
+
+    def _chat_pace(self, token: str, chat_id: str) -> _ChatPace:
+        key = (token, str(chat_id))
+        pace = self._chat_paces.get(key)
+        if pace is None:
+            pace = self._chat_paces[key] = _ChatPace()
+        return pace
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -119,36 +165,56 @@ class TelegramBotService:
             if reply_to_message_id else None
         )
 
-        async with self._send_lock(bot_token):
-            gap = time.monotonic() - self._last_send_at.get(bot_token, 0.0)
-            if gap < MIN_SEND_INTERVAL:
-                await asyncio.sleep(MIN_SEND_INTERVAL - gap)
-
-            retried = False
+        pace = self._chat_pace(bot_token, chat_id)
+        # Очередь чата держится и на время флуд-ожидания: следующим сообщениям в него
+        # всё равно ждать. Замок бота берётся только на сам запрос, поэтому ожидание
+        # одного чата не задерживает отправки того же бота в другие
+        async with pace.lock:
+            flood_retries = 0
             while True:
+                delay = pace.delay(self._clock())
+                if delay > 0:
+                    await self._sleep(delay)
                 try:
-                    msg = await bot.send_message(
+                    msg = await self._request(
+                        bot,
+                        bot_token,
                         chat_id=chat_id,
                         text=text,
                         parse_mode=parse_mode,
                         reply_markup=markup,
                         reply_parameters=reply_params,
                     )
-                    self._last_send_at[bot_token] = time.monotonic()
-                    return msg
                 except TelegramRetryAfter as e:
-                    # Telegram попросил подождать — единственная попытка переждать и повторить.
-                    self._last_send_at[bot_token] = time.monotonic()
-                    if retried:
+                    pace.flood(self._clock(), e.retry_after)
+                    if flood_retries == MAX_FLOOD_RETRIES:
                         raise TelegramSendError(f"Telegram rate limit, retry after {e.retry_after}s") from e
-                    retried = True
-                    await asyncio.sleep(e.retry_after + 0.5)
-                except TelegramNetworkError as e:
-                    raise TelegramSendError(f"Network error: {e.message}") from e
-                except TelegramAPIError as e:
-                    raise TelegramSendError(f"Telegram: {e.message}") from e
-                except Exception as e:
-                    raise TelegramSendError(str(e) or type(e).__name__) from e
+                    flood_retries += 1
+                else:
+                    pace.sent_at = self._clock()
+                    return msg
+
+    async def _request(self, bot: Bot, bot_token: str, **message) -> Message:
+        """Один запрос в общем темпе бота. Отказ флуд-контроля отдаёт наверх как есть:
+        пережидают его уже без замка бота."""
+        async with self._send_lock(bot_token):
+            gap = self._clock() - self._last_send_at.get(bot_token, 0.0)
+            if gap < MIN_SEND_INTERVAL:
+                await self._sleep(MIN_SEND_INTERVAL - gap)
+
+            try:
+                msg = await bot.send_message(**message)
+            except TelegramRetryAfter:
+                self._last_send_at[bot_token] = self._clock()
+                raise
+            except TelegramNetworkError as e:
+                raise TelegramSendError(f"Network error: {e.message}") from e
+            except TelegramAPIError as e:
+                raise TelegramSendError(f"Telegram: {e.message}") from e
+            except Exception as e:
+                raise TelegramSendError(str(e) or type(e).__name__) from e
+            self._last_send_at[bot_token] = self._clock()
+            return msg
 
     async def send_message(
         self,

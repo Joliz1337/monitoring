@@ -11,11 +11,14 @@ import json
 import logging
 import math
 import time
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
-from sqlalchemy import select, delete, update, bindparam, func, ColumnElement
+from sqlalchemy import Select, select, delete, update, bindparam, func, ColumnElement
+from sqlalchemy.orm import defer
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.loss_registry import get_loss_registry
 from app.services.node_capabilities import (
@@ -23,7 +26,7 @@ from app.services.node_capabilities import (
     normalize_map as normalize_capabilities_map,
     server_allows,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.database import async_session, Base
 from app.models import (
@@ -32,6 +35,7 @@ from app.models import (
 )
 from app.services.haproxy_load_weights import NodeLoad
 from app.services.haproxy_load_weights_runner import get_load_weights_runner
+from app.services.latest_metrics import get_latest_metrics
 from app.services.metrics_rates import NodeRates, poll_window_seconds, snapshot_rates
 from app.services.traffic_ingest import get_traffic_ingest
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -41,6 +45,12 @@ logger = logging.getLogger(__name__)
 # Default intervals (used if settings not in DB)
 DEFAULT_METRICS_INTERVAL = 10  # seconds (recommended: 10-15s)
 DEFAULT_HAPROXY_INTERVAL = 300  # seconds (5 minutes - HAProxy data changes rarely)
+
+# Как часто последний ответ ноды сохраняется в servers.last_metrics. Читатели
+# берут его из памяти (latest_metrics); копия в базе нужна, только чтобы поднять
+# хранилище после перезапуска панели, а запись ~18 КБ JSON на ноду каждый цикл
+# давала основной объём WAL.
+LAST_METRICS_PERSIST_SECONDS = 300
 
 
 def next_collection_tick(previous_tick: float, interval: float, now: float) -> float:
@@ -63,6 +73,7 @@ class ErrorTypes:
     AUTH_ERROR = "Authentication failed"
     SERVER_ERROR = "Server error"
     PROXY_ERROR = "Proxy connection error"
+    INVALID_RESPONSE = "Invalid metrics response"
     UNKNOWN = "Unknown error"
 
 
@@ -80,6 +91,50 @@ class DiskIoState:
         self.prev_time: float = 0.0
 
 
+@dataclass
+class CycleBatch:
+    """Итог разбора ответов нод за один цикл — то, что уходит в базу одной транзакцией."""
+    snapshots: list[dict] = field(default_factory=list)
+    server_updates: list[dict] = field(default_factory=list)
+    recovered_ids: list[int] = field(default_factory=list)
+    newly_down: list[tuple[int, datetime]] = field(default_factory=list)
+    downtime_over: list[int] = field(default_factory=list)
+    caps_changed: list[int] = field(default_factory=list)
+
+
+def select_servers() -> Select:
+    """Серверы без last_metrics: ответ ноды коллектор держит в памяти, а из базы
+    он тянул бы десятки килобайт на сервер при каждом обходе парка."""
+    return select(Server).options(defer(Server.last_metrics))
+
+
+class PersistSchedule:
+    """Когда последний ответ ноды уходит в `servers.last_metrics`.
+
+    Раз в период, и у каждого сервера свой сдвиг внутри периода: отсчёт от
+    прошлого сохранения собрал бы весь парк в один цикл — тот же залп в WAL,
+    только раз в пять минут. Первый ответ после старта панели сохраняется
+    сразу: копия в базе успела устареть на всё время простоя.
+    """
+
+    def __init__(self, period_seconds: float, clock: Callable[[], float]) -> None:
+        self._period = period_seconds
+        self._clock = clock
+        self._next_at: dict[int, float] = {}
+
+    def is_due(self, server_id: int) -> bool:
+        next_at = self._next_at.get(server_id)
+        return next_at is None or self._clock() >= next_at
+
+    def mark_persisted(self, server_ids: Iterable[int]) -> None:
+        now = self._clock()
+        for server_id in server_ids:
+            # Сетка сроков сервера: offset, offset + период, offset + 2 периода…
+            offset = server_id % self._period
+            periods_passed = math.floor((now - offset) / self._period)
+            self._next_at[server_id] = offset + (periods_passed + 1) * self._period
+
+
 class MetricsCollector:
     """Collects metrics from all servers and stores in panel DB"""
     
@@ -88,8 +143,17 @@ class MetricsCollector:
     ACTIVE_REFRESH_INTERVAL = 5
     ACTIVITY_TTL = 60
     
-    HTTP_CONCURRENCY = 50  # max parallel HTTP requests to nodes
+    HTTP_CONCURRENCY = 100  # одновременных запросов метрик к нодам
+    # Кэш HAProxy и проверка Xray ходят своим лимитом: на общем их обход парка
+    # вставал в очередь перед сбором метрик, и тот пропускал такты
+    AUX_HTTP_CONCURRENCY = 20
+    # Недоступной ноде хватает короткого connect: полный таймаут запроса на каждый
+    # из пяти эндпоинтов держал слот больше минуты
+    AUX_CONNECT_TIMEOUT = 3.0
+    XRAY_PROBE_TIMEOUT = 12.0
     DB_CONCURRENCY = 10    # max parallel DB sessions
+    BATCH_YIELD_EVERY = 100   # нод между передачами управления event loop при разборе ответов
+    OVERRUN_LOG_EVERY = 30    # затянувшийся цикл логируется раз в столько повторов подряд
     CLEANUP_INTERVAL = 300 # cleanup every 5 minutes, not every cycle
     CLEANUP_CHUNK_ROWS = 50_000  # строк за один DELETE ретеншена
     CLEANUP_MAX_CHUNKS = 20      # потолок проходов за вызов, хвост уйдёт в следующий
@@ -111,6 +175,12 @@ class MetricsCollector:
     MIN_SPEED_INTERVAL_SECONDS = 0.5  # ниже этого dt деление даёт шум, а не скорость
     NODE_VERSION_MAX_LEN = 20         # ширина servers.node_version
 
+    # Колонки servers, которые цикл переписывает ответившей ноде. Самого ответа
+    # (last_metrics) среди них нет: он добавляется, когда подходит срок PersistSchedule
+    STATUS_COLUMNS = ("last_seen", "last_error", "error_code", "node_version", "tracked_ports", "node_capabilities")
+    PERSIST_COLUMNS = STATUS_COLUMNS + ("last_metrics",)
+    ERROR_COLUMNS = ("last_error", "error_code")
+
     # Правила файрвола живут под префиксом haproxy, но закрываются своим доменом
     HAPROXY_ENDPOINTS = (
         ("/api/haproxy/status", "status", Capability.HAPROXY),
@@ -127,7 +197,7 @@ class MetricsCollector:
     # а один такой await замораживает gather цикла — вся флотилия уходит в offline (26.07.2026).
     FETCH_HARD_TIMEOUT = 20
 
-    def __init__(self):
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._aggregation_task: Optional[asyncio.Task] = None
@@ -154,7 +224,9 @@ class MetricsCollector:
         self._last_cleanup: float = 0
         
         self._http_sem = asyncio.Semaphore(self.HTTP_CONCURRENCY)
+        self._aux_http_sem = asyncio.Semaphore(self.AUX_HTTP_CONCURRENCY)
         self._db_sem = asyncio.Semaphore(self.DB_CONCURRENCY)
+        self._overrun_streak = 0
 
         self._node_failures: dict[int, int] = {}
         self._node_skip_cycles: dict[int, int] = {}
@@ -168,6 +240,10 @@ class MetricsCollector:
         self._open_downtime: set[int] = set()
         self._reconcile_inflight: set[int] = set()
         self._reconcile_sem = asyncio.Semaphore(self.RECONCILE_CONCURRENCY)
+
+        self._metrics_persist = PersistSchedule(LAST_METRICS_PERSIST_SECONDS, clock)
+        # Серверы, чей ответ в памяти новее копии в базе: их досохраняет остановка панели
+        self._unsaved_metrics: set[int] = set()
 
     def notify_activity(self, server_id: int):
         """Mark server as having client activity — triggers fast HAProxy cache refresh (every 5s)"""
@@ -218,6 +294,7 @@ class MetricsCollector:
         
         # Load settings before starting
         await self._load_settings()
+        await self._warm_latest_metrics()
         await self._record_panel_gap()
         await self._close_orphaned_downtime()
         await self._load_open_downtime()
@@ -253,7 +330,47 @@ class MetricsCollector:
         await get_load_weights_runner().stop()
         # Финальный flush уже после остановки цикла сбора — иначе он гнался бы с observe().
         await get_traffic_ingest().stop()
+        # Последним: если остановку оборвут по таймауту, потерять лучше эту запись
+        # (копия в базе просто останется старше), чем хвост истории трафика
+        await self._persist_unsaved_metrics()
         logger.info("Metrics collector stopped")
+
+    async def _warm_latest_metrics(self) -> None:
+        """Поднять хранилище ответов с копии в базе.
+
+        Читателям ответ нужен до первого цикла сбора, а ответ ноды, которая
+        сейчас лежит, новый цикл не принесёт вовсе: без копии её адреса выпали
+        бы из белых списков всего парка.
+        """
+        try:
+            async with async_session() as db:
+                saved = (await db.execute(select(Server.id, Server.last_metrics))).all()
+        except Exception as e:
+            logger.error(f"Failed to load saved node metrics: {e}")
+            return
+        get_latest_metrics().load(saved)
+
+    async def _persist_unsaved_metrics(self) -> None:
+        """Досохранить ответы, которых ещё нет в базе: с них следующий запуск
+        панели поднимет хранилище, пока ноды не ответят заново."""
+        answers = get_latest_metrics().get_many(self._unsaved_metrics)
+        if not answers:
+            return
+        # Остановка панели не должна упасть из-за базы: без этой записи копия
+        # в базе просто останется старше на несколько минут
+        try:
+            async with async_session() as db:
+                conn = await db.connection()
+                await self._update_servers(
+                    conn,
+                    ("last_metrics",),
+                    [{"id": server_id, "last_metrics": json.dumps(metrics)} for server_id, metrics in answers.items()],
+                )
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to persist latest metrics of {len(answers)} server(s): {e}")
+            return
+        self._unsaved_metrics.difference_update(answers)
 
     async def _collection_loop(self):
         """Main collection loop on a fixed tick.
@@ -263,85 +380,47 @@ class MetricsCollector:
         """
         next_tick = time.monotonic()
         while self._running:
+            started = time.monotonic()
             try:
                 await self._collect_all_servers()
             except Exception as e:
                 logger.error(f"Collection error: {e}")
+            self._note_cycle_duration(time.monotonic() - started)
 
             next_tick = next_collection_tick(next_tick, self._collect_interval, time.monotonic())
             await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
-    
+
+    def _note_cycle_duration(self, duration: float) -> None:
+        """Цикл длиннее интервала пропускает такты: на графиках точки идут реже,
+        а со стороны это ничем, кроме лога, не видно."""
+        if duration <= self._collect_interval:
+            self._overrun_streak = 0
+            return
+        self._overrun_streak += 1
+        if self._overrun_streak % self.OVERRUN_LOG_EVERY == 1:
+            logger.warning(
+                f"Metrics cycle took {duration:.1f}s with a {self._collect_interval}s interval "
+                f"({self._overrun_streak} in a row): ticks are being skipped"
+            )
+
     async def _collect_all_servers(self):
         """Collect metrics from all active servers with bounded concurrency."""
         async with async_session() as db:
             result = await db.execute(
-                select(Server).where(Server.is_active == True)
+                select_servers().where(Server.is_active == True)
             )
             servers = result.scalars().all()
-        
+
         # Phase 1: fetch metrics from all servers (HTTP-bound, limited by semaphore)
         results = await asyncio.gather(
             *[self._fetch_server_metrics(server) for server in servers],
             return_exceptions=True
         )
-        
+
         # Phase 2: batch write all results in a single DB session
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        snapshots = []
-        server_updates = []
-        recovered_ids: list[int] = []
-        newly_down: list[tuple[int, datetime]] = []
-        downtime_over: list[int] = []
-        caps_changed: list[int] = []
-
-        for server, result in zip(servers, results):
-            if isinstance(result, Exception):
-                continue
-
-            metrics, error_info = result
-            if metrics:
-                # Наблюдаемое оживание: нода молчала дольше порога, теперь снова ответила.
-                if server.id in self._down_servers:
-                    self._down_servers.discard(server.id)
-                    recovered_ids.append(server.id)
-                if server.id in self._open_downtime:
-                    self._open_downtime.discard(server.id)
-                    downtime_over.append(server.id)
-                snapshot_data = self._build_snapshot(server.id, metrics, now_utc)
-                get_loss_registry().update(server.id, server.name, metrics)
-                if snapshot_data:
-                    snapshots.append(snapshot_data)
-                node_version = metrics.get("agent_version")
-                tracked_ports = self._tracked_ports_json(metrics)
-                caps_present, capabilities = self._capabilities_json(metrics)
-                if not caps_present:
-                    capabilities = server.node_capabilities
-                elif capabilities != server.node_capabilities:
-                    caps_changed.append(server.id)
-                server_updates.append({
-                    "id": server.id,
-                    "last_seen": now_utc,
-                    "last_error": None,
-                    "error_code": None,
-                    "last_metrics": json.dumps(metrics),
-                    # Старые ноды этих полей не присылают — пишем обратно то, что уже в базе.
-                    "node_version": node_version[:self.NODE_VERSION_MAX_LEN] if node_version else server.node_version,
-                    "tracked_ports": tracked_ports if tracked_ports is not None else server.tracked_ports,
-                    "node_capabilities": capabilities,
-                })
-            elif error_info:
-                # Помечаем "definitively offline" только если раньше нода была живой и давно молчит.
-                if server.id not in self._down_servers and server.last_seen is not None and \
-                        self._seconds_since(server.last_seen, now_utc) >= self.DOWN_THRESHOLD_SECONDS:
-                    self._down_servers.add(server.id)
-                    if server.id not in self._open_downtime:
-                        self._open_downtime.add(server.id)
-                        newly_down.append((server.id, self._to_naive_utc(server.last_seen)))
-                server_updates.append({
-                    "id": server.id,
-                    "last_error": error_info["message"],
-                    "error_code": error_info["code"]
-                })
+        batch = await self._build_cycle_batch(servers, results, now_utc)
+        snapshots, server_updates = batch.snapshots, batch.server_updates
 
         if snapshots:
             get_load_weights_runner().observe(
@@ -355,77 +434,38 @@ class MetricsCollector:
         if snapshots or server_updates:
             success_updates = [u for u in server_updates if "last_seen" in u]
             error_updates = [u for u in server_updates if "last_seen" not in u]
+            # Сам ответ ноды пишется в базу редко: остальным серверам строка
+            # обновляется без него, и ~18 КБ JSON не попадают в WAL каждый цикл
+            persist_updates = [u for u in success_updates if "last_metrics" in u]
+            status_updates = [u for u in success_updates if "last_metrics" not in u]
 
             async with async_session() as db:
                 if snapshots:
                     await db.execute(MetricsSnapshot.__table__.insert(), snapshots)
 
-                # Bulk UPDATE через connection() — обходит ORM bulk-by-PK путь,
-                # который требует id внутри values; нам нужен WHERE с bindparam.
-                if success_updates or error_updates:
+                if server_updates:
                     conn = await db.connection()
-
-                if success_updates:
-                    success_params = [
-                        {
-                            "sid": upd["id"],
-                            "last_seen": upd["last_seen"],
-                            "last_error": upd["last_error"],
-                            "error_code": upd["error_code"],
-                            "last_metrics": upd["last_metrics"],
-                            "node_version": upd["node_version"],
-                            "tracked_ports": upd["tracked_ports"],
-                            "node_capabilities": upd["node_capabilities"],
-                        }
-                        for upd in success_updates
-                    ]
-                    await conn.execute(
-                        update(Server)
-                        .where(Server.id == bindparam("sid"))
-                        .values(
-                            last_seen=bindparam("last_seen"),
-                            last_error=bindparam("last_error"),
-                            error_code=bindparam("error_code"),
-                            last_metrics=bindparam("last_metrics"),
-                            node_version=bindparam("node_version"),
-                            tracked_ports=bindparam("tracked_ports"),
-                            node_capabilities=bindparam("node_capabilities"),
-                        ),
-                        success_params,
-                    )
-
-                if error_updates:
-                    error_params = [
-                        {
-                            "sid": upd["id"],
-                            "last_error": upd["last_error"],
-                            "error_code": upd["error_code"],
-                        }
-                        for upd in error_updates
-                    ]
-                    await conn.execute(
-                        update(Server)
-                        .where(Server.id == bindparam("sid"))
-                        .values(
-                            last_error=bindparam("last_error"),
-                            error_code=bindparam("error_code"),
-                        ),
-                        error_params,
-                    )
+                    await self._update_servers(conn, self.STATUS_COLUMNS, status_updates)
+                    await self._update_servers(conn, self.PERSIST_COLUMNS, persist_updates)
+                    await self._update_servers(conn, self.ERROR_COLUMNS, error_updates)
 
                 await db.commit()
 
-        if newly_down or downtime_over:
-            await self._record_downtime(newly_down, downtime_over, now_utc)
+            persisted_ids = [u["id"] for u in persist_updates]
+            self._metrics_persist.mark_persisted(persisted_ids)
+            self._unsaved_metrics.difference_update(persisted_ids)
+
+        if batch.newly_down or batch.downtime_over:
+            await self._record_downtime(batch.newly_down, batch.downtime_over, now_utc)
 
         # Восстановление состояния оживших нод — last_seen уже закоммичен (сервер считается online).
-        for sid in recovered_ids:
+        for sid in batch.recovered_ids:
             asyncio.create_task(self._launch_reconcile(sid))
 
         # Права поменялись: снимаем долги, ставшие неисполнимыми, и заново
         # раскатываем то, что теперь снова разрешено.
-        if caps_changed:
-            asyncio.create_task(self._handle_capability_change(caps_changed))
+        if batch.caps_changed:
+            asyncio.create_task(self._handle_capability_change(batch.caps_changed))
 
         # Cleanup throttled — only every CLEANUP_INTERVAL seconds
         now = time.time()
@@ -433,7 +473,114 @@ class MetricsCollector:
             async with async_session() as db:
                 await self._cleanup_old_data(db)
             self._last_cleanup = now
-    
+
+    @staticmethod
+    async def _update_servers(conn: AsyncConnection, columns: tuple[str, ...], updates: list[dict]) -> None:
+        """Одним executemany переписать названные колонки серверам из `updates`."""
+        if not updates:
+            return
+        # Bulk UPDATE через connection() — обходит ORM bulk-by-PK путь,
+        # который требует id внутри values; нам нужен WHERE с bindparam.
+        await conn.execute(
+            update(Server)
+            .where(Server.id == bindparam("sid"))
+            .values({column: bindparam(column) for column in columns}),
+            [{"sid": upd["id"], **{column: upd[column] for column in columns}} for upd in updates],
+        )
+
+    async def _build_cycle_batch(
+        self, servers: list[Server], results: list, now_utc: datetime
+    ) -> CycleBatch:
+        """Разобрать ответы нод в строки для записи.
+
+        Проход по всему парку — синхронный код, поэтому он периодически отдаёт
+        управление event loop: иначе API замирал бы на всё время разбора.
+        """
+        batch = CycleBatch()
+        for index, (server, result) in enumerate(zip(servers, results)):
+            if index and index % self.BATCH_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+            if isinstance(result, Exception):
+                continue
+
+            metrics, error_info = result
+            if metrics:
+                try:
+                    self._ingest_metrics(server, metrics, now_utc, batch)
+                    continue
+                except Exception as e:
+                    # Ответ ноды разбирается как есть: без этого один кривой JSON
+                    # срывал бы запись снапшотов всему парку каждый цикл
+                    logger.warning(f"Malformed metrics from {server.name}: {type(e).__name__}: {e}")
+                    error_info = {"message": ErrorTypes.INVALID_RESPONSE, "code": 502}
+            if error_info:
+                self._ingest_error(server, error_info, now_utc, batch)
+        return batch
+
+    def _ingest_metrics(
+        self, server: Server, metrics: dict, now_utc: datetime, batch: CycleBatch
+    ) -> None:
+        # Сначала всё, что может упасть на кривом ответе, и только потом учёт состояния:
+        # иначе нода с битыми метриками успела бы отметиться ожившей
+        snapshot_data = self._build_snapshot(server.id, metrics, now_utc)
+        agent_version = metrics.get("agent_version")
+        # Старые ноды этих полей не присылают — пишем обратно то, что уже в базе.
+        node_version = agent_version[:self.NODE_VERSION_MAX_LEN] if agent_version else server.node_version
+        tracked_ports = self._tracked_ports_json(metrics)
+        caps_present, capabilities = self._capabilities_json(metrics)
+        # Сериализуется ответ только тем серверам, чей черёд сохраняться в базу
+        persisted_answer = json.dumps(metrics) if self._metrics_persist.is_due(server.id) else None
+        get_loss_registry().update(server.id, server.name, metrics)
+        get_latest_metrics().put(server.id, metrics)
+        self._unsaved_metrics.add(server.id)
+
+        # Наблюдаемое оживание: нода молчала дольше порога, теперь снова ответила.
+        if server.id in self._down_servers:
+            self._down_servers.discard(server.id)
+            batch.recovered_ids.append(server.id)
+        if server.id in self._open_downtime:
+            self._open_downtime.discard(server.id)
+            batch.downtime_over.append(server.id)
+        if snapshot_data:
+            batch.snapshots.append(snapshot_data)
+        if not caps_present:
+            capabilities = server.node_capabilities
+        elif capabilities != server.node_capabilities:
+            batch.caps_changed.append(server.id)
+        server_update = {
+            "id": server.id,
+            "last_seen": now_utc,
+            "last_error": None,
+            "error_code": None,
+            "node_version": node_version,
+            "tracked_ports": tracked_ports if tracked_ports is not None else server.tracked_ports,
+            "node_capabilities": capabilities,
+        }
+        if persisted_answer is not None:
+            server_update["last_metrics"] = persisted_answer
+        batch.server_updates.append(server_update)
+
+    def _ingest_error(
+        self, server: Server, error_info: dict, now_utc: datetime, batch: CycleBatch
+    ) -> None:
+        # Помечаем "definitively offline" только если раньше нода была живой и давно молчит.
+        if server.id not in self._down_servers and server.last_seen is not None and \
+                self._seconds_since(server.last_seen, now_utc) >= self.DOWN_THRESHOLD_SECONDS:
+            self._down_servers.add(server.id)
+            if server.id not in self._open_downtime:
+                self._open_downtime.add(server.id)
+                batch.newly_down.append((server.id, self._to_naive_utc(server.last_seen)))
+        batch.server_updates.append({
+            "id": server.id,
+            "last_error": error_info["message"],
+            "error_code": error_info["code"],
+        })
+
+    def _answered_last_poll(self, server_id: int) -> bool:
+        """Ответила ли нода на последний запрос метрик — иначе вспомогательные
+        обходы только собрали бы на ней таймауты."""
+        return self._node_failures.get(server_id, 0) == 0
+
     async def _fetch_server_metrics(self, server: Server) -> tuple[Optional[dict], Optional[dict]]:
         """Fetch metrics from a single server with HTTP semaphore + circuit breaker."""
         # Circuit breaker: пропускаем нескольких циклов для сбоящих нод
@@ -950,7 +1097,7 @@ class MetricsCollector:
                 active_ids = list(self._active_servers.keys())
                 async with async_session() as db:
                     result = await db.execute(
-                        select(Server).where(Server.id.in_(active_ids), Server.is_active == True)
+                        select_servers().where(Server.id.in_(active_ids), Server.is_active == True)
                     )
                     servers = result.scalars().all()
                 
@@ -967,7 +1114,7 @@ class MetricsCollector:
         """Cache HAProxy status/rules/certs/firewall for all servers"""
         async with async_session() as db:
             result = await db.execute(
-                select(Server).where(Server.is_active == True)
+                select_servers().where(Server.is_active == True)
             )
             servers = result.scalars().all()
 
@@ -983,20 +1130,26 @@ class MetricsCollector:
             (endpoint, key) for endpoint, key, capability in self.HAPROXY_ENDPOINTS
             if server_allows(server, capability, write=False)
         ]
-        if not endpoints:
+        if not endpoints or not self._answered_last_poll(server.id):
             return
 
         try:
-            async with self._http_sem:
+            async with self._aux_http_sem:
                 client = get_node_client(server)
                 headers = node_auth_headers(server)
+                request_timeout = httpx.Timeout(timeout, connect=self.AUX_CONNECT_TIMEOUT)
                 haproxy_data = {}
 
                 for endpoint, key in endpoints:
                     try:
-                        res = await client.get(f"{server.url}{endpoint}", headers=headers, timeout=timeout)
+                        res = await client.get(
+                            f"{server.url}{endpoint}", headers=headers, timeout=request_timeout
+                        )
                         if res.status_code == 200:
                             haproxy_data[key] = res.json()
+                    except httpx.TransportError:
+                        # Нода не отвечает — остальные эндпоинты дали бы те же таймауты
+                        break
                     except Exception:
                         pass
 
@@ -1067,6 +1220,43 @@ class MetricsCollector:
                 logger.error(f"Xray check error: {e}")
             await asyncio.sleep(self.XRAY_CHECK_INTERVAL)
     
+    async def _probe_xray(self, server: Server, install_path: str) -> tuple[int, bool, bool]:
+        """(id, запущен ли remnanode, найдена ли установка Remnawave nginx)."""
+        # Нода закрыла раздел или не ответила на метрики — оставляем как есть: обнулив,
+        # панель погасила бы бейджи Remnawave, будто ноды с ним и не было
+        if not server_allows(server, Capability.REMNAWAVE, write=False) \
+                or not self._answered_last_poll(server.id):
+            return server.id, server.has_xray_node, server.remnawave_nginx_detected
+
+        request_timeout = httpx.Timeout(self.XRAY_PROBE_TIMEOUT, connect=self.AUX_CONNECT_TIMEOUT)
+        async with self._aux_http_sem:
+            available = False
+            detected = False
+            try:
+                client = get_node_client(server)
+                resp = await client.get(
+                    f"{server.url}/api/remnawave/status",
+                    headers=node_auth_headers(server),
+                    timeout=request_timeout,
+                )
+                if resp.status_code == 200:
+                    available = bool(resp.json().get("available", False))
+            except Exception:
+                return server.id, False, False
+            try:
+                # 404 на старых нодах без эндпоинта — просто «не обнаружено»
+                resp = await client.get(
+                    f"{server.url}/api/remnawave/nginx/discover",
+                    headers=node_auth_headers(server),
+                    params={"path": install_path},
+                    timeout=request_timeout,
+                )
+                if resp.status_code == 200:
+                    detected = bool(resp.json().get("found", False))
+            except Exception:
+                pass
+        return server.id, available, detected
+
     async def _check_xray_on_all_servers(self):
         """Check xray availability on every active server, batch update
         has_xray_node + remnawave_nginx_detected (обнаружение установки Remnawave)."""
@@ -1074,7 +1264,7 @@ class MetricsCollector:
 
         async with async_session() as db:
             result = await db.execute(
-                select(Server).where(Server.is_active == True)
+                select_servers().where(Server.is_active == True)
             )
             servers = result.scalars().all()
             install_path = await get_remnawave_nginx_path(db)
@@ -1082,41 +1272,9 @@ class MetricsCollector:
         if not servers:
             return
 
-        async def _probe(server: Server) -> tuple[int, bool, bool]:
-            # Нода закрыла раздел — оставляем как есть: обнулив, панель погасила бы
-            # бейджи Remnawave, будто ноды с ним и не было
-            if not server_allows(server, Capability.REMNAWAVE, write=False):
-                return server.id, server.has_xray_node, server.remnawave_nginx_detected
-
-            async with self._http_sem:
-                available = False
-                detected = False
-                try:
-                    client = get_node_client(server)
-                    resp = await client.get(
-                        f"{server.url}/api/remnawave/status",
-                        headers=node_auth_headers(server),
-                        timeout=12.0,
-                    )
-                    if resp.status_code == 200:
-                        available = bool(resp.json().get("available", False))
-                except Exception:
-                    return server.id, False, False
-                try:
-                    # 404 на старых нодах без эндпоинта — просто «не обнаружено»
-                    resp = await client.get(
-                        f"{server.url}/api/remnawave/nginx/discover",
-                        headers=node_auth_headers(server),
-                        params={"path": install_path},
-                        timeout=12.0,
-                    )
-                    if resp.status_code == 200:
-                        detected = bool(resp.json().get("found", False))
-                except Exception:
-                    pass
-            return server.id, available, detected
-
-        results = await asyncio.gather(*[_probe(s) for s in servers], return_exceptions=True)
+        results = await asyncio.gather(
+            *[self._probe_xray(s, install_path) for s in servers], return_exceptions=True
+        )
 
         # Batch update changed servers in one session
         changes = []
