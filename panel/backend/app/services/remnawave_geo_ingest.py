@@ -41,6 +41,15 @@ HistoryKey = tuple[int, str, str]
 
 
 @dataclass
+class NodeAnswer:
+    node_uuid: str
+    entries: list[dict]
+    received_at: datetime
+    # Нода на опрос не ответила: её клиенты на этот цикл выпадают из снимка
+    failed: bool = False
+
+
+@dataclass
 class SnapshotEntry:
     last_seen: datetime
     node_uuids: set[str] = field(default_factory=set)
@@ -74,14 +83,18 @@ def _user_id(raw) -> Optional[int]:
 
 
 def merge_node_results(
-    results: list[tuple[str, list[dict]]],
+    answers: list[NodeAnswer],
     allowed_user_ids: set[int],
-    fresh_after: datetime,
+    fresh_window: timedelta,
 ) -> tuple[dict[ParsedKey, SnapshotEntry], dict[HistoryKey, datetime]]:
     snapshot: dict[ParsedKey, SnapshotEntry] = {}
     history: dict[HistoryKey, datetime] = {}
-    for node_uuid, entries in results:
-        for entry in entries:
+    for answer in answers:
+        # Свежесть — от ответа самой ноды, а не от конца цикла: большой парк
+        # опрашивается дольше интервала сбора, и общий порог выбросил бы из снимка
+        # всех клиентов нод, опрошенных первыми.
+        fresh_after = answer.received_at - fresh_window
+        for entry in answer.entries:
             user_id = _user_id(entry.get("userId"))
             if user_id is None or user_id not in allowed_user_ids:
                 continue
@@ -90,7 +103,7 @@ def merge_node_results(
                 seen = parse_remnawave_time(ip_entry.get("lastSeen"))
                 if not ip or len(ip) > MAX_IP_LEN or seen is None:
                     continue
-                history_key = (user_id, ip, node_uuid)
+                history_key = (user_id, ip, answer.node_uuid)
                 known = history.get(history_key)
                 if known is None or seen > known:
                     history[history_key] = seen
@@ -98,9 +111,9 @@ def merge_node_results(
                     continue
                 current = snapshot.get((user_id, ip))
                 if current is None:
-                    snapshot[(user_id, ip)] = SnapshotEntry(seen, {node_uuid})
+                    snapshot[(user_id, ip)] = SnapshotEntry(seen, {answer.node_uuid})
                     continue
-                current.node_uuids.add(node_uuid)
+                current.node_uuids.add(answer.node_uuid)
                 if seen > current.last_seen:
                     current.last_seen = seen
     return snapshot, history
@@ -231,12 +244,14 @@ async def _save_node_cache(nodes: list[dict], now: datetime) -> None:
     if not values:
         return
     async with async_session() as db:
-        stmt = pg_insert(RemnawaveNodeCache).values(values)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["uuid"],
-            set_={col: stmt.excluded[col] for col in ("name", "country_code", "address", "lat", "lon", "updated_at")},
-        )
-        await db.execute(stmt)
+        for i in range(0, len(values), UPSERT_BATCH):
+            stmt = pg_insert(RemnawaveNodeCache).values(values[i:i + UPSERT_BATCH])
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["uuid"],
+                set_={col: stmt.excluded[col]
+                      for col in ("name", "country_code", "address", "lat", "lon", "updated_at")},
+            )
+            await db.execute(stmt)
         await db.commit()
 
 

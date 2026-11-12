@@ -19,6 +19,7 @@ from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_apply_client, node_auth_headers
 from app.services.node_capabilities import Capability, denied_message, server_allows
 from app.services.node_sync_queue import KIND_DNAT_PROFILE, enqueue
+from app.services.profile_rollouts import NO_PROGRESS, RolloutProgress
 
 logger = logging.getLogger(__name__)
 
@@ -246,11 +247,15 @@ async def sync_profile_to_servers(
     db: AsyncSession,
     server_ids: list[int] | None = None,
     queue_failures: bool = True,
+    progress: RolloutProgress = NO_PROGRESS,
 ) -> list[SyncResult]:
     """Раскатать профиль на привязанные серверы (или подмножество).
 
     `queue_failures=False` — вызов из очереди отложенных синков: она сама ведёт
     повторы, а собственная постановка долга обнулила бы её выдержку.
+
+    `progress` узнаёт число серверов и итог по каждому сразу, как тот известен, —
+    по нему страница профиля показывает ход раскатки.
     """
     rules = load_rules(profile)
     # Порядок привязки считается по всем привязанным серверам, а не по подмножеству —
@@ -260,6 +265,7 @@ async def sync_profile_to_servers(
     hashes = {sid: compute_rules_hash(items) for sid, items in rendered.items()}
 
     servers = [s for s in linked if s.is_active and (not server_ids or s.id in server_ids)]
+    progress.expect(len(servers))
     if not servers:
         return []
 
@@ -283,14 +289,18 @@ async def sync_profile_to_servers(
     online = [s for s in servers if is_server_online(s)]
     offline = [s for s in servers if not is_server_online(s)]
     results.extend(await _queue_offline_servers(offline, profile.id, hashes))
+    for settled in results:
+        progress.record(settled)
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
 
     async def _guarded(server: Server) -> SyncResult:
         async with semaphore:
-            return await _sync_single_server(
+            result = await _sync_single_server(
                 server, rendered[server.id], hashes[server.id], profile.id, queue_failures,
             )
+        progress.record(result)
+        return result
 
     results.extend(await asyncio.gather(*[_guarded(s) for s in online]))
     return results

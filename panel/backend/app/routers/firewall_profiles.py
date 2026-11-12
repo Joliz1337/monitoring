@@ -14,13 +14,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import async_session_maker, get_db
 from app.models import FirewallProfile, FirewallSyncLog, Server
+from app.routers.rollouts import profile_rollout_state, start_profile_rollout
 from app.services.firewall_profile_sync import compute_rules_hash, sync_profile_to_servers
 from app.services.firewall_proxy_guard import NODE_API_DEFAULT_PORT
 from app.services.net_utils import PanelIpSource, panel_ip_info
+from app.services.profile_rollouts import NO_PROGRESS, RolloutProgress
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/firewall-profiles", tags=["firewall-profiles"])
+
+ROLLOUT_KIND = "firewall"
 
 
 # ==================== Schemas ====================
@@ -303,6 +307,22 @@ async def _mark_servers_pending(profile: FirewallProfile, db: AsyncSession) -> N
     )
 
 
+async def _roll_out_profile(
+    profile_id: int,
+    force: bool = False,
+    server_ids: list[int] | None = None,
+    progress: RolloutProgress = NO_PROGRESS,
+) -> None:
+    """Раскатка в собственной сессии БД: сессия запроса, запустившего её, к этому
+    времени уже закрыта."""
+    async with async_session_maker() as db:
+        profile = await db.get(FirewallProfile, profile_id)
+        if profile:
+            await sync_profile_to_servers(
+                profile, db, server_ids=server_ids, force=force, progress=progress,
+            )
+
+
 async def _bg_sync_profile(
     profile_id: int,
     force: bool = False,
@@ -311,16 +331,10 @@ async def _bg_sync_profile(
     """Фоновая синхронизация профиля. Без server_ids — на все привязанные серверы,
     с ними — только на указанные (привязка одного сервера не трогает остальные:
     apply на ноде идёт через `ufw --force reset`, то есть не бесплатен)."""
-    async with async_session_maker() as db:
-        try:
-            result = await db.execute(
-                select(FirewallProfile).where(FirewallProfile.id == profile_id)
-            )
-            profile = result.scalar_one_or_none()
-            if profile:
-                await sync_profile_to_servers(profile, db, server_ids=server_ids, force=force)
-        except Exception as e:
-            logger.error("Background firewall sync failed for profile %s: %s", profile_id, e)
+    try:
+        await _roll_out_profile(profile_id, force, server_ids)
+    except Exception as e:
+        logger.error("Background firewall sync failed for profile %s: %s", profile_id, e)
 
 
 # ==================== Available servers (до /{profile_id}) ====================
@@ -844,7 +858,7 @@ async def unlink_server(profile_id: int, server_id: int, db: AsyncSession = Depe
 
 # ==================== Sync ====================
 
-@router.post("/{profile_id}/sync")
+@router.post("/{profile_id}/sync", status_code=202)
 async def sync_all(
     profile_id: int,
     force: bool = False,
@@ -852,23 +866,19 @@ async def sync_all(
     db: AsyncSession = Depends(get_db),
     _=Depends(verify_auth),
 ):
-    """Без тела — синхронизация всех привязанных серверов, с server_ids — только выбранных."""
-    profile = await _get_profile(profile_id, db)
+    """Запускает раскатку фоновым заданием и сразу отдаёт его состояние; ход — GET того же пути.
+    Без тела — все привязанные серверы, с server_ids — только выбранные."""
+    await _get_profile(profile_id, db)
     server_ids = data.server_ids if data and data.server_ids else None
-    results = await sync_profile_to_servers(profile, db, server_ids=server_ids, force=force)
-    return {
-        "results": [
-            {
-                "server_id": r.server_id,
-                "server_name": r.server_name,
-                "success": r.success,
-                "message": r.message,
-                "rolled_back": r.rolled_back,
-                "queued": r.queued,
-            }
-            for r in results
-        ]
-    }
+    return start_profile_rollout(
+        ROLLOUT_KIND, profile_id,
+        lambda progress: _roll_out_profile(profile_id, force, server_ids, progress),
+    )
+
+
+@router.get("/{profile_id}/sync")
+async def sync_state(profile_id: int, _=Depends(verify_auth)):
+    return profile_rollout_state(ROLLOUT_KIND, profile_id)
 
 
 @router.post("/{profile_id}/sync/{server_id}")

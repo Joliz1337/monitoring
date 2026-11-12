@@ -336,6 +336,29 @@ export interface ServerMetrics {
   }
 }
 
+// Срез ответа ноды в списке серверов (GET /servers?include_metrics=true): только то,
+// что читают карточки дашборда, сводка парка, дерево инфраструктуры и поиск по IP.
+// Полный ответ весил ~15 КБ на сервер — 30 МБ на 2000 нод при каждом опросе.
+// Набор полей обязан совпадать с card_metrics() в backend/app/services/server_card_metrics.py:
+// поля, которого там нет, в списке не будет. Полный ответ — proxyApi.getMetrics()
+export interface ServerCardMetrics {
+  cpu: Pick<
+    ServerMetrics['cpu'],
+    'usage_percent' | 'per_cpu_percent' | 'cores_logical' | 'load_avg_1' | 'load_avg_5' | 'load_avg_15'
+  >
+  memory: { ram: Pick<ServerMetrics['memory']['ram'], 'percent' | 'used' | 'total'> }
+  // Только первый раздел — его показывает карточка
+  disk: { partitions: Array<Pick<ServerMetrics['disk']['partitions'][number], 'percent' | 'used' | 'total'>> }
+  network: {
+    total: Pick<ServerMetrics['network']['total'], 'rx_bytes_per_sec' | 'tx_bytes_per_sec'> | null
+    // Адреса для поиска: без виртуальных карт, петли и link-local
+    interfaces: Array<{ addresses: Array<{ address: string }> }>
+  }
+  system: Pick<ServerMetrics['system'], 'hostname' | 'os' | 'uptime_seconds'>
+  certificates?: { closest_expiry: Pick<CertificateExpiry, 'domain' | 'days_left' | 'expired'> }
+  window?: Pick<NodeWindow, 'cpu_avg' | 'per_cpu_avg' | 'net_rx_avg' | 'net_tx_avg'>
+}
+
 export interface HAProxyRule {
   name: string
   rule_type: 'tcp' | 'https'
@@ -553,7 +576,7 @@ export const authApi = {
 }
 
 export interface ServerWithMetrics extends Server {
-  metrics?: ServerMetrics | null
+  metrics?: ServerCardMetrics | null
   status?: 'online' | 'offline' | 'loading' | 'error'
 }
 
@@ -2826,6 +2849,23 @@ export const wildcardSSLApi = {
     api.delete<{ success: boolean; presets: WildcardReloadCmdPreset[] }>('/wildcard-ssl/reload-cmd-presets', { data: { name } }),
 }
 
+// ==================== Раскатка профилей ====================
+
+// «Синхронизировать всё» в профилях HAProxy, Remnawave nginx, Firewall и DNAT идёт
+// на бэкенде фоновой задачей: POST …/sync запускает её, GET …/sync отдаёт последнюю.
+// R — итог по одному серверу
+export interface ProfileRollout<R> {
+  job_id: string
+  status: 'running' | 'completed' | 'failed'
+  // null, пока бэкенд не посчитал серверы
+  total: number | null
+  done: number
+  // Заполнено только у упавшей раскатки
+  error: string | null
+  // Приходят один раз — когда раскатка уже не идёт
+  results?: R[]
+}
+
 // ==================== HAProxy Config Profiles ====================
 
 export interface HAProxyConfigProfile {
@@ -3028,7 +3068,9 @@ export const haproxyProfilesApi = {
   updateServerAddresses: (profileId: number, serverId: number, data: { listen_ips: string[]; source_ips: string[] }) =>
     api.put<HAProxyServerAddressesResult>(`/haproxy-profiles/${profileId}/servers/${serverId}/addresses`, data, { timeout: 60000 }),
   syncAll: (profileId: number) =>
-    api.post<{ results: HAProxySyncResult[] }>(`/haproxy-profiles/${profileId}/sync`),
+    api.post<{ job: ProfileRollout<HAProxySyncResult> }>(`/haproxy-profiles/${profileId}/sync`),
+  syncState: (profileId: number) =>
+    api.get<{ job: ProfileRollout<HAProxySyncResult> | null }>(`/haproxy-profiles/${profileId}/sync`),
   syncOne: (profileId: number, serverId: number) =>
     api.post<HAProxySyncResult>(`/haproxy-profiles/${profileId}/sync/${serverId}`),
   getSyncLog: (profileId: number, limit?: number) =>
@@ -3197,7 +3239,9 @@ export const remnawaveNginxApi = {
   unlinkServer: (profileId: number, serverId: number) =>
     api.delete(`/remnawave-nginx-profiles/${profileId}/servers/${serverId}`),
   syncAll: (profileId: number) =>
-    api.post<{ results: RemnawaveNginxSyncResult[] }>(`/remnawave-nginx-profiles/${profileId}/sync`, undefined, { timeout: 120000 }),
+    api.post<{ job: ProfileRollout<RemnawaveNginxSyncResult> }>(`/remnawave-nginx-profiles/${profileId}/sync`),
+  syncState: (profileId: number) =>
+    api.get<{ job: ProfileRollout<RemnawaveNginxSyncResult> | null }>(`/remnawave-nginx-profiles/${profileId}/sync`),
   syncOne: (profileId: number, serverId: number) =>
     api.post<RemnawaveNginxSyncResult>(`/remnawave-nginx-profiles/${profileId}/sync/${serverId}`, undefined, { timeout: 90000 }),
   getSyncLog: (profileId: number, limit?: number) =>
@@ -3375,13 +3419,15 @@ export const firewallProfilesApi = {
       `/firewall-profiles/${profileId}/servers/bulk-unlink`, { server_ids: serverIds },
     ),
   syncAll: (profileId: number, force = false) =>
-    api.post<{ results: FirewallSyncResult[] }>(
+    api.post<{ job: ProfileRollout<FirewallSyncResult> }>(
       `/firewall-profiles/${profileId}/sync`, null, { params: { force } },
     ),
   syncSelected: (profileId: number, serverIds: number[], force = false) =>
-    api.post<{ results: FirewallSyncResult[] }>(
+    api.post<{ job: ProfileRollout<FirewallSyncResult> }>(
       `/firewall-profiles/${profileId}/sync`, { server_ids: serverIds }, { params: { force } },
     ),
+  syncState: (profileId: number) =>
+    api.get<{ job: ProfileRollout<FirewallSyncResult> | null }>(`/firewall-profiles/${profileId}/sync`),
   syncOne: (profileId: number, serverId: number, force = false) =>
     api.post<FirewallSyncResult>(
       `/firewall-profiles/${profileId}/sync/${serverId}`, null, { params: { force } },
@@ -3696,7 +3742,9 @@ export const dnatProfilesApi = {
   unlinkServer: (profileId: number, serverId: number) =>
     api.delete(`/dnat-profiles/${profileId}/servers/${serverId}`),
   syncAll: (profileId: number) =>
-    api.post<{ results: DnatSyncResult[] }>(`/dnat-profiles/${profileId}/sync`),
+    api.post<{ job: ProfileRollout<DnatSyncResult> }>(`/dnat-profiles/${profileId}/sync`),
+  syncState: (profileId: number) =>
+    api.get<{ job: ProfileRollout<DnatSyncResult> | null }>(`/dnat-profiles/${profileId}/sync`),
   syncOne: (profileId: number, serverId: number) =>
     api.post<DnatSyncResult>(`/dnat-profiles/${profileId}/sync/${serverId}`),
   getLog: (profileId: number, limit = 50) =>

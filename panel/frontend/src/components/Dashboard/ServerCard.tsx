@@ -20,7 +20,7 @@ import {
   Database,
   Activity,
 } from 'lucide-react'
-import { Server, ServerMetrics } from '../../api/client'
+import { Server, ServerCardMetrics } from '../../api/client'
 import StatusBadge from '../ui/StatusBadge'
 import ProgressBar from '../ui/ProgressBar'
 import { formatBytes, formatBitsPerSecLocalized, formatUptime, formatTimeAgo, extractHost } from '../../utils/format'
@@ -51,7 +51,7 @@ function getLoadAvgColor(loadAvg: number, coresLogical: number): string {
 
 export interface ServerCardProps {
   server: Server & {
-    metrics?: ServerMetrics | null
+    metrics?: ServerCardMetrics | null
     traffic?: ServerTraffic | null
     status: 'online' | 'offline' | 'loading' | 'error'
     last_seen?: string | null

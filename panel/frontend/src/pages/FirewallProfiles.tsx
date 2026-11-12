@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRememberedState } from '../hooks/useRememberedState'
 import { useOpenIds } from '../hooks/useOpenIds'
+import { useProfileRollout, type RolloutProgress } from '../hooks/useProfileRollout'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
@@ -771,7 +772,7 @@ function ProfileListItem({
 function ProfileHeader({
   profile,
   saving,
-  syncing,
+  rollout,
   forceSync,
   onForceChange,
   onSyncAll,
@@ -782,7 +783,7 @@ function ProfileHeader({
 }: {
   profile: FirewallProfileWithServers
   saving: boolean
-  syncing: boolean
+  rollout: RolloutProgress | null
   forceSync: boolean
   onForceChange: (v: boolean) => void
   onSyncAll: () => void
@@ -871,11 +872,12 @@ function ProfileHeader({
         <Tooltip label="Раскатать профиль на все привязанные серверы">
           <button
             onClick={onSyncAll}
-            disabled={syncing || profile.servers.length === 0}
+            disabled={rollout !== null || profile.servers.length === 0}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50"
           >
-            {syncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            {rollout ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
             Синхронизировать все
+            {rollout?.total != null && <span className="tabular-nums">{rollout.done}/{rollout.total}</span>}
           </button>
         </Tooltip>
         <Tooltip label="Создать копию профиля со всеми правилами">
@@ -1235,6 +1237,7 @@ function ServersTab({
   syncingServerId,
   forceSync,
   bulkBusy,
+  rolloutRunning,
   onSyncOne,
   onUnlink,
   onLink,
@@ -1247,6 +1250,7 @@ function ServersTab({
   syncingServerId: number | null
   forceSync: boolean
   bulkBusy: boolean
+  rolloutRunning: boolean
   onSyncOne: (serverId: number) => void
   onUnlink: (serverId: number) => void
   onLink: (serverId: number) => void
@@ -1383,6 +1387,7 @@ function ServersTab({
     setSelectedLinked(new Set())
   }
 
+  const syncSelectedBusy = bulkBusy || rolloutRunning
   const searching = searchQuery.trim().length > 0
   const hasFolders = grouped.folders.size > 0
   const noCandidates = filteredGroups.folders.size === 0 && filteredGroups.noFolder.length === 0
@@ -1515,10 +1520,10 @@ function ServersTab({
             <div className="flex items-center gap-2">
               <button
                 onClick={handleSyncSelectedClick}
-                disabled={bulkBusy}
+                disabled={syncSelectedBusy}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-accent-400 hover:text-accent-300 bg-accent-500/10 hover:bg-accent-500/20 transition-colors disabled:opacity-50"
               >
-                {bulkBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                {syncSelectedBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                 Синхронизировать выбранные ({selectedLinkedIds.length})
               </button>
               <button
@@ -1720,7 +1725,6 @@ function ProfileDetail({
   const [log, setLog] = useState<FirewallSyncLogEntry[]>([])
   const [logLoading, setLogLoading] = useState(false)
   const [savingHeader, setSavingHeader] = useState(false)
-  const [syncing, setSyncing] = useState(false)
   const [syncingServerId, setSyncingServerId] = useState<number | null>(null)
   const [forceSync, setForceSync] = useState(false)
   const [bulkBusy, setBulkBusy] = useState(false)
@@ -1857,34 +1861,25 @@ function ProfileDetail({
     else toast.warning(`Синхронизация: ${ok} успешно, ${fail} с ошибками${queuedNote}`)
   }
 
-  const handleSyncAll = async () => {
-    if (!confirmSshLockout('все привязанные серверы')) return
-    setSyncing(true)
-    try {
-      const res = await firewallProfilesApi.syncAll(profileId, forceSync)
-      reportSyncResults(res.data.results)
+  const { rollout, start: startRollout } = useProfileRollout(profileId, {
+    fetchState: firewallProfilesApi.syncState,
+    onCompleted: reportSyncResults,
+    onFinished: async () => {
       await fetchProfile()
       onProfileChanged()
-    } catch (err) {
-      toast.error(extractErrorMessage(err, 'Синхронизация не удалась'))
-    } finally {
-      setSyncing(false)
-    }
+    },
+    failedText: 'Синхронизация не удалась',
+    lostText: 'Итог синхронизации неизвестен — похоже, панель перезапускалась. Проверьте статусы серверов',
+  })
+
+  const handleSyncAll = async () => {
+    if (!confirmSshLockout('все привязанные серверы')) return
+    await startRollout(() => firewallProfilesApi.syncAll(profileId, forceSync))
   }
 
   const handleSyncSelected = async (serverIds: number[]) => {
     if (!confirmSshLockout(`выбранные серверы (${serverIds.length})`)) return
-    setBulkBusy(true)
-    try {
-      const res = await firewallProfilesApi.syncSelected(profileId, serverIds, forceSync)
-      reportSyncResults(res.data.results)
-      await fetchProfile()
-      onProfileChanged()
-    } catch (err) {
-      toast.error(extractErrorMessage(err, 'Синхронизация не удалась'))
-    } finally {
-      setBulkBusy(false)
-    }
+    await startRollout(() => firewallProfilesApi.syncSelected(profileId, serverIds, forceSync))
   }
 
   const handleSyncOne = async (serverId: number) => {
@@ -2059,7 +2054,7 @@ function ProfileDetail({
       <ProfileHeader
         profile={profile}
         saving={savingHeader}
-        syncing={syncing}
+        rollout={rollout}
         forceSync={forceSync}
         onForceChange={setForceSync}
         onSyncAll={handleSyncAll}
@@ -2107,6 +2102,7 @@ function ProfileDetail({
           syncingServerId={syncingServerId}
           forceSync={forceSync}
           bulkBusy={bulkBusy}
+          rolloutRunning={rollout !== null}
           onSyncOne={handleSyncOne}
           onUnlink={handleUnlink}
           onLink={handleLink}

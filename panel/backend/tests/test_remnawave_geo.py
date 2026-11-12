@@ -1,21 +1,26 @@
-"""Карта клиентов Remnawave: склейка ответов нод и подсчёт мест.
+"""Карта клиентов Remnawave: склейка ответов нод, подсчёт мест и запись кэша нод.
 
 Склейка решает, через какие ноды виден IP и что попадёт в историю, подсчёт —
 сколько клиентов в каком городе. Ошибка здесь видна прямо на карте: потерянная
 нода, клиент не в том городе или упавший на кривой записи цикл сбора.
 """
 
+import asyncio
 import sys
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:  # локальный прогон без установленного рантайма панели
+    from sqlalchemy.dialects import postgresql  # noqa: E402
+
+    from app.services import remnawave_geo_ingest  # noqa: E402
     from app.services.geoip import GeoRecord  # noqa: E402
     from app.services.remnawave_geo_ingest import (  # noqa: E402
-        PlaceCount, merge_node_results, place_counts, plan_geo_resolve,
+        UPSERT_BATCH, NodeAnswer, PlaceCount, merge_node_results, place_counts, plan_geo_resolve,
     )
     from app.services.remnawave_geo_queries import (  # noqa: E402
         CycleCache, PrevPlace, country_rollup, merge_prev, parse_bbox,
@@ -25,11 +30,19 @@ except ImportError as e:  # pragma: no cover
 
 
 NOW = datetime(2026, 11, 9, 12, 0, 0)
-FRESH_AFTER = NOW - timedelta(minutes=5)
+FRESH_WINDOW = timedelta(minutes=5)
+# Цикл сбора дольше интервала: последняя нода парка ответила намного позже первой
+LATE = NOW + 3 * FRESH_WINDOW
+ASYNCPG_MAX_QUERY_ARGS = 32767
+COMMIT = "commit"
 
 
-def _seen(minutes_ago: int) -> str:
-    return (NOW - timedelta(minutes=minutes_ago)).isoformat() + "Z"
+def _seen(minutes_ago: int, before: datetime = NOW) -> str:
+    return (before - timedelta(minutes=minutes_ago)).isoformat() + "Z"
+
+
+def _answer(node_uuid: str, entries: list[dict], received_at: datetime = NOW) -> NodeAnswer:
+    return NodeAnswer(node_uuid, entries, received_at)
 
 
 def _geo(place: str, lat: float | None, lon: float | None, cc: str = "RU") -> GeoRecord:
@@ -38,11 +51,11 @@ def _geo(place: str, lat: float | None, lon: float | None, cc: str = "RU") -> Ge
 
 class MergeNodeResultsTest(unittest.TestCase):
     def test_merge_keeps_nodes_per_ip(self):
-        results = [
-            ("a", [{"userId": 7, "ips": [{"ip": "1.2.3.4", "lastSeen": _seen(3)}]}]),
-            ("b", [{"userId": 7, "ips": [{"ip": "1.2.3.4", "lastSeen": _seen(1)}]}]),
+        answers = [
+            _answer("a", [{"userId": 7, "ips": [{"ip": "1.2.3.4", "lastSeen": _seen(3)}]}]),
+            _answer("b", [{"userId": 7, "ips": [{"ip": "1.2.3.4", "lastSeen": _seen(1)}]}]),
         ]
-        snapshot, history = merge_node_results(results, {7}, FRESH_AFTER)
+        snapshot, history = merge_node_results(answers, {7}, FRESH_WINDOW)
 
         entry = snapshot[(7, "1.2.3.4")]
         self.assertEqual(entry.node_uuids, {"a", "b"})
@@ -50,14 +63,14 @@ class MergeNodeResultsTest(unittest.TestCase):
         self.assertEqual(set(history), {(7, "1.2.3.4", "a"), (7, "1.2.3.4", "b")})
 
     def test_merge_stale_goes_only_to_history(self):
-        results = [("a", [{"userId": 7, "ips": [{"ip": "1.2.3.4", "lastSeen": _seen(30)}]}])]
-        snapshot, history = merge_node_results(results, {7}, FRESH_AFTER)
+        answers = [_answer("a", [{"userId": 7, "ips": [{"ip": "1.2.3.4", "lastSeen": _seen(30)}]}])]
+        snapshot, history = merge_node_results(answers, {7}, FRESH_WINDOW)
 
         self.assertEqual(snapshot, {})
         self.assertEqual(history[(7, "1.2.3.4", "a")], NOW - timedelta(minutes=30))
 
     def test_merge_skips_bad_entries(self):
-        results = [("a", [
+        answers = [_answer("a", [
             {"userId": "12", "ips": [{"ip": "5.5.5.5", "lastSeen": _seen(1)}]},
             {"userId": "x", "ips": [{"ip": "6.6.6.6", "lastSeen": _seen(1)}]},
             {"userId": None, "ips": [{"ip": "6.6.6.7", "lastSeen": _seen(1)}]},
@@ -66,10 +79,94 @@ class MergeNodeResultsTest(unittest.TestCase):
             {"userId": 12, "ips": [{"ip": "6.6.6.9", "lastSeen": "garbage"}]},
             {"userId": 12},
         ])]
-        snapshot, history = merge_node_results(results, {12}, FRESH_AFTER)
+        snapshot, history = merge_node_results(answers, {12}, FRESH_WINDOW)
 
         self.assertEqual(list(snapshot), [(12, "5.5.5.5")])
         self.assertEqual(list(history), [(12, "5.5.5.5", "a")])
+
+    def test_merge_judges_freshness_from_the_answer_of_the_same_node(self):
+        answers = [
+            _answer("early", [{"userId": 7, "ips": [{"ip": "1.1.1.1", "lastSeen": _seen(1)}]}]),
+            _answer("late", [{"userId": 9, "ips": [{"ip": "3.3.3.3", "lastSeen": _seen(1, before=LATE)}]}], LATE),
+        ]
+        snapshot, _ = merge_node_results(answers, {7, 9}, FRESH_WINDOW)
+
+        self.assertEqual(set(snapshot), {(7, "1.1.1.1"), (9, "3.3.3.3")})
+
+    def test_merge_drops_ip_stale_for_its_node_though_newer_than_fresh_ip_of_another(self):
+        answers = [
+            _answer("early", [{"userId": 7, "ips": [{"ip": "1.1.1.1", "lastSeen": _seen(1)}]}]),
+            _answer("late", [{"userId": 8, "ips": [{"ip": "2.2.2.2", "lastSeen": _seen(6, before=LATE)}]}], LATE),
+        ]
+        snapshot, history = merge_node_results(answers, {7, 8}, FRESH_WINDOW)
+
+        self.assertEqual(set(snapshot), {(7, "1.1.1.1")})
+        self.assertEqual(history[(8, "2.2.2.2", "late")], LATE - timedelta(minutes=6))
+
+    def test_merge_lists_only_nodes_where_ip_is_still_fresh(self):
+        answers = [
+            _answer("early", [{"userId": 7, "ips": [{"ip": "1.1.1.1", "lastSeen": _seen(1)}]}]),
+            _answer("late", [{"userId": 7, "ips": [{"ip": "1.1.1.1", "lastSeen": _seen(6, before=LATE)}]}], LATE),
+        ]
+        snapshot, history = merge_node_results(answers, {7}, FRESH_WINDOW)
+
+        self.assertEqual(snapshot[(7, "1.1.1.1")].node_uuids, {"early"})
+        self.assertEqual(set(history), {(7, "1.1.1.1", "early"), (7, "1.1.1.1", "late")})
+
+
+class RecordingSession:
+    """Подмена async_session: копит запросы вместо PostgreSQL."""
+
+    def __init__(self, log: list):
+        self._log = log
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def execute(self, statement):
+        self._log.append(statement.compile(dialect=postgresql.dialect()))
+
+    async def commit(self):
+        self._log.append(COMMIT)
+
+
+class NodeCacheSaveTest(unittest.TestCase):
+    """Кэш нод пишется пачками: один INSERT на весь парк растёт с числом нод и
+    упирается в предел asyncpg — 32767 параметров на запрос при 7 на ноду."""
+
+    @staticmethod
+    def _save(node_count: int) -> list:
+        nodes = [{"uuid": f"node-{i}", "name": f"Node {i}", "countryCode": "DE"} for i in range(node_count)]
+        log: list = []
+        with mock.patch.object(remnawave_geo_ingest, "async_session", lambda: RecordingSession(log)):
+            asyncio.run(remnawave_geo_ingest._save_node_cache(nodes, NOW))
+        return log
+
+    @staticmethod
+    def _uuids(statement) -> list[str]:
+        return [value for name, value in statement.params.items() if name.startswith("uuid_m")]
+
+    def test_fleet_is_written_in_batches_within_one_transaction(self):
+        *statements, last = self._save(2 * UPSERT_BATCH + 1)
+
+        self.assertEqual([len(self._uuids(stmt)) for stmt in statements], [UPSERT_BATCH, UPSERT_BATCH, 1])
+        self.assertEqual(last, COMMIT)
+        self.assertNotIn(COMMIT, statements)
+
+    def test_every_node_is_written_exactly_once(self):
+        node_count = 4 * UPSERT_BATCH + 1
+        *statements, _ = self._save(node_count)
+
+        written = [uuid for stmt in statements for uuid in self._uuids(stmt)]
+        self.assertEqual(sorted(written), sorted(f"node-{i}" for i in range(node_count)))
+
+    def test_statement_fits_the_asyncpg_argument_limit_on_any_fleet(self):
+        *statements, _ = self._save(5000)
+
+        self.assertLessEqual(max(len(stmt.params) for stmt in statements), ASYNCPG_MAX_QUERY_ARGS)
 
 
 class PlaceCountsTest(unittest.TestCase):

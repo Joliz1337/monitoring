@@ -1,5 +1,4 @@
 import asyncio
-import copy
 import gzip
 import hashlib
 import ipaddress
@@ -9,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import Row, select, text, update, bindparam, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import defer
 import re
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, field_validator
@@ -30,7 +28,7 @@ from app.services import ping_block
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.fleet_history import FleetPeriod, load_fleet_history
 from app.services.latest_metrics import get_latest_metrics
-from app.services.metrics_rates import enrich_metrics_with_speeds
+from app.services.server_card_metrics import card_metrics
 from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.time_sync import get_time_sync_service
 from app.services.net_utils import resolve_panel_ip
@@ -280,10 +278,10 @@ class RenameServerFolder(BaseModel):
 # Кэш тяжёлого ответа /servers?include_metrics=true. Метрики меняются раз в цикл
 # коллектора (~10с), поэтому в пределах TTL все вкладки операторов получают готовый
 # JSON без повторных запросов к БД и пересборки. ETag даёт браузеру 304 на неизменных
-# данных — вместо ~1 МБ на каждый поллинг при сотнях нод.
+# данных — вместо сотен килобайт на каждый поллинг при тысячах нод.
 _LIST_CACHE_TTL = 3.0
-# Список сжимается один раз на сборку и вне event loop: сжатие ответа в десятки
-# мегабайт на каждый запрос останавливало бы бэкенд вместе со сбором метрик
+# Список сжимается один раз на сборку и вне event loop: сжатие мегабайтного ответа
+# на каждый запрос останавливало бы бэкенд вместе со сбором метрик
 _LIST_GZIP_LEVEL = 5
 _monotonic = time.monotonic
 
@@ -382,24 +380,8 @@ def _ids_needing_snapshot(latest: dict[int, dict]) -> list[int]:
     return [server_id for server_id, metrics in latest.items() if not metrics.get("live_rates")]
 
 
-def _metrics_with_speeds(metrics: dict, snapshot: Optional[Row]) -> dict:
-    """Ответ ноды для списка; старому агенту скорости дописываются из снапшота.
-
-    Дописывание правит словарь на месте, а он общий для всех читателей
-    хранилища — старому агенту достаётся копия. Остальным она не нужна: их
-    ответ уходит в список как есть.
-    """
-    if not snapshot:
-        return metrics
-    return enrich_metrics_with_speeds(copy.deepcopy(metrics), snapshot)
-
-
 async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
-    # Ответ ноды берётся из памяти: копия в базе тянула бы на каждую сборку
-    # десятки килобайт на сервер
-    result = await db.execute(
-        select(Server).options(defer(Server.last_metrics)).order_by(Server.position, Server.id)
-    )
+    result = await db.execute(select(Server).order_by(Server.position, Server.id))
     servers = result.scalars().all()
 
     latest: dict[int, dict] = {}
@@ -437,7 +419,7 @@ async def _build_servers_list(db: AsyncSession, include_metrics: bool) -> dict:
 
         metrics = latest.get(s.id)
         if include_metrics and metrics:
-            server_info["metrics"] = _metrics_with_speeds(metrics, snapshots_map.get(s.id))
+            server_info["metrics"] = card_metrics(metrics, snapshots_map.get(s.id))
             server_info["status"] = resolve_status(s, offline_threshold)
         elif include_metrics:
             server_info["metrics"] = None

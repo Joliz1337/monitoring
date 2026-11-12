@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useCallback, useRef, forwardRef, type ForwardedRef, type ReactNode } from 'react'
 import { useOpenIds } from '../hooks/useOpenIds'
+import { useProfileRollout } from '../hooks/useProfileRollout'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -1142,7 +1143,6 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
   const [serversStatus, setServersStatus] = useState<HAProxyServerStatus[]>([])
   const [syncLog, setSyncLog] = useState<HAProxySyncLogEntry[]>([])
   const [loading, setLoading] = useState(true)
-  const [syncing, setSyncing] = useState(false)
   const [syncingServerId, setSyncingServerId] = useState<number | null>(null)
   const [startingServerId, setStartingServerId] = useState<number | null>(null)
   const [startingAll, setStartingAll] = useState(false)
@@ -1360,21 +1360,26 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
   }
 
   // ---- Sync ----
-  const handleSyncAll = async () => {
-    setSyncing(true)
-    try {
-      const res = await haproxyProfilesApi.syncAll(profileId)
-      const results = res.data.results
-      const ok = results.filter((r: HAProxySyncResult) => r.status === 'success').length
-      const queued = results.filter((r: HAProxySyncResult) => r.status === 'queued').length
-      const fail = results.filter((r: HAProxySyncResult) => r.status === 'failed').length
-      if (fail === 0 && queued === 0) toast.success(t('haproxy_configs.sync_success', { count: ok }))
-      else if (fail === 0 && queued > 0) toast.info(t('haproxy_configs.sync_queued', { ok, queued }))
-      else toast.warning(t('haproxy_configs.sync_partial', { ok, fail }))
-      await fetchDetail(); onRefreshList()
-    } catch { toast.error(t('haproxy_configs.sync_error')) }
-    finally { setSyncing(false) }
+  const reportSyncResults = (results: HAProxySyncResult[]) => {
+    const ok = results.filter(r => r.status === 'success').length
+    const queued = results.filter(r => r.status === 'queued').length
+    const fail = results.filter(r => r.status === 'failed').length
+    if (fail === 0 && queued === 0) toast.success(t('haproxy_configs.sync_success', { count: ok }))
+    else if (fail === 0 && queued > 0) toast.info(t('haproxy_configs.sync_queued', { ok, queued }))
+    else toast.warning(t('haproxy_configs.sync_partial', { ok, fail }))
   }
+
+  const { rollout, start: startRollout } = useProfileRollout(profileId, {
+    fetchState: haproxyProfilesApi.syncState,
+    onCompleted: reportSyncResults,
+    // Раскатка кончается в фоне, иногда через минуты: fetchDetail вернул бы в открытый
+    // редактор конфига сохранённый текст и стёр несохранённые правки
+    onFinished: async () => { await (showConfig ? fetchServersStatus() : fetchDetail()); onRefreshList() },
+    failedText: t('haproxy_configs.sync_error'),
+    lostText: t('haproxy_configs.sync_lost'),
+  })
+
+  const handleSyncAll = () => startRollout(() => haproxyProfilesApi.syncAll(profileId))
 
   const handleSyncOne = async (serverId: number) => {
     setSyncingServerId(serverId)
@@ -1750,9 +1755,10 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
                 </button>
               )}
               {serversStatus.length > 0 && (
-                <button onClick={handleSyncAll} disabled={syncing}
+                <button onClick={handleSyncAll} disabled={rollout !== null}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50">
-                  {syncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} {t('haproxy_configs.sync_all')}
+                  {rollout ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} {t('haproxy_configs.sync_all')}
+                  {rollout?.total != null && <span className="tabular-nums">{rollout.done}/{rollout.total}</span>}
                 </button>
               )}
             </div>

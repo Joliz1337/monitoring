@@ -18,7 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import async_session_maker, get_db
 from app.models import RemnawaveNginxProfile, RemnawaveNginxSyncLog, Server
+from app.routers.rollouts import profile_rollout_state, start_profile_rollout
 from app.services.haproxy_profile_sync import compute_config_hash, is_server_online
+from app.services.profile_rollouts import NO_PROGRESS, RolloutProgress
 from app.services.remnawave_nginx_config import (
     CLOUDFLARE_RANGES,
     DOMAIN_RE,
@@ -50,6 +52,8 @@ from app.routers.proxy import get_server_by_id, proxy_request
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/remnawave-nginx-profiles", tags=["remnawave-nginx-profiles"])
+
+ROLLOUT_KIND = "remnawave_nginx"
 
 
 # ==================== Schemas ====================
@@ -541,17 +545,18 @@ async def unlink_server(profile_id: int, server_id: int, db: AsyncSession = Depe
 
 # ==================== Sync ====================
 
-@router.post("/{profile_id}/sync")
+@router.post("/{profile_id}/sync", status_code=202)
 async def sync_all(profile_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
-    profile = await _get_profile(profile_id, db)
-    results = await sync_profile_to_servers(profile, db)
-    return {
-        "results": [
-            {"server_id": r.server_id, "server_name": r.server_name,
-             "success": r.success, "message": r.message, "status": r.status}
-            for r in results
-        ]
-    }
+    """Запускает раскатку фоновым заданием и сразу отдаёт его состояние; ход — GET того же пути."""
+    await _get_profile(profile_id, db)
+    return start_profile_rollout(
+        ROLLOUT_KIND, profile_id, lambda progress: _roll_out_profile(profile_id, progress),
+    )
+
+
+@router.get("/{profile_id}/sync")
+async def sync_state(profile_id: int, _=Depends(verify_auth)):
+    return profile_rollout_state(ROLLOUT_KIND, profile_id)
 
 
 @router.post("/{profile_id}/sync/{server_id}")
@@ -698,15 +703,21 @@ def _splice_or_400(profile: RemnawaveNginxProfile, rules: list[Rule]) -> str:
 
 # ==================== Background tasks ====================
 
+async def _roll_out_profile(profile_id: int, progress: RolloutProgress = NO_PROGRESS) -> None:
+    """Раскатка в собственной сессии БД: сессия запроса, запустившего её, к этому
+    времени уже закрыта."""
+    async with async_session_maker() as db:
+        profile = await db.get(RemnawaveNginxProfile, profile_id)
+        if profile:
+            await sync_profile_to_servers(profile, db, progress=progress)
+
+
 async def _bg_sync_profile(profile_id: int):
     """Фоновая синхронизация профиля на все привязанные серверы."""
-    async with async_session_maker() as db:
-        try:
-            profile = await db.get(RemnawaveNginxProfile, profile_id)
-            if profile:
-                await sync_profile_to_servers(profile, db)
-        except Exception as e:
-            logger.error("Background remnawave nginx sync failed for profile %s: %s", profile_id, e)
+    try:
+        await _roll_out_profile(profile_id)
+    except Exception as e:
+        logger.error("Background remnawave nginx sync failed for profile %s: %s", profile_id, e)
 
 
 async def _bg_sync_server(profile_id: int, server_id: int):

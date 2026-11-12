@@ -5,7 +5,6 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import select, update, func, and_, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import defer
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 import json
@@ -17,6 +16,7 @@ from app.models import (
     Server, HAProxyConfigProfile, HAProxySyncLog, ServerCache, MetricsSnapshot, PanelSettings,
 )
 from app.auth import verify_auth
+from app.routers.rollouts import profile_rollout_state, start_profile_rollout
 from app.services.haproxy_addresses import MAX_ADDRESSES, InvalidAddressError, ServerAddresses, dump_ips, normalize_ips
 from app.services.haproxy_profile_sync import (
     check_addresses_on_node,
@@ -42,12 +42,15 @@ from app.services.haproxy_load_weights import nic_speed_mbps
 from app.services.haproxy_load_weights_runner import get_load_weights_runner
 from app.services.haproxy_validator import validate_config
 from app.services.latest_metrics import get_latest_metrics
+from app.services.profile_rollouts import NO_PROGRESS, RolloutProgress
 from app.services.reserved_ports_sync import _version_tuple
 from app.services.server_ip_owners import load_ip_owners
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/haproxy-profiles", tags=["haproxy-profiles"])
+
+ROLLOUT_KIND = "haproxy"
 
 # Нода младше разбирает только `bind *:PORT` — порт правила с адресом читался бы нулём
 MIN_NODE_VERSION_HAPROXY_ADDRESSES = "10.31.0"
@@ -630,17 +633,18 @@ async def update_server_addresses(
 
 # ==================== Sync ====================
 
-@router.post("/{profile_id}/sync")
+@router.post("/{profile_id}/sync", status_code=202)
 async def sync_all(profile_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
-    profile = await _get_profile(profile_id, db)
-    results = await sync_profile_to_servers(profile, db)
+    """Запускает раскатку фоновым заданием и сразу отдаёт его состояние; ход — GET того же пути."""
+    await _get_profile(profile_id, db)
+    return start_profile_rollout(
+        ROLLOUT_KIND, profile_id, lambda progress: _roll_out_profile(profile_id, progress),
+    )
 
-    return {
-        "results": [
-            {"server_id": r.server_id, "server_name": r.server_name, "success": r.success, "message": r.message, "status": r.status}
-            for r in results
-        ]
-    }
+
+@router.get("/{profile_id}/sync")
+async def sync_state(profile_id: int, _=Depends(verify_auth)):
+    return profile_rollout_state(ROLLOUT_KIND, profile_id)
 
 
 @router.post("/{profile_id}/sync/{server_id}")
@@ -742,18 +746,21 @@ async def update_options(
     return {"success": True, "options": options.to_dict(), "config_content": profile.config_content}
 
 
+async def _roll_out_profile(profile_id: int, progress: RolloutProgress = NO_PROGRESS) -> None:
+    """Раскатка в собственной сессии БД: сессия запроса, запустившего её, к этому
+    времени уже закрыта."""
+    async with async_session_maker() as db:
+        profile = await db.get(HAProxyConfigProfile, profile_id)
+        if profile:
+            await sync_profile_to_servers(profile, db, progress=progress)
+
+
 async def _bg_sync_profile(profile_id: int):
     """Фоновая синхронизация профиля на все привязанные серверы."""
-    async with async_session_maker() as db:
-        try:
-            result = await db.execute(
-                select(HAProxyConfigProfile).where(HAProxyConfigProfile.id == profile_id)
-            )
-            profile = result.scalar_one_or_none()
-            if profile:
-                await sync_profile_to_servers(profile, db)
-        except Exception as e:
-            logger.error("Background sync failed for profile %s: %s", profile_id, e)
+    try:
+        await _roll_out_profile(profile_id)
+    except Exception as e:
+        logger.error("Background sync failed for profile %s: %s", profile_id, e)
 
 
 async def _bg_sync_server_start(profile_id: int, server_id: int):
@@ -942,10 +949,8 @@ async def delete_rule(profile_id: int, rule_name: str, bg: BackgroundTasks, db: 
 async def get_servers_status(profile_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
     await _get_profile(profile_id, db)
 
-    # Ответ ноды берётся из памяти — его копию из базы с серверами не грузим
     result = await db.execute(
         select(Server)
-        .options(defer(Server.last_metrics))
         .where(Server.active_haproxy_profile_id == profile_id)
         .order_by(Server.name)
     )

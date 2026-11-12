@@ -5,7 +5,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '../ui/Tooltip'
 import { formatPercent, formatBitsPerSec } from '../../utils/format'
-import type { ServerMetrics } from '../../api/client'
+import type { ServerCardMetrics } from '../../api/client'
 
 interface InfraServerRowProps {
   server: {
@@ -13,7 +13,7 @@ interface InfraServerRowProps {
     name: string
     url: string
     status: 'online' | 'offline' | 'loading' | 'error'
-    metrics?: ServerMetrics | null
+    metrics?: ServerCardMetrics | null
   }
   highlighted?: boolean
   onRemove?: () => void

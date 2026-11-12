@@ -17,8 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 import httpx
-from sqlalchemy import Select, select, delete, update, bindparam, func, ColumnElement
-from sqlalchemy.orm import defer
+from sqlalchemy import select, delete, update, bindparam, func, ColumnElement
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.loss_registry import get_loss_registry
 from app.services.node_capabilities import (
@@ -32,6 +31,7 @@ from app.database import async_session, Base
 from app.models import (
     Server, ServerCache, MetricsSnapshot, AggregatedMetrics, PanelSettings,
     ServerDowntime, ServerTraffic,
+    DnatSyncLog, FirewallSyncLog, HAProxySyncLog, RemnawaveNginxSyncLog,
 )
 from app.services.haproxy_load_weights import NodeLoad
 from app.services.haproxy_load_weights_runner import get_load_weights_runner
@@ -100,12 +100,6 @@ class CycleBatch:
     newly_down: list[tuple[int, datetime]] = field(default_factory=list)
     downtime_over: list[int] = field(default_factory=list)
     caps_changed: list[int] = field(default_factory=list)
-
-
-def select_servers() -> Select:
-    """Серверы без last_metrics: ответ ноды коллектор держит в памяти, а из базы
-    он тянул бы десятки килобайт на сервер при каждом обходе парка."""
-    return select(Server).options(defer(Server.last_metrics))
 
 
 class PersistSchedule:
@@ -195,6 +189,10 @@ class MetricsCollector:
     CLEANUP_INTERVAL = 300 # cleanup every 5 minutes, not every cycle
     CLEANUP_CHUNK_ROWS = 50_000  # строк за один DELETE ретеншена
     CLEANUP_MAX_CHUNKS = 20      # потолок проходов за вызов, хвост уйдёт в следующий
+    # Журналы раскатки профилей: каждая раскатка пишет строку на сервер, а страница
+    # профиля читает последние пятьдесят
+    SYNC_LOG_RETENTION_DAYS = 30
+    SYNC_LOG_JOURNALS = (FirewallSyncLog, HAProxySyncLog, DnatSyncLog, RemnawaveNginxSyncLog)
 
     CB_FAILURE_THRESHOLD = 3   # после стольких подряд неудач нода уходит в skip
     CB_SKIP_CYCLES = 3         # пропускать N циклов перед повторной попыткой
@@ -437,7 +435,7 @@ class MetricsCollector:
         """Collect metrics from all active servers with bounded concurrency."""
         async with async_session() as db:
             result = await db.execute(
-                select_servers().where(Server.is_active == True)
+                select(Server).where(Server.is_active == True)
             )
             servers = result.scalars().all()
 
@@ -1073,6 +1071,12 @@ class MetricsCollector:
             ServerDowntime.ended_at < now_utc - timedelta(days=self._traffic_day_retention_days),
         )
 
+        # created_at у журналов — timestamptz: граница нужна с часовым поясом,
+        # наивное время драйвер прочёл бы как местное
+        sync_log_cutoff = datetime.now(timezone.utc) - timedelta(days=self.SYNC_LOG_RETENTION_DAYS)
+        for journal in self.SYNC_LOG_JOURNALS:
+            await self._delete_in_chunks(db, journal, journal.created_at < sync_log_cutoff)
+
     async def _aggregation_loop(self):
         """Background loop for data aggregation"""
         while self._running:
@@ -1127,7 +1131,7 @@ class MetricsCollector:
                 active_ids = list(self._active_servers.keys())
                 async with async_session() as db:
                     result = await db.execute(
-                        select_servers().where(Server.id.in_(active_ids), Server.is_active == True)
+                        select(Server).where(Server.id.in_(active_ids), Server.is_active == True)
                     )
                     servers = result.scalars().all()
                 
@@ -1144,7 +1148,7 @@ class MetricsCollector:
         """Cache HAProxy status/rules/certs/firewall for all servers"""
         async with async_session() as db:
             result = await db.execute(
-                select_servers().where(Server.is_active == True)
+                select(Server).where(Server.is_active == True)
             )
             servers = result.scalars().all()
 
@@ -1294,7 +1298,7 @@ class MetricsCollector:
 
         async with async_session() as db:
             result = await db.execute(
-                select_servers().where(Server.is_active == True)
+                select(Server).where(Server.is_active == True)
             )
             servers = result.scalars().all()
             install_path = await get_remnawave_nginx_path(db)

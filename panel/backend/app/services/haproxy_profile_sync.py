@@ -15,6 +15,7 @@ from app.models import Server, HAProxyConfigProfile, HAProxySyncLog
 from app.services.haproxy_addresses import ServerAddresses, load_ips, missing_on_node, render_for_server
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.node_capabilities import Capability, denied_message, server_allows
+from app.services.profile_rollouts import NO_PROGRESS, RolloutProgress
 from app.services.rollout_guard import RolloutGuard
 
 logger = logging.getLogger(__name__)
@@ -215,7 +216,10 @@ async def sync_profile_to_servers(
     db: AsyncSession,
     server_ids: list[int] | None = None,
     ensure_started: bool = False,
+    progress: RolloutProgress = NO_PROGRESS,
 ) -> list[SyncResult]:
+    """`progress` узнаёт число серверов и итог по каждому сразу, как тот известен, —
+    по нему страница профиля показывает ход раскатки."""
     query = select(Server).where(
         Server.active_haproxy_profile_id == profile.id,
         Server.is_active.is_(True),
@@ -225,6 +229,7 @@ async def sync_profile_to_servers(
 
     result = await db.execute(query)
     servers = list(result.scalars().all())
+    progress.expect(len(servers))
     if not servers:
         return []
 
@@ -271,14 +276,18 @@ async def sync_profile_to_servers(
         *[_queue_offline_server(s, profile.id, hashes[s.id]) for s in offline_pending]
     )
     results.extend(offline_results)
+    for settled in results:
+        progress.record(settled)
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
 
     async def _guarded(server: Server) -> SyncResult:
         async with semaphore:
-            return await _sync_single_server(
+            result = await _sync_single_server(
                 server, rendered[server.id], hashes[server.id], profile.id, ensure_started,
             )
+        progress.record(result)
+        return result
 
     with rollout_guard.hold(s.id for s in online):
         online_results = await asyncio.gather(*[_guarded(s) for s in online])

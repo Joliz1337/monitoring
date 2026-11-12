@@ -22,6 +22,7 @@ from app.models import PanelSettings, RemnawaveNginxProfile, RemnawaveNginxSyncL
 from app.services.haproxy_profile_sync import compute_config_hash, is_server_online
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.node_capabilities import Capability, server_allows
+from app.services.profile_rollouts import NO_PROGRESS, RolloutProgress
 from app.services.remnawave_nginx_config import DOMAIN_PLACEHOLDER, render_for_server
 from app.services.rollout_guard import RolloutGuard
 
@@ -215,7 +216,10 @@ async def sync_profile_to_servers(
     db: AsyncSession,
     server_ids: list[int] | None = None,
     ensure_started: bool = False,
+    progress: RolloutProgress = NO_PROGRESS,
 ) -> list[SyncResult]:
+    """`progress` узнаёт число серверов и итог по каждому сразу, как тот известен, —
+    по нему страница профиля показывает ход раскатки."""
     install_path = await get_remnawave_nginx_path(db)
 
     query = select(Server).where(
@@ -227,8 +231,6 @@ async def sync_profile_to_servers(
 
     result = await db.execute(query)
     servers = list(result.scalars().all())
-    if not servers:
-        return []
 
     # Закрытый раздел: статус denied, не pending — pending заставил бы
     # retry_pending_remnawave_nginx_syncs дёргать ноду каждые полминуты
@@ -240,6 +242,11 @@ async def sync_profile_to_servers(
         )
         await db.commit()
         servers = [s for s in servers if s not in denied]
+
+    # Серверы с закрытым разделом в итог не попадают — значит, и в счёт хода не идут
+    progress.expect(len(servers))
+    if not servers:
+        return []
 
     online = [s for s in servers if is_server_online(s)]
     offline = [s for s in servers if not is_server_online(s)]
@@ -268,14 +275,18 @@ async def sync_profile_to_servers(
         *[_queue_offline_server(s, profile.id) for s in offline_pending]
     )
     results.extend(offline_results)
+    for settled in results:
+        progress.record(settled)
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
 
     async def _guarded(server: Server) -> SyncResult:
         async with semaphore:
-            return await _sync_single_server(
+            result = await _sync_single_server(
                 server, profile.config_content, profile.id, install_path, ensure_started
             )
+        progress.record(result)
+        return result
 
     with rollout_guard.hold(s.id for s in online):
         online_results = await asyncio.gather(*[_guarded(s) for s in online])

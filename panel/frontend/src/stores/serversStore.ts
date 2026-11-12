@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { toast } from 'sonner'
-import { serversApi, Server, ServerMetrics } from '../api/client'
+import { serversApi, Server, ServerCardMetrics } from '../api/client'
 import { useSettingsStore } from './settingsStore'
 import { viewMetrics } from '../utils/metricsView'
 
@@ -11,7 +11,7 @@ interface ServerTraffic {
 }
 
 export interface ServerWithMetrics extends Server {
-  metrics?: ServerMetrics | null
+  metrics?: ServerCardMetrics | null
   traffic?: ServerTraffic | null
   status: 'online' | 'offline' | 'loading' | 'error'
   lastUpdated?: Date

@@ -29,3 +29,4 @@ The panel won't let you cut yourself off from a node: a new profile already cont
 - Drift is tracked by a checksum of the rules, so manual edits on a node show up as out of sync. Comments are excluded from it — UFW doesn't store them.
 - Unbinding a server does **not** roll rules back: the firewall stays in its last applied state.
 - The address blocklist works on top of these rules through a separate mechanism and is untouched by profiles.
+- “Синхронизировать все” runs in the background: the button shows how many servers are done. You can close the page — the rollout keeps going, and the counter is back when you return.

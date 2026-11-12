@@ -47,3 +47,4 @@ A balancer physically cannot open more than ~64,000 connections to one backend a
 - Edits made directly on a node are overwritten by the next sync: change the profile instead.
 - Roll non-trivial changes out one node at a time: test node first, then the whole pool.
 - Passing the real client IP to the backend is enabled by the PROXY protocol option; health checks then carry the same header, otherwise the backend drops them and marks the server down.
+- “Sync all” runs in the background: the button shows how many servers are done. You can close the page — the rollout keeps going, and the counter is back when you return.

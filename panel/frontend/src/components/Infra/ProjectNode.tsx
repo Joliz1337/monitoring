@@ -7,14 +7,14 @@ import { toast } from 'sonner'
 import InfraServerRow from './InfraServerRow'
 import ServerSearchDropdown from './ServerSearchDropdown'
 import { formatBitsPerSec } from '../../utils/format'
-import type { InfraProject, ServerMetrics } from '../../api/client'
+import type { InfraProject, ServerCardMetrics } from '../../api/client'
 
 interface ServerData {
   id: number
   name: string
   url: string
   status: 'online' | 'offline' | 'loading' | 'error'
-  metrics?: ServerMetrics | null
+  metrics?: ServerCardMetrics | null
 }
 
 interface ProjectNodeProps {

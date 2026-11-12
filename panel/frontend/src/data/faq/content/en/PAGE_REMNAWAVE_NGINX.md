@@ -81,3 +81,4 @@ Without this, stats, device limits and bans all show `127.0.0.1`:
 - Transaction on the node: backup → write → `nginx -t` → rollback on error → graceful reload. A broken config won't take down a running nginx.
 - The profile replaces `nginx.conf` entirely. Installer-provisioned nodes mount it as a fragment — the node switches the mount to the full config and recreates the container; the unix-socket decoy block from the old fragment disappears, move it into the profile if you rely on it.
 - Statuses: **synced** — applied, **pending** — queued (an offline node catches up on its own), **failed** — error, details in the sync log.
+- “Sync All” runs in the background: the button shows how many servers are done. You can close the page — the rollout keeps going, and the counter is back when you return.

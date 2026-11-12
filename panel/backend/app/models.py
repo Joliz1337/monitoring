@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, BigInteger, Index, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.orm import deferred
 from sqlalchemy.sql import func
 from app.database import Base
 from app.crypto import EncryptedString
@@ -95,8 +96,11 @@ class Server(Base):
     last_error = Column(String(500), nullable=True)
     error_code = Column(Integer, nullable=True)
     
-    # Cached full metrics JSON (updated by background collector)
-    last_metrics = Column(Text, nullable=True)
+    # Копия последнего ответа ноды, ~15 КБ: коллектор пишет её раз в пять минут и
+    # читает при старте, остальные берут ответ из памяти (services/latest_metrics).
+    # Отложена, чтобы обычный select(Server) не тянул её из базы у всего парка;
+    # читается только запросом по имени колонки, не с загруженного объекта.
+    last_metrics = deferred(Column(Text, nullable=True))
     
     # Xray node detection (updated periodically)
     has_xray_node = Column(Boolean, default=False, server_default="false")

@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
 import { useOpenIds } from '../hooks/useOpenIds'
+import { useProfileRollout } from '../hooks/useProfileRollout'
 import { Waypoints, Plus, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Globe, Lock, RotateCw, Download, Settings2, Power } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -22,6 +23,11 @@ import FolderedServerPicker from '../components/servers/FolderedServerPicker'
 import { FAQIcon } from '../components/FAQ'
 
 const DEFAULT_CLIENT_KEEPALIVE = '30s:10s:3'
+// Статус nginx панель спрашивает у каждой ноды профиля отдельно. Все разом — это
+// столько же одновременных обращений панели к нодам, сколько нод в профиле
+const NODE_STATUS_POOL_SIZE = 12
+// Таблица серверов перерисовывается пачками, а не на каждый ответ ноды
+const NODE_STATUS_FLUSH_SIZE = 48
 
 function SyncStatusBadge({ status, online }: { status: string | null; online?: boolean }) {
   const { t } = useTranslation()
@@ -414,7 +420,6 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [nodeStatuses, setNodeStatuses] = useState<Record<number, RemnawaveNginxNodeStatus>>({})
   const [syncLog, setSyncLog] = useState<RemnawaveNginxSyncLogEntry[]>([])
   const [loading, setLoading] = useState(true)
-  const [syncing, setSyncing] = useState(false)
   const [syncingServerId, setSyncingServerId] = useState<number | null>(null)
   const [restartingServerId, setRestartingServerId] = useState<number | null>(null)
   const [showLog, setShowLog] = useState(false)
@@ -436,22 +441,40 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [configModalMouseDown, setConfigModalMouseDown] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const prevSyncedRef = useRef<string>('')
+  const statusSweepRef = useRef(0)
   const { allows } = useNodeCapabilities()
 
   const fetchNodeStatuses = useCallback(async (servers: { server_id: number; online: boolean }[]) => {
-    // Опрос идёт каждые три секунды: закрытая нода иначе давала бы двадцать
-    // отказов в минуту на пустом месте
-    const online = servers.filter(s => s.online && allows(s.server_id, 'remnawave'))
-    const results = await Promise.allSettled(online.map(s => remnawaveNginxApi.getNodeStatus(s.server_id)))
-    setNodeStatuses(prev => {
-      const next = { ...prev }
-      online.forEach((s, i) => {
-        const r = results[i]
-        if (r.status === 'fulfilled') next[s.server_id] = r.value.data
-      })
-      return next
-    })
+    // Ноду, закрытую для панели, не спрашиваем: в ответ пришёл бы только отказ
+    const queue = servers.filter(s => s.online && allows(s.server_id, 'remnawave'))
+    // Новый обход отменяет прежний: после каждой правки профиля они шли бы друг поверх друга
+    const sweep = ++statusSweepRef.current
+    let fresh: Record<number, RemnawaveNginxNodeStatus> = {}
+    const flush = () => {
+      const batch = fresh
+      fresh = {}
+      setNodeStatuses(prev => ({ ...prev, ...batch }))
+    }
+    const worker = async () => {
+      while (sweep === statusSweepRef.current) {
+        const server = queue.shift()
+        if (!server) return
+        const status = await remnawaveNginxApi.getNodeStatus(server.server_id).then(res => res.data, () => null)
+        if (sweep !== statusSweepRef.current) return
+        if (status) fresh[server.server_id] = status
+        if (Object.keys(fresh).length >= NODE_STATUS_FLUSH_SIZE) flush()
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(NODE_STATUS_POOL_SIZE, queue.length) }, worker))
+    if (sweep === statusSweepRef.current) flush()
   }, [allows])
+
+  useEffect(() => () => { statusSweepRef.current++ }, [])
+
+  const refreshNodeStatus = useCallback(async (serverId: number) => {
+    const status = await remnawaveNginxApi.getNodeStatus(serverId).then(res => res.data, () => null)
+    if (status) setNodeStatuses(prev => ({ ...prev, [serverId]: status }))
+  }, [])
 
   const fetchServersStatus = useCallback(async () => {
     try {
@@ -619,21 +642,26 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   }
 
   // ---- Sync ----
-  const handleSyncAll = async () => {
-    setSyncing(true)
-    try {
-      const res = await remnawaveNginxApi.syncAll(profileId)
-      const results = res.data.results
-      const ok = results.filter((r: RemnawaveNginxSyncResult) => r.status === 'success').length
-      const queued = results.filter((r: RemnawaveNginxSyncResult) => r.status === 'queued').length
-      const fail = results.filter((r: RemnawaveNginxSyncResult) => r.status === 'failed').length
-      if (fail === 0 && queued === 0) toast.success(t('remnawave_nginx.sync_success', { count: ok }))
-      else if (fail === 0 && queued > 0) toast.info(t('remnawave_nginx.sync_queued', { ok, queued }))
-      else toast.warning(t('remnawave_nginx.sync_partial', { ok, fail }))
-      await fetchDetail(); onRefreshList()
-    } catch { toast.error(t('remnawave_nginx.sync_error')) }
-    finally { setSyncing(false) }
+  const reportSyncResults = (results: RemnawaveNginxSyncResult[]) => {
+    const ok = results.filter(r => r.status === 'success').length
+    const queued = results.filter(r => r.status === 'queued').length
+    const fail = results.filter(r => r.status === 'failed').length
+    if (fail === 0 && queued === 0) toast.success(t('remnawave_nginx.sync_success', { count: ok }))
+    else if (fail === 0 && queued > 0) toast.info(t('remnawave_nginx.sync_queued', { ok, queued }))
+    else toast.warning(t('remnawave_nginx.sync_partial', { ok, fail }))
   }
+
+  const { rollout, start: startRollout } = useProfileRollout(profileId, {
+    fetchState: remnawaveNginxApi.syncState,
+    onCompleted: reportSyncResults,
+    // Раскатка кончается в фоне, иногда через минуты: fetchDetail вернул бы в открытый
+    // редактор конфига сохранённый текст и стёр несохранённые правки
+    onFinished: async () => { await (showConfig ? fetchServersStatus() : fetchDetail()); onRefreshList() },
+    failedText: t('remnawave_nginx.sync_error'),
+    lostText: t('remnawave_nginx.sync_lost'),
+  })
+
+  const handleSyncAll = () => startRollout(() => remnawaveNginxApi.syncAll(profileId))
 
   const handleSyncOne = async (serverId: number) => {
     setSyncingServerId(serverId)
@@ -653,7 +681,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
     try {
       await remnawaveNginxApi.restartNode(serverId)
       toast.success(t('remnawave_nginx.restarted'))
-      fetchNodeStatuses([{ server_id: serverId, online: true }])
+      refreshNodeStatus(serverId)
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || t('remnawave_nginx.restart_error'))
     } finally { setRestartingServerId(null) }
@@ -965,9 +993,10 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                 <Link2 className="w-3.5 h-3.5" /> {t('remnawave_nginx.add_server')}
               </button>
               {serversStatus.length > 0 && (
-                <button onClick={handleSyncAll} disabled={syncing}
+                <button onClick={handleSyncAll} disabled={rollout !== null}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50">
-                  {syncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} {t('remnawave_nginx.sync_all')}
+                  {rollout ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} {t('remnawave_nginx.sync_all')}
+                  {rollout?.total != null && <span className="tabular-nums">{rollout.done}/{rollout.total}</span>}
                 </button>
               )}
             </div>

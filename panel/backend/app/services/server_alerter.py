@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 from typing import Optional
 
 from sqlalchemy import select, delete, func
-from sqlalchemy.orm import defer
 
 from app.database import async_session
 from app.models import Server, AlertSettings, AlertHistory, PacketLossEpisode, PacketLossRelayIncident
@@ -399,12 +398,8 @@ class ServerAlerter:
         }
 
         async with async_session() as db:
-            # Метрики берутся из памяти (latest_metrics): копия в базе отстаёт на
-            # минуты, а тянуть её — десятки килобайт на сервер каждый обход
             result = await db.execute(
-                select(Server)
-                .options(defer(Server.last_metrics))
-                .where(Server.is_active == True)  # noqa: E712
+                select(Server).where(Server.is_active == True)  # noqa: E712
             )
             servers = result.scalars().all()
 

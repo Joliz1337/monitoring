@@ -24,7 +24,7 @@ from sqlalchemy.dialects import postgresql  # noqa: E402
 from app.models import Server  # noqa: E402
 from app.routers import servers  # noqa: E402
 from app.services.latest_metrics import LatestMetrics  # noqa: E402
-from app.services.metrics_rates import enrich_metrics_with_speeds  # noqa: E402
+from app.services.server_card_metrics import card_metrics  # noqa: E402
 
 SLOW_BUILD_SECONDS = servers._LIST_CACHE_TTL + 2.0
 
@@ -117,23 +117,11 @@ def new_agent_answer() -> dict:
 
 
 def old_agent_answer() -> dict:
-    """Агент без посекундных скоростей: их панель дописывает из последнего снапшота."""
-    return {
-        "network": {
-            "total": {"rx_bytes": 4000, "tx_bytes": 1000},
-            "interfaces": [
-                {"name": "eth0", "rx_bytes": 3000, "tx_bytes": 1000},
-                {"name": "eth1", "rx_bytes": 1000, "tx_bytes": 0},
-            ],
-        },
-        "disk": {"io": {"sda": {"read_bytes": 10, "write_bytes": 30}}},
-    }
+    """Агент без посекундных скоростей: их панель берёт из последнего снапшота."""
+    return {"network": {"total": {"rx_bytes": 4000, "tx_bytes": 1000}}}
 
 
-SNAPSHOT = SimpleNamespace(
-    net_rx_bytes_per_sec=800.0, net_tx_bytes_per_sec=200.0,
-    disk_read_bytes_per_sec=5.0, disk_write_bytes_per_sec=15.0,
-)
+SNAPSHOT = SimpleNamespace(net_rx_bytes_per_sec=800.0, net_tx_bytes_per_sec=200.0)
 
 
 class RecordingSession:
@@ -178,8 +166,23 @@ class ListMetricsTest(unittest.IsolatedAsyncioTestCase):
 
         listed = await self.listed(server(1, last_seen=datetime.now(timezone.utc)))
 
-        self.assertEqual(listed[1]["metrics"], new_agent_answer())
+        self.assertEqual(
+            listed[1]["metrics"]["network"]["total"], {"rx_bytes_per_sec": 111.0, "tx_bytes_per_sec": 222.0},
+        )
         self.assertEqual(listed[1]["status"], "online")
+
+    async def test_list_carries_the_card_slice_not_the_whole_answer(self):
+        # Полный ответ — ~15 КБ на сервер; на 2000 нод список весил бы 30 МБ
+        answer = new_agent_answer()
+        answer["processes"] = {"top_by_cpu": [{"pid": 1, "name": "xray"}]}
+        answer["system"] = {"hostname": "nl-1", "ephemeral_ports": {"sources": []}}
+        self.latest.put(1, answer)
+
+        listed = await self.listed(server(1))
+
+        self.assertEqual(listed[1]["metrics"], card_metrics(answer))
+        self.assertNotIn("processes", listed[1]["metrics"])
+        self.assertEqual(listed[1]["metrics"]["system"], {"hostname": "nl-1"})
 
     async def test_old_agent_gets_snapshot_speeds_and_the_shared_answer_stays_intact(self):
         # Ответ в памяти один на всех читателей: дописанные в него скорости
@@ -189,41 +192,16 @@ class ListMetricsTest(unittest.IsolatedAsyncioTestCase):
 
         listed = await self.listed(server(2))
 
-        self.assertEqual(listed[2]["metrics"]["network"]["total"]["rx_bytes_per_sec"], 800.0)
-        self.assertEqual(listed[2]["metrics"]["network"]["interfaces"][0]["rx_bytes_per_sec"], 600.0)
-        self.assertEqual(listed[2]["metrics"]["disk"]["io"]["sda"]["write_bytes_per_sec"], 15.0)
+        self.assertEqual(
+            listed[2]["metrics"]["network"]["total"], {"rx_bytes_per_sec": 800.0, "tx_bytes_per_sec": 200.0},
+        )
         self.assertEqual(self.latest.get(2), old_agent_answer())
-
-    async def test_answer_with_its_own_speeds_goes_into_the_list_without_a_copy(self):
-        # Копия ответа каждой ноды на каждую сборку — мегабайты аллокаций на большом парке
-        self.latest.put(1, new_agent_answer())
-
-        listed = await self.listed(server(1))
-
-        self.assertIs(listed[1]["metrics"], self.latest.get(1))
 
     async def test_list_does_not_read_saved_answers_from_the_database(self):
         await self.listed(server(1))
 
         self.assertTrue(self.db.queries)
         self.assertFalse([query for query in self.db.queries if "last_metrics" in query])
-
-    async def test_metrics_match_what_the_saved_json_used_to_give(self):
-        def from_saved_json(answer: dict) -> dict:
-            return json.loads(json.dumps(answer))
-
-        self.latest.put(1, new_agent_answer())
-        self.latest.put(2, old_agent_answer())
-        self.snapshots[2] = SNAPSHOT
-
-        listed = await self.listed(server(1), server(2))
-
-        expected = {
-            1: from_saved_json(new_agent_answer()),
-            2: enrich_metrics_with_speeds(from_saved_json(old_agent_answer()), SNAPSHOT),
-        }
-        for server_id, metrics in expected.items():
-            self.assertEqual(json.dumps(listed[server_id]["metrics"]), json.dumps(metrics))
 
     async def test_node_without_an_answer_has_no_metrics(self):
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)

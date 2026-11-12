@@ -12,7 +12,9 @@ Collection flow:
 import asyncio
 import json
 import logging
+import math
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -27,8 +29,8 @@ from app.services.asn_lookup import lookup_ips_cached, group_ips_by_asn, effecti
 from app.services import ip_anomaly_state
 from app.services.known_clients import build_ua_pattern
 from app.services.remnawave_geo_ingest import (
-    DEFAULT_IP_HISTORY_DAYS, SnapshotEntry, cleanup_geo, fleet_ip_names, ingest_cycle, merge_node_results,
-    mark_cycle, parse_remnawave_time,
+    DEFAULT_IP_HISTORY_DAYS, NodeAnswer, SnapshotEntry, cleanup_geo, fleet_ip_names, ingest_cycle,
+    merge_node_results, mark_cycle, parse_remnawave_time,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,9 +38,24 @@ logger = logging.getLogger(__name__)
 UPSERT_BATCH_SIZE = 500
 USER_CACHE_BATCH_SIZE = 100
 HWID_BATCH_SIZE = 200
-IP_POLL_CONCURRENCY = 3
+
+# Нода стоит опросу около 1.3 с: задание в панели Remnawave, секунда ожидания и запрос
+# результата (poll_users_ips). Нод разом берётся столько, чтобы опрос парка занял
+# половину интервала сбора, но не меньше прежних трёх. Потолок бережёт панель
+# пользователя на огромном парке или коротком интервале: одновременно она выполняет
+# не больше 10 таких заданий, остальные ждут в её очереди.
+IP_POLL_MIN_CONCURRENCY = 3
+IP_POLL_MAX_CONCURRENCY = 24
+IP_POLL_SECONDS_PER_NODE = 1.3
+IP_POLL_INTERVAL_SHARE = 0.5
 
 VERSION_PATTERN = re.compile(r'\d')
+
+
+def ip_poll_concurrency(node_count: int, collection_interval: float) -> int:
+    polling_budget = collection_interval * IP_POLL_INTERVAL_SHARE
+    needed = math.ceil(node_count * IP_POLL_SECONDS_PER_NODE / polling_budget)
+    return max(IP_POLL_MIN_CONCURRENCY, min(needed, IP_POLL_MAX_CONCURRENCY))
 
 
 class XrayStatsCollector:
@@ -157,12 +174,23 @@ class XrayStatsCollector:
                 _settings_check_counter += 5
 
     async def _collect_ips_from_api(self):
+        # Обходы не накладываются: на большом парке опрос идёт минутами, и плановый
+        # цикл поверх ручного «собрать сейчас» удвоил бы нагрузку на панель Remnawave
+        if self._collecting:
+            return
+        self._collecting = True
+        try:
+            await self._collect_cycle()
+        finally:
+            self._collecting = False
+
+    async def _collect_cycle(self):
         settings = await self._get_settings()
         if not settings or not settings.api_url or not settings.api_token:
             return
 
         api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
-        self._collecting = True
+        cycle_started = time.monotonic()
         try:
             nodes = await api.get_all_nodes()
             active_nodes = [
@@ -175,19 +203,28 @@ class XrayStatsCollector:
                 logger.debug("No active Remnawave nodes found")
                 return
 
-            sem = asyncio.Semaphore(IP_POLL_CONCURRENCY)
+            concurrency = ip_poll_concurrency(len(active_nodes), self._collection_interval)
+            sem = asyncio.Semaphore(concurrency)
 
-            async def _poll_node(node: dict) -> tuple[str, list[dict]]:
+            async def _poll_node(node: dict) -> NodeAnswer:
                 async with sem:
+                    entries: Optional[list[dict]] = None
                     try:
-                        return node["uuid"], await api.poll_users_ips(node["uuid"])
+                        entries = await api.poll_users_ips(node["uuid"])
                     except RemnawaveAPIError as e:
                         logger.debug(f"IP fetch failed for node {node.get('name', node['uuid'])}: {e.message}")
                     except Exception as e:
                         logger.debug(f"IP fetch error for node {node.get('name', node['uuid'])}: {e}")
-                    return node["uuid"], []
+                    return NodeAnswer(
+                        node["uuid"], entries or [],
+                        received_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                        failed=entries is None,
+                    )
 
-            results = await asyncio.gather(*[_poll_node(n) for n in active_nodes])
+            polling_started = time.monotonic()
+            answers = await asyncio.gather(*[_poll_node(n) for n in active_nodes])
+            polling_seconds = time.monotonic() - polling_started
+            failed_nodes = sum(answer.failed for answer in answers)
 
             ignored = await self._get_ignored_user_ids()
             async with async_session() as db:
@@ -197,8 +234,9 @@ class XrayStatsCollector:
                 active_user_ids = {row[0] for row in active_result.all()}
 
             now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-            freshness_cutoff = now_utc - timedelta(seconds=self._collection_interval)
-            snapshot, history = merge_node_results(results, active_user_ids - ignored, freshness_cutoff)
+            snapshot, history = merge_node_results(
+                answers, active_user_ids - ignored, timedelta(seconds=self._collection_interval),
+            )
 
             if snapshot:
                 await self._save_stats(snapshot)
@@ -213,11 +251,13 @@ class XrayStatsCollector:
 
             self._last_collect_time = datetime.now(timezone.utc).replace(tzinfo=None)
             logger.info(
-                f"IP collection: {len(active_nodes)} nodes, "
+                f"IP collection: {len(active_nodes)} nodes polled in {polling_seconds:.1f}s "
+                f"({concurrency} at once, {failed_nodes} failed), "
                 f"{len({k[0] for k in snapshot})} users with IPs, "
                 f"{len(snapshot)} (user,ip) pairs, "
                 f"{len(history)} history rows, "
-                f"{len(active_user_ids)} ACTIVE in cache"
+                f"{len(active_user_ids)} ACTIVE in cache, "
+                f"cycle {time.monotonic() - cycle_started:.1f}s"
             )
 
             # Проверка аномалий после каждого сбора
@@ -231,7 +271,6 @@ class XrayStatsCollector:
         except Exception as e:
             logger.error(f"Collection error: {e}")
         finally:
-            self._collecting = False
             await api.close()
 
     async def collect_now(self) -> dict:

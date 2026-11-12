@@ -16,7 +16,6 @@ from typing import Callable, Mapping, Optional
 
 import httpx
 from sqlalchemy import Select, select
-from sqlalchemy.orm import defer
 
 from app.database import async_session
 from app.models import HAProxyConfigProfile, Server
@@ -65,12 +64,8 @@ ShapeKey = tuple[str, int]
 
 
 def relay_select() -> Select:
-    """Релеи профилей без last_metrics: копия ответа ноды здесь не нужна, а каждые
-    10 секунд она тянула бы из базы десятки килобайт на сервер впустую."""
-    return (
-        select(Server)
-        .options(defer(Server.last_metrics))
-        .where(Server.is_active == True, Server.active_haproxy_profile_id.isnot(None))  # noqa: E712
+    return select(Server).where(
+        Server.is_active == True, Server.active_haproxy_profile_id.isnot(None)  # noqa: E712
     )
 
 

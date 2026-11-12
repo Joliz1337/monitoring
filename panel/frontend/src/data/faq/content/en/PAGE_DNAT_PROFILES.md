@@ -72,3 +72,4 @@ Turn it off only if such return routing is already in place. Need the real clien
 - Unlinking a server from a profile (and deleting a profile) removes all DNAT rules from the node; an offline node gets this once it is back online. Rules can also be removed manually with the button on the server page.
 - Permissions: the `dnat` domain in the node's NODE_CAPABILITIES.
 - An artificial bandwidth limit for the node (a flat ceiling on the hoster's counters) is on the server page, "Bandwidth limit" card.
+- “Sync all” runs in the background: the button shows how many servers are done. You can close the page — the rollout keeps going, and the counter is back when you return.

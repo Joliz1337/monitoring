@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import async_session_maker, get_db
 from app.models import DnatProfile, DnatSyncLog, Server
+from app.routers.rollouts import profile_rollout_state, start_profile_rollout
 from app.services.dnat_profile_sync import (
     assigned_targets,
     clear_dnat_on_servers,
@@ -24,10 +25,13 @@ from app.services.dnat_profile_sync import (
     split_targets,
     sync_profile_to_servers,
 )
+from app.services.profile_rollouts import NO_PROGRESS, RolloutProgress
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/dnat-profiles", tags=["dnat-profiles"])
+
+ROLLOUT_KIND = "dnat"
 
 # Порт mTLS-nginx ноды: правило на него отрезало бы панель от сервера
 NODE_API_PORT = 9100
@@ -192,14 +196,24 @@ async def _store_rules(profile: DnatProfile, rules: list[dict], db: AsyncSession
     await db.commit()
 
 
-async def _bg_sync_profile(profile_id: int, server_ids: list[int] | None = None):
+async def _roll_out_profile(
+    profile_id: int,
+    server_ids: list[int] | None = None,
+    progress: RolloutProgress = NO_PROGRESS,
+) -> None:
+    """Раскатка в собственной сессии БД: сессия запроса, запустившего её, к этому
+    времени уже закрыта."""
     async with async_session_maker() as db:
-        try:
-            profile = (await db.execute(select(DnatProfile).where(DnatProfile.id == profile_id))).scalar_one_or_none()
-            if profile:
-                await sync_profile_to_servers(profile, db, server_ids=server_ids)
-        except Exception as e:
-            logger.error("Background DNAT sync failed for profile %s: %s", profile_id, e)
+        profile = await db.get(DnatProfile, profile_id)
+        if profile:
+            await sync_profile_to_servers(profile, db, server_ids=server_ids, progress=progress)
+
+
+async def _bg_sync_profile(profile_id: int, server_ids: list[int] | None = None):
+    try:
+        await _roll_out_profile(profile_id, server_ids)
+    except Exception as e:
+        logger.error("Background DNAT sync failed for profile %s: %s", profile_id, e)
 
 
 # ==================== Available servers (до /{profile_id}) ====================
@@ -454,11 +468,18 @@ def _result_to_dict(r) -> dict:
     }
 
 
-@router.post("/{profile_id}/sync")
+@router.post("/{profile_id}/sync", status_code=202)
 async def sync_all(profile_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
-    profile = await _get_profile(profile_id, db)
-    results = await sync_profile_to_servers(profile, db)
-    return {"results": [_result_to_dict(r) for r in results]}
+    """Запускает раскатку фоновым заданием и сразу отдаёт его состояние; ход — GET того же пути."""
+    await _get_profile(profile_id, db)
+    return start_profile_rollout(
+        ROLLOUT_KIND, profile_id, lambda progress: _roll_out_profile(profile_id, progress=progress),
+    )
+
+
+@router.get("/{profile_id}/sync")
+async def sync_state(profile_id: int, _=Depends(verify_auth)):
+    return profile_rollout_state(ROLLOUT_KIND, profile_id)
 
 
 @router.post("/{profile_id}/sync/{server_id}")

@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRememberedState } from '../hooks/useRememberedState'
 import { useOpenIds } from '../hooks/useOpenIds'
+import { useProfileRollout, type RolloutProgress } from '../hooks/useProfileRollout'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
@@ -42,6 +43,7 @@ import {
   DnatProfileWithServers,
   DnatRuleData,
   DnatSyncLogEntry,
+  DnatSyncResult,
   DnatAvailableServer,
   DnatProfileServerInfo,
   DnatProtocol,
@@ -566,7 +568,7 @@ function ProfileListItem({
 function ProfileHeader({
   profile,
   saving,
-  syncing,
+  rollout,
   onSyncAll,
   onClone,
   onDelete,
@@ -575,7 +577,7 @@ function ProfileHeader({
 }: {
   profile: DnatProfileWithServers
   saving: boolean
-  syncing: boolean
+  rollout: RolloutProgress | null
   onSyncAll: () => void
   onClone: () => void
   onDelete: () => void
@@ -647,11 +649,12 @@ function ProfileHeader({
         <Tooltip label={t('dnat_profiles.sync_all_tooltip')}>
           <button
             onClick={onSyncAll}
-            disabled={syncing || profile.servers.length === 0}
+            disabled={rollout !== null || profile.servers.length === 0}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50"
           >
-            {syncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            {rollout ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
             {t('dnat_profiles.sync_all')}
+            {rollout?.total != null && <span className="tabular-nums">{rollout.done}/{rollout.total}</span>}
           </button>
         </Tooltip>
         <Tooltip label={t('dnat_profiles.clone_tooltip')}>
@@ -1319,7 +1322,6 @@ function ProfileDetail({
   const [log, setLog] = useState<DnatSyncLogEntry[]>([])
   const [logLoading, setLogLoading] = useState(false)
   const [savingHeader, setSavingHeader] = useState(false)
-  const [syncing, setSyncing] = useState(false)
   const [syncingServerId, setSyncingServerId] = useState<number | null>(null)
 
   const fetchProfile = useCallback(async () => {
@@ -1423,25 +1425,27 @@ function ProfileDetail({
     }
   }
 
-  const handleSyncAll = async () => {
-    setSyncing(true)
-    try {
-      const res = await dnatProfilesApi.syncAll(profileId)
-      const results = res.data.results
-      const ok = results.filter(r => r.success).length
-      const queued = results.filter(r => r.queued).length
-      const fail = results.length - ok - queued
-      const queuedNote = queued > 0 ? t('dnat_profiles.queued_note', { count: queued }) : ''
-      if (fail === 0) toast.success(t('dnat_profiles.sync_success', { ok, total: results.length, note: queuedNote }))
-      else toast.warning(t('dnat_profiles.sync_partial', { ok, fail, note: queuedNote }))
+  const reportSyncResults = (results: DnatSyncResult[]) => {
+    const ok = results.filter(r => r.success).length
+    const queued = results.filter(r => r.queued).length
+    const fail = results.length - ok - queued
+    const queuedNote = queued > 0 ? t('dnat_profiles.queued_note', { count: queued }) : ''
+    if (fail === 0) toast.success(t('dnat_profiles.sync_success', { ok, total: results.length, note: queuedNote }))
+    else toast.warning(t('dnat_profiles.sync_partial', { ok, fail, note: queuedNote }))
+  }
+
+  const { rollout, start: startRollout } = useProfileRollout(profileId, {
+    fetchState: dnatProfilesApi.syncState,
+    onCompleted: reportSyncResults,
+    onFinished: async () => {
       await fetchProfile()
       onProfileChanged()
-    } catch (err) {
-      toast.error(extractErrorMessage(err, t('dnat_profiles.sync_error')))
-    } finally {
-      setSyncing(false)
-    }
-  }
+    },
+    failedText: t('dnat_profiles.sync_error'),
+    lostText: t('dnat_profiles.sync_lost'),
+  })
+
+  const handleSyncAll = () => startRollout(() => dnatProfilesApi.syncAll(profileId))
 
   const handleSyncOne = async (serverId: number) => {
     setSyncingServerId(serverId)
@@ -1555,7 +1559,7 @@ function ProfileDetail({
       <ProfileHeader
         profile={profile}
         saving={savingHeader}
-        syncing={syncing}
+        rollout={rollout}
         onSyncAll={handleSyncAll}
         onClone={handleClone}
         onDelete={handleDelete}

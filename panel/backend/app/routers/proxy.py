@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import defer
 from typing import Optional, Any, AsyncGenerator
 from datetime import datetime
 import asyncio
@@ -65,11 +64,7 @@ def to_iso_utc(dt: Optional[datetime]) -> Optional[str]:
 
 
 async def get_server_by_id(server_id: int, db: AsyncSession) -> Server:
-    # Без last_metrics: ответ ноды читается из памяти, а этот запрос стоит
-    # перед каждым обращением к ноде и тянул бы с собой десятки килобайт JSON
-    result = await db.execute(
-        select(Server).options(defer(Server.last_metrics)).where(Server.id == server_id)
-    )
+    result = await db.execute(select(Server).where(Server.id == server_id))
     server = result.scalar_one_or_none()
     if not server:
         raise HTTPException(status_code=404)
