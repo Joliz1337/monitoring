@@ -86,7 +86,7 @@ class WatchdogNeverDropTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout.decode())
 
     def test_version_bumped(self):
-        self.assertEqual(self.run_watchdog("version").stdout.decode().strip(), "2.5.0")
+        self.assertEqual(self.run_watchdog("version").stdout.decode().strip(), "2.5.1")
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ set -u
 
 # Bumped when the script logic changes — the panel compares this against what a
 # node reports and auto-reinstalls on drift, so updates roll out without clicks.
-WATCHDOG_VERSION="2.5.0"
+WATCHDOG_VERSION="2.5.1"
 
 STATE_DIR="/opt/monitoring/antiddos"
 STATE_FILE="$STATE_DIR/state.json"
@@ -203,13 +203,28 @@ ensure_allow_set() {
     ipset create "$ALLOW_SET" hash:net family inet hashsize 4096 maxelem 1000000 2>/dev/null || true
 }
 
+# Entries on stdin → `add` lines for one `ipset restore`. The whitelist grows
+# with the fleet (~10k entries at 2000 nodes), and an `ipset add` process per
+# entry took longer than the 30 s the node's nginx gives the sync request.
+# Entries hash:net cannot hold (prefix outside 1..32, octet above 255) are left
+# out: restore stops at the first rejected line, where a per-entry add skipped
+# only that one. So are entries with a leading zero in an octet or the prefix:
+# ipset reads those as octal — it rejects `08` and takes `010` for 8.
+allow_add_lines() {
+    awk -v set_name="$1" -F'[./]' '
+        (NF == 4 || NF == 5 && $5 >= 1 && $5 <= 32) &&
+        $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255 &&
+        $0 !~ "(^|[./])0[0-9]" {
+            print "add", set_name, $0, "-exist"
+        }'
+}
+
 restore_whitelist() {
     ensure_allow_set
     [ -r "$WHITELIST_FILE" ] || return 0
-    local ip
-    grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?' "$WHITELIST_FILE" 2>/dev/null | while read -r ip; do
-        [ -n "$ip" ] && ipset add "$ALLOW_SET" "$ip" 2>/dev/null || true
-    done
+    grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?' "$WHITELIST_FILE" 2>/dev/null \
+        | allow_add_lines "$ALLOW_SET" | ipset restore \
+        || log "whitelist restore failed — $ALLOW_SET may be incomplete until the next sync"
 }
 
 # whitelist-sync: replace the allow set from newline/comma-separated IPs on stdin
@@ -221,11 +236,17 @@ whitelist_sync() {
 
     local swap="${ALLOW_SET}_swap"
     ipset destroy "$swap" 2>/dev/null || true
-    ipset create "$swap" hash:net family inet hashsize 4096 maxelem 1000000 2>/dev/null || true
-    local ip
-    printf '%s\n' "$tmp_new" | while read -r ip; do
-        [ -n "$ip" ] && ipset add "$swap" "$ip" 2>/dev/null || true
-    done
+    # The new set goes live only if it loaded completely: a half-built one would
+    # put whitelisted relays and the panel back under the emergency limits.
+    {
+        echo "create $swap hash:net family inet hashsize 4096 maxelem 1000000 -exist"
+        echo "flush $swap"
+        printf '%s\n' "$tmp_new" | allow_add_lines "$swap"
+    } | ipset restore || {
+        ipset destroy "$swap" 2>/dev/null || true
+        log "whitelist-sync: ipset restore failed — $ALLOW_SET left unchanged"
+        return 1
+    }
     ipset swap "$swap" "$ALLOW_SET" 2>/dev/null || true
     ipset destroy "$swap" 2>/dev/null || true
 
