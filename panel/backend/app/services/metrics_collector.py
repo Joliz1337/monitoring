@@ -135,6 +135,44 @@ class PersistSchedule:
             self._next_at[server_id] = offset + (periods_passed + 1) * self._period
 
 
+class SlowCycles:
+    """Счёт циклов сбора, не уложившихся в интервал, за окно отчёта.
+
+    Такой цикл пропускает такт: на графиках точки идут реже, а со стороны это
+    ничем, кроме лога, не видно. Отдельные медленные циклы на живом парке
+    случаются постоянно, поэтому в лог идёт сводка за окно, а не строка на каждый.
+    """
+
+    def __init__(self, window_seconds: float, clock: Callable[[], float]) -> None:
+        self._window = window_seconds
+        self._clock = clock
+        self._started = clock()
+        self._cycles = 0
+        self._slow = 0
+        self._slowest = 0.0
+
+    def note(self, duration: float, interval: float) -> Optional[str]:
+        """Учесть цикл. На границе окна вернуть сводку, если медленные циклы были."""
+        self._cycles += 1
+        if duration > interval:
+            self._slow += 1
+            self._slowest = max(self._slowest, duration)
+
+        now = self._clock()
+        elapsed = now - self._started
+        if elapsed < self._window:
+            return None
+
+        report = None
+        if self._slow:
+            report = (
+                f"Metrics cycles over the {interval}s interval: {self._slow} of {self._cycles} "
+                f"in the last {elapsed / 60:.0f} min, slowest {self._slowest:.1f}s — ticks are being skipped"
+            )
+        self._started, self._cycles, self._slow, self._slowest = now, 0, 0, 0.0
+        return report
+
+
 class MetricsCollector:
     """Collects metrics from all servers and stores in panel DB"""
     
@@ -153,7 +191,7 @@ class MetricsCollector:
     XRAY_PROBE_TIMEOUT = 12.0
     DB_CONCURRENCY = 10    # max parallel DB sessions
     BATCH_YIELD_EVERY = 100   # нод между передачами управления event loop при разборе ответов
-    OVERRUN_LOG_EVERY = 30    # затянувшийся цикл логируется раз в столько повторов подряд
+    SLOW_CYCLE_REPORT_SECONDS = 600  # сводка о циклах дольше интервала — не чаще раза в окно
     CLEANUP_INTERVAL = 300 # cleanup every 5 minutes, not every cycle
     CLEANUP_CHUNK_ROWS = 50_000  # строк за один DELETE ретеншена
     CLEANUP_MAX_CHUNKS = 20      # потолок проходов за вызов, хвост уйдёт в следующий
@@ -226,7 +264,7 @@ class MetricsCollector:
         self._http_sem = asyncio.Semaphore(self.HTTP_CONCURRENCY)
         self._aux_http_sem = asyncio.Semaphore(self.AUX_HTTP_CONCURRENCY)
         self._db_sem = asyncio.Semaphore(self.DB_CONCURRENCY)
-        self._overrun_streak = 0
+        self._slow_cycles = SlowCycles(self.SLOW_CYCLE_REPORT_SECONDS, clock)
 
         self._node_failures: dict[int, int] = {}
         self._node_skip_cycles: dict[int, int] = {}
@@ -391,17 +429,9 @@ class MetricsCollector:
             await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
 
     def _note_cycle_duration(self, duration: float) -> None:
-        """Цикл длиннее интервала пропускает такты: на графиках точки идут реже,
-        а со стороны это ничем, кроме лога, не видно."""
-        if duration <= self._collect_interval:
-            self._overrun_streak = 0
-            return
-        self._overrun_streak += 1
-        if self._overrun_streak % self.OVERRUN_LOG_EVERY == 1:
-            logger.warning(
-                f"Metrics cycle took {duration:.1f}s with a {self._collect_interval}s interval "
-                f"({self._overrun_streak} in a row): ticks are being skipped"
-            )
+        report = self._slow_cycles.note(duration, self._collect_interval)
+        if report:
+            logger.warning(report)
 
     async def _collect_all_servers(self):
         """Collect metrics from all active servers with bounded concurrency."""

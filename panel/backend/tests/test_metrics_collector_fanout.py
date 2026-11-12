@@ -178,18 +178,63 @@ class CycleBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(1, collector._down_servers)
 
 
-class CycleOverrunTest(unittest.TestCase):
-    def test_cycle_longer_than_the_interval_is_logged_once_not_every_cycle(self):
-        collector = MetricsCollector()
-        with self.assertLogs(metrics_collector.logger, level="WARNING") as captured:
-            for _ in range(5):
-                collector._note_cycle_duration(collector._collect_interval + 4.0)
-        self.assertEqual(len(captured.records), 1)
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
 
-    def test_cycle_within_the_interval_is_silent(self):
-        collector = MetricsCollector()
+    def __call__(self) -> float:
+        return self.now
+
+
+class SlowCycleReportTest(unittest.TestCase):
+    """Циклы сбора, не уложившиеся в интервал, попадают в лог сводкой за окно.
+
+    На живой панели каждый десятый цикл дольше интервала: строка на каждый такой
+    цикл давала предупреждение раз в минуту и прятала в логе всё остальное.
+    """
+
+    FAST = 1.0
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.collector = MetricsCollector(clock=self.clock)
+        self.interval = self.collector._collect_interval
+        self.cycles_per_window = int(MetricsCollector.SLOW_CYCLE_REPORT_SECONDS / self.interval)
+
+    def run_cycles(self, durations: list[float]) -> None:
+        for duration in durations:
+            self.clock.now += self.interval
+            self.collector._note_cycle_duration(duration)
+
+    def window(self, slow_every: int, slow: float) -> list[float]:
+        return [slow if number % slow_every == 0 else self.FAST for number in range(self.cycles_per_window)]
+
+    def test_scattered_slow_cycles_give_one_line_per_window(self):
+        with self.assertLogs(metrics_collector.logger, level="WARNING") as captured:
+            self.run_cycles(self.window(slow_every=10, slow=self.interval + 1.3) * 2)
+        self.assertEqual(len(captured.records), 2)
+
+    def test_report_names_the_share_of_slow_cycles_and_the_slowest_one(self):
+        durations = self.window(slow_every=10, slow=self.interval + 1.3)
+        durations[5] = self.interval + 4.2
+        slow_cycles = sum(duration > self.interval for duration in durations)
+
+        with self.assertLogs(metrics_collector.logger, level="WARNING") as captured:
+            self.run_cycles(durations)
+
+        report = captured.records[0].getMessage()
+        self.assertIn(f"{slow_cycles} of {self.cycles_per_window}", report)
+        self.assertIn(f"{self.interval + 4.2:.1f}s", report)
+
+    def test_window_without_slow_cycles_is_silent(self):
         with self.assertNoLogs(metrics_collector.logger, level="WARNING"):
-            collector._note_cycle_duration(collector._collect_interval / 2)
+            self.run_cycles([self.FAST] * self.cycles_per_window * 2)
+
+    def test_slow_cycles_are_not_carried_into_the_next_window(self):
+        with self.assertLogs(metrics_collector.logger, level="WARNING") as captured:
+            self.run_cycles(self.window(slow_every=10, slow=self.interval + 1.3))
+            self.run_cycles([self.FAST] * self.cycles_per_window)
+        self.assertEqual(len(captured.records), 1)
 
 
 if __name__ == "__main__":
