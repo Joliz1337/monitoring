@@ -10,14 +10,15 @@ import time
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, and_, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_auth
 from app.database import get_db
-from app.models import BlocklistRule, BlocklistSource, Server
+from app.models import AllowlistSource, BlocklistRule, BlocklistSource, Server
 from app.services import ping_block
+from app.services.allowlist_sources import get_allowlist_sources
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.net_utils import is_public_range
 from app.services.ping_block import PingBlockMode, PingBlockScope
@@ -700,6 +701,125 @@ async def refresh_all_sources(
 
 
 # === Settings ===
+
+# === Белый список: списки по URL ===
+
+class AddAllowSourceRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    url: str = Field(..., min_length=1, max_length=500)
+
+    @field_validator("url")
+    @classmethod
+    def _http_url(cls, value: str) -> str:
+        value = value.strip()
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("url must start with http:// or https://")
+        return value
+
+
+class UpdateAllowSourceRequest(BaseModel):
+    enabled: Optional[bool] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+
+
+def _allow_source_to_dict(source: AllowlistSource) -> dict:
+    return {
+        "id": source.id,
+        "name": source.name,
+        "url": source.url,
+        "enabled": source.enabled,
+        "ip_count": source.ip_count,
+        "last_updated": source.last_updated.isoformat() if source.last_updated else None,
+        "error_message": source.error_message,
+    }
+
+
+async def _list_allow_sources(db: AsyncSession) -> list[dict]:
+    rows = (await db.execute(select(AllowlistSource).order_by(AllowlistSource.name))).scalars().all()
+    return [_allow_source_to_dict(source) for source in rows]
+
+
+async def _get_allow_source(db: AsyncSession, source_id: int) -> AllowlistSource:
+    source = (await db.execute(
+        select(AllowlistSource).where(AllowlistSource.id == source_id)
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Source not found")
+    return source
+
+
+@router.get("/allow-sources")
+async def get_allow_sources(db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
+    return {"sources": await _list_allow_sources(db)}
+
+
+@router.post("/allow-sources")
+async def add_allow_source(
+    payload: AddAllowSourceRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Добавить список по URL и сразу скачать его: в ответе уже число адресов
+    или причина, по которой список не разобрался."""
+    exists = (await db.execute(
+        select(AllowlistSource.id).where(AllowlistSource.url == payload.url)
+    )).scalar_one_or_none()
+    if exists:
+        raise HTTPException(status_code=400, detail="Source with this URL already exists")
+    source = AllowlistSource(name=payload.name, url=payload.url, enabled=True)
+    db.add(source)
+    await db.commit()
+
+    await get_allowlist_sources().collect()
+    await db.refresh(source)
+    get_blocklist_manager().request_allowlist_push()
+    return {"success": True, "source": _allow_source_to_dict(source)}
+
+
+@router.put("/allow-sources/{source_id}")
+async def update_allow_source(
+    source_id: int,
+    payload: UpdateAllowSourceRequest,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    source = await _get_allow_source(db, source_id)
+    toggled = payload.enabled is not None and payload.enabled != source.enabled
+    if payload.enabled is not None:
+        source.enabled = payload.enabled
+    if payload.name is not None:
+        source.name = payload.name
+    await db.commit()
+    if toggled:
+        # Включённый список скачивается сразу — в ответе уже итог
+        if payload.enabled:
+            await get_allowlist_sources().collect()
+        get_blocklist_manager().request_allowlist_push()
+    await db.refresh(source)
+    return {"success": True, "source": _allow_source_to_dict(source)}
+
+
+@router.delete("/allow-sources/{source_id}")
+async def delete_allow_source(
+    source_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    await db.delete(await _get_allow_source(db, source_id))
+    await db.commit()
+    get_blocklist_manager().request_allowlist_push()
+    return {"success": True}
+
+
+@router.post("/allow-sources/refresh")
+async def refresh_allow_sources(db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
+    """Скачать все списки заново, не дожидаясь часового срока."""
+    sources = get_allowlist_sources()
+    sources.expire()
+    await sources.collect()
+    get_blocklist_manager().request_allowlist_push()
+    return {"success": True, "sources": await _list_allow_sources(db)}
+
 
 class PingBlockScopeRequest(BaseModel):
     mode: PingBlockMode

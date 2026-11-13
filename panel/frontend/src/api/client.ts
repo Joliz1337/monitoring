@@ -1365,6 +1365,17 @@ export interface SyncStatus {
   error?: string | null
 }
 
+/** Список IP/CIDR по URL (Cloudflare, Yandex Cloud…) — часть белого списка входящих */
+export interface AllowlistSource {
+  id: number
+  name: string
+  url: string
+  enabled: boolean
+  ip_count: number
+  last_updated: string | null
+  error_message: string | null
+}
+
 export const blocklistApi = {
   // Global rules
   getGlobal: (direction: BlocklistDirection = 'in', list_type: BlocklistListType = 'block') =>
@@ -1397,7 +1408,17 @@ export const blocklistApi = {
   deleteSource: (id: number) => api.delete(`/blocklist/sources/${id}`),
   refreshSource: (id: number) => api.post(`/blocklist/sources/${id}/refresh`),
   refreshAll: () => api.post('/blocklist/sources/refresh-all'),
-  
+
+  // Белый список: списки по URL
+  getAllowSources: () => api.get<{ sources: AllowlistSource[] }>('/blocklist/allow-sources'),
+  addAllowSource: (data: { name: string; url: string }) =>
+    api.post<{ success: boolean; source: AllowlistSource }>('/blocklist/allow-sources', data),
+  updateAllowSource: (id: number, data: { enabled?: boolean; name?: string }) =>
+    api.put<{ success: boolean; source: AllowlistSource }>(`/blocklist/allow-sources/${id}`, data),
+  deleteAllowSource: (id: number) => api.delete(`/blocklist/allow-sources/${id}`),
+  refreshAllowSources: () =>
+    api.post<{ success: boolean; sources: AllowlistSource[] }>('/blocklist/allow-sources/refresh'),
+
   // Sync status
   getSyncStatus: () => api.get<SyncStatus>('/blocklist/sync/status'),
 
@@ -1751,7 +1772,6 @@ export interface AntiDdosSettings {
   whitelist_push_interval: number
   status_poll_interval: number
   watchdog_default_enabled: boolean
-  user_cidrs: string[]
   last_push_at: string | null
   last_push_status: string | null
   last_push_count: number
@@ -1774,16 +1794,6 @@ export interface AntiDdosStatus {
   total: number
 }
 
-export interface AntiDdosSource {
-  id: number
-  name: string
-  url: string
-  enabled: boolean
-  ip_count: number
-  last_updated: string | null
-  error_message: string | null
-}
-
 export const antiDdosApi = {
   getSettings: () => api.get<AntiDdosSettings>('/antiddos/settings'),
   updateSettings: (data: Partial<AntiDdosSettings>) =>
@@ -1791,22 +1801,12 @@ export const antiDdosApi = {
   getStatus: () => api.get<AntiDdosStatus>('/antiddos/status'),
   emergencyAll: (enabled: boolean) =>
     api.post<{ success: boolean; nodes: number; ok: number }>('/antiddos/emergency-all', { enabled }),
-  pushWhitelist: () =>
-    api.post<{ success: boolean; whitelist_size: number; nodes: number; ok: number }>('/antiddos/whitelist/push'),
 
   // per-node (proxy)
   setNodeEmergency: (serverId: number, enabled: boolean) =>
     api.post(`/proxy/${serverId}/antiddos/emergency`, { enabled }),
   setNodeWatchdog: (serverId: number, enabled: boolean) =>
     api.post(`/proxy/${serverId}/antiddos/watchdog`, { enabled }),
-
-  // whitelist auto-source lists
-  getSources: () => api.get<{ sources: AntiDdosSource[] }>('/antiddos/sources'),
-  addSource: (data: { name: string; url: string }) => api.post('/antiddos/sources', data),
-  updateSource: (id: number, data: { enabled?: boolean; name?: string }) =>
-    api.put(`/antiddos/sources/${id}`, data),
-  deleteSource: (id: number) => api.delete(`/antiddos/sources/${id}`),
-  refreshSources: () => api.post('/antiddos/sources/refresh'),
 }
 
 // Remnawave types

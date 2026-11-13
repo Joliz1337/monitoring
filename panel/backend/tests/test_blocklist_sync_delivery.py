@@ -956,6 +956,8 @@ class AllowPolicyNodeAddressesTest(unittest.IsolatedAsyncioTestCase):
             ),
         ])
         self.collected: list[tuple] = []
+        self.url_lists: list[str] = []
+        url_lists = SimpleNamespace(collect=mock.AsyncMock(side_effect=lambda: list(self.url_lists)))
 
         latest = get_latest_metrics()
         latest.put(NODE_WITH_METRICS, self.metrics)
@@ -966,6 +968,7 @@ class AllowPolicyNodeAddressesTest(unittest.IsolatedAsyncioTestCase):
             ("collect_node_ips", self._collect_node_ips),
             ("resolve_panel_ip", mock.AsyncMock(return_value="9.9.9.9")),
             ("load_scope", mock.AsyncMock(return_value=PingBlockScope())),
+            ("get_allowlist_sources", lambda: url_lists),
         ):
             patcher = mock.patch.object(bm, target, replacement)
             patcher.start()
@@ -992,6 +995,17 @@ class AllowPolicyNodeAddressesTest(unittest.IsolatedAsyncioTestCase):
     async def test_node_and_panel_addresses_reach_both_directions(self):
         expected = ["5.9.0.10", "5.9.0.11", "5.9.0.20", "9.9.9.9"]
         self.assertEqual(self.policy.ips, {"in": expected, "out": expected})
+
+    async def test_lists_by_url_reach_incoming_only(self):
+        # Списки CDN — про тех, кто приходит к нодам
+        self.url_lists.extend(["104.16.0.0/13", "173.245.48.0/20"])
+
+        policy = await self.manager.build_allow_policy()
+
+        self.assertEqual(
+            [entry for entry in policy.ips["in"] if entry not in policy.ips["out"]],
+            ["104.16.0.0/13", "173.245.48.0/20"],
+        )
 
 
 if __name__ == "__main__":

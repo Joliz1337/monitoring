@@ -5,16 +5,15 @@ import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
-  Siren, ShieldAlert, ShieldCheck, Settings as SettingsIcon, ListChecks,
-  BookOpen, Loader2, RefreshCw, Trash2, Save, Radar, Globe, Plus, Lock,
+  Siren, ShieldAlert, ShieldCheck, Settings as SettingsIcon,
+  BookOpen, Loader2, Radar, Lock,
 } from 'lucide-react'
 import {
   antiDdosApi, type AntiDdosSettings, type AntiDdosStatus, type NodeAntiDdosState,
-  type AntiDdosSource,
 } from '../api/client'
 import { Toggle } from '../components/ui/Toggle'
 
-type TabType = 'control' | 'whitelist' | 'info'
+type TabType = 'control' | 'info'
 
 function ModeBadge({ node }: { node: NodeAntiDdosState }) {
   const { t } = useTranslation()
@@ -41,10 +40,6 @@ export default function AntiDdos() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const { allows } = useNodeCapabilities()
-  const [cidrText, setCidrText] = useState('')
-  const [sources, setSources] = useState<AntiDdosSource[]>([])
-  const [srcName, setSrcName] = useState('')
-  const [srcUrl, setSrcUrl] = useState('')
 
   const loadStatus = useCallback(async () => {
     try {
@@ -57,66 +52,21 @@ export default function AntiDdos() {
     try {
       const { data } = await antiDdosApi.getSettings()
       setSettings(data)
-      setCidrText((data.user_cidrs || []).join('\n'))
-    } catch { /* keep last */ }
-  }, [])
-
-  const loadSources = useCallback(async () => {
-    try {
-      const { data } = await antiDdosApi.getSources()
-      setSources(data.sources)
     } catch { /* keep last */ }
   }, [])
 
   useEffect(() => {
-    Promise.all([loadStatus(), loadSettings(), loadSources()]).finally(() => setLoading(false))
+    Promise.all([loadStatus(), loadSettings()]).finally(() => setLoading(false))
     const id = setInterval(() => { if (!document.hidden) loadStatus() }, 10000)
     return () => clearInterval(id)
-  }, [loadStatus, loadSettings, loadSources])
-
-  const addSource = async () => {
-    const url = srcUrl.trim()
-    if (!url || busy) return
-    setBusy('add-src')
-    try {
-      await antiDdosApi.addSource({ name: srcName.trim() || url, url })
-      setSrcName(''); setSrcUrl('')
-      await loadSources()
-      toast.success(t('anti_ddos.src_added'))
-    } catch (e: any) {
-      toast.error(e?.response?.data?.detail || t('anti_ddos.action_failed'))
-    } finally { setBusy(null) }
-  }
-
-  const toggleSource = async (s: AntiDdosSource) => {
-    try { await antiDdosApi.updateSource(s.id, { enabled: !s.enabled }) } catch { /* ignore */ }
-    await loadSources()
-  }
-
-  const removeSource = async (id: number) => {
-    try { await antiDdosApi.deleteSource(id) } catch { /* ignore */ }
-    await loadSources()
-  }
-
-  const refreshAllSources = async () => {
-    if (busy) return
-    setBusy('refresh-src')
-    try {
-      await antiDdosApi.refreshSources()
-      toast.success(t('anti_ddos.src_refreshed'))
-      setTimeout(loadSources, 3000)
-    } catch { toast.error(t('anti_ddos.action_failed')) }
-    finally { setBusy(null) }
-  }
+  }, [loadStatus, loadSettings])
 
   const patchSettings = async (patch: Partial<AntiDdosSettings>) => {
     try {
       const { data } = await antiDdosApi.updateSettings(patch)
       setSettings(data)
-      return true
     } catch {
       toast.error(t('anti_ddos.save_failed'))
-      return false
     }
   }
 
@@ -145,7 +95,6 @@ export default function AntiDdos() {
 
   const tabs: { id: TabType; icon: typeof Siren; label: string }[] = [
     { id: 'control', icon: SettingsIcon, label: t('anti_ddos.tab_control') },
-    { id: 'whitelist', icon: ListChecks, label: t('anti_ddos.tab_whitelist') },
     { id: 'info', icon: BookOpen, label: t('anti_ddos.tab_info') },
   ]
 
@@ -225,16 +174,6 @@ export default function AntiDdos() {
                     </button>
                   </div>
                 </div>
-
-                <div className="border-t border-dark-800 pt-3">
-                  <button
-                    onClick={() => runAction('push-wl', () => antiDdosApi.pushWhitelist(), t('anti_ddos.whitelist_pushed'))}
-                    disabled={busy === 'push-wl'}
-                    className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-dark-700 hover:bg-dark-600 text-dark-100 disabled:opacity-50">
-                    {busy === 'push-wl' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                    {t('anti_ddos.push_whitelist')}
-                  </button>
-                </div>
               </div>
 
               <div className="card divide-y divide-dark-800">
@@ -274,129 +213,6 @@ export default function AntiDdos() {
                   </div>
                   )
                 })}
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'whitelist' && (
-            <div className="space-y-4">
-              <div className="card p-5 space-y-2">
-                <h2 className="text-sm font-semibold flex items-center gap-2"><ShieldCheck className="w-4 h-4" /> {t('anti_ddos.wl_auto_title')}</h2>
-                <p className="text-sm text-dark-400">{t('anti_ddos.wl_auto_desc')}</p>
-                {settings?.last_push_at && (
-                  <p className="text-xs text-dark-500">
-                    {t('anti_ddos.wl_last_push', { count: settings.last_push_count })} · {new Date(settings.last_push_at).toLocaleString()}
-                  </p>
-                )}
-              </div>
-
-              <div className="card p-5 space-y-3">
-                <h2 className="text-sm font-semibold flex items-center gap-2"><ListChecks className="w-4 h-4" /> {t('anti_ddos.wl_manual_title')}</h2>
-                <p className="text-sm text-dark-400">{t('anti_ddos.wl_manual_desc')}</p>
-                <textarea
-                  value={cidrText}
-                  onChange={e => setCidrText(e.target.value)}
-                  rows={8}
-                  placeholder={"173.245.48.0/20\n103.21.244.0/22\n1.2.3.4"}
-                  className="w-full bg-dark-900 border border-dark-700 rounded px-3 py-2 text-sm font-mono focus:border-accent-500 outline-none"
-                />
-                <div className="flex justify-end">
-                  <button
-                    onClick={async () => {
-                      const list = cidrText.split('\n').map(s => s.trim()).filter(Boolean)
-                      setBusy('save-cidr')
-                      const ok = await patchSettings({ user_cidrs: list })
-                      if (ok) toast.success(t('anti_ddos.saved'))
-                      setBusy(null)
-                    }}
-                    disabled={busy === 'save-cidr'}
-                    className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-accent-500 hover:bg-accent-600 text-white disabled:opacity-50">
-                    {busy === 'save-cidr' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                    {t('anti_ddos.save')}
-                  </button>
-                </div>
-                {(settings?.user_cidrs?.length ?? 0) > 0 && (
-                  <div className="flex flex-wrap gap-2 pt-1">
-                    {settings!.user_cidrs.map(cidr => (
-                      <span key={cidr} className="inline-flex items-center gap-1 px-2 py-1 rounded bg-dark-800 text-xs font-mono">
-                        {cidr}
-                        <button
-                          onClick={async () => {
-                            const list = settings!.user_cidrs.filter(c => c !== cidr)
-                            setCidrText(list.join('\n'))
-                            await patchSettings({ user_cidrs: list })
-                          }}
-                          className="text-dark-500 hover:text-red-400">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="card p-5 space-y-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h2 className="text-sm font-semibold flex items-center gap-2"><Globe className="w-4 h-4" /> {t('anti_ddos.src_title')}</h2>
-                    <p className="text-sm text-dark-400 mt-1">{t('anti_ddos.src_desc')}</p>
-                  </div>
-                  <button
-                    onClick={refreshAllSources}
-                    disabled={busy === 'refresh-src'}
-                    className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-dark-700 hover:bg-dark-600 text-dark-100 disabled:opacity-50 shrink-0">
-                    {busy === 'refresh-src' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                    {t('anti_ddos.src_refresh')}
-                  </button>
-                </div>
-
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <input
-                    value={srcName}
-                    onChange={e => setSrcName(e.target.value)}
-                    placeholder={t('anti_ddos.src_name_placeholder')}
-                    className="sm:w-40 bg-dark-900 border border-dark-700 rounded px-3 py-2 text-sm focus:border-accent-500 outline-none"
-                  />
-                  <input
-                    value={srcUrl}
-                    onChange={e => setSrcUrl(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') addSource() }}
-                    placeholder="https://www.cloudflare.com/ips-v4/"
-                    className="flex-1 bg-dark-900 border border-dark-700 rounded px-3 py-2 text-sm font-mono focus:border-accent-500 outline-none"
-                  />
-                  <button
-                    onClick={addSource}
-                    disabled={busy === 'add-src' || !srcUrl.trim()}
-                    className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-accent-500 hover:bg-accent-600 text-white disabled:opacity-50 shrink-0">
-                    {busy === 'add-src' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                    {t('anti_ddos.src_add')}
-                  </button>
-                </div>
-
-                {sources.length === 0 ? (
-                  <p className="text-xs text-dark-500">{t('anti_ddos.src_empty')}</p>
-                ) : (
-                  <div className="border border-dark-800 rounded divide-y divide-dark-800">
-                    {sources.map(s => (
-                      <div key={s.id} className="p-3 flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-medium text-sm truncate">{s.name}</span>
-                            <span className="text-2xs px-1.5 py-0.5 rounded bg-dark-800 text-dark-400">{s.ip_count} IP/CIDR</span>
-                          </div>
-                          <div className="text-xs text-dark-500 truncate font-mono">{s.url}</div>
-                          {s.error_message && <div className="text-xs text-red-400 truncate">{s.error_message}</div>}
-                        </div>
-                        <div className="flex items-center gap-3 shrink-0">
-                          <Toggle on={s.enabled} onClick={() => toggleSource(s)} />
-                          <button onClick={() => removeSource(s.id)} className="text-dark-500 hover:text-red-400">
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
             </div>
           )}

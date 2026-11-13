@@ -7,6 +7,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource, BlocklistDirection } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
+import AllowSourcesCard from '../components/blocklist/AllowSourcesCard'
 import PingBlockCard from '../components/blocklist/PingBlockCard'
 import { Tooltip } from '../components/ui/Tooltip'
 import { Checkbox } from '../components/ui/Checkbox'
@@ -1045,6 +1046,8 @@ export default function Blocklist() {
                 />
               </div>
             </div>
+
+            <AllowSourcesCard />
           </motion.div>
         )}
 

@@ -1,16 +1,20 @@
 """Anti-DDoS manager (panel side).
 
-Two background loops:
-  - whitelist push: hourly, sends {all node addresses + panel IP + user CIDRs} to every
-    node's antiddos_allow set so the node has a fresh list on disk before an attack.
+Background loops:
+  - whitelist push: hourly, sends the incoming part of the panel's shared allowlist
+    (node addresses, panel IP, manual entries, URL lists) plus the DDoS-Guard GRE
+    endpoints to every node's antiddos_allow set, so the node has a fresh list on disk
+    before an attack. Anti-DDoS has no whitelist of its own; a change of the shared
+    allowlist asks for an extra push right away (request_whitelist_push).
   - status poll: reads each node's emergency state into Server.antiddos_*, and
     fires a Telegram alert when a node auto-enters emergency mode.
 
 Also exposes on-demand actions used by the API: install watchdog, toggle
-emergency per-node / on all nodes, toggle the watchdog, push whitelist now.
+emergency per-node / on all nodes, toggle the watchdog.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -20,30 +24,26 @@ from typing import Optional
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import async_session
-from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory, AntiDdosWhitelistSource, GreNode
+from app.models import Server, AntiDdosSettings, AlertSettings, AlertHistory, BlocklistRule, GreNode
+from app.services.blocklist_manager import get_blocklist_manager
 from app.services.gre.render import whitelist_entries as gre_whitelist_entries
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_node_apply_client, get_external_client, node_auth_headers
-from app.services.latest_metrics import get_latest_metrics
 from app.services.node_capabilities import Capability, denied_message, server_allows
-from app.services.net_utils import resolve_panel_ip
-from app.services.node_ips import collect_node_ips
 from app.services.node_sync_queue import KIND_ANTIDDOS_WHITELIST, enqueue
 from app.services import update_channel
 
 logger = logging.getLogger(__name__)
 
 FILES_CACHE_TTL = 300   # seconds
-SOURCE_CACHE_TTL = 300  # seconds — cache fetched source lists
 # Дольше ждать нечего: nginx ноды обрывает этот запрос через те же 30 секунд
 WHITELIST_SYNC_TIMEOUT = 30.0
 NODE_CONNECT_TIMEOUT = 3.0
-
-# Extract IPv4 / IPv4-CIDR from any response body (JSON, plain text, HTML) so a
-# whitelist source works regardless of format (Cloudflare list, Yandex yc.json…).
-_IPV4_CIDR_RE = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:/\d{1,2})?\b")
+WHITELIST_PUSH_DEBOUNCE = 3.0  # пачка правок общего белого списка — одна рассылка
+MOVED_RULE_COMMENT = "из белого списка анти-DDoS"
 
 
 class AntiDdosManager:
@@ -55,11 +55,14 @@ class AntiDdosManager:
         self._running = False
         self._whitelist_task: Optional[asyncio.Task] = None
         self._status_task: Optional[asyncio.Task] = None
+        self._requested_push_task: Optional[asyncio.Task] = None
         self._db_sem = asyncio.Semaphore(self.DB_CONCURRENCY)
         self._http_sem = asyncio.Semaphore(self.HTTP_CONCURRENCY)
         self._files_cache: Optional[tuple[float, str, str]] = None
         self._install_cooldown: dict[int, float] = {}
-        self._source_cache: dict[str, tuple[float, list[str]]] = {}
+        self._push_requested = asyncio.Event()
+        self._push_lock = asyncio.Lock()
+        self._pushed_digest: Optional[str] = None
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -67,13 +70,19 @@ class AntiDdosManager:
         if self._running:
             return
         self._running = True
+        try:
+            await self._move_manual_list_to_shared()
+        except SQLAlchemyError as e:
+            logger.error(f"Moving the anti-DDoS manual whitelist to the shared allowlist failed: {e}")
+        get_blocklist_manager().add_allowlist_listener(self.request_whitelist_push)
         self._whitelist_task = asyncio.create_task(self._whitelist_loop())
         self._status_task = asyncio.create_task(self._status_loop())
+        self._requested_push_task = asyncio.create_task(self._requested_push_loop())
         logger.info("AntiDdosManager started")
 
     async def stop(self):
         self._running = False
-        for task in (self._whitelist_task, self._status_task):
+        for task in (self._whitelist_task, self._status_task, self._requested_push_task):
             if task:
                 task.cancel()
                 try:
@@ -96,103 +105,52 @@ class AntiDdosManager:
     # ── whitelist assembly ─────────────────────────────────────────────────
 
     async def build_whitelist(self, db) -> list[str]:
-        """Auto (all node addresses + panel IP + DDoS-Guard GRE endpoints and health
-        networks) + manual (user CIDRs) + auto-source lists."""
-        servers = (await db.execute(
-            select(Server.id, Server.url, Server.dedicated_cert).where(Server.is_active == True)  # noqa: E712
-        )).all()
-        latest = get_latest_metrics()
-        ips = await collect_node_ips(
-            (url, latest.get(server_id), dedicated_cert) for server_id, url, dedicated_cert in servers
-        )
+        """Кого аварийный режим не ограничивает: входящая часть общего белого
+        списка панели (адреса нод и панели, ручные записи, списки по URL) и точки
+        с сетями проверок GRE-туннелей DDoS-Guard.
 
-        panel_ip = await resolve_panel_ip()
-        if panel_ip:
-            ips.add(panel_ip)
-
+        Только IPv4: набор antiddos_allow на ноде — семейство inet."""
+        policy = await get_blocklist_manager().build_allow_policy()
+        ips = {cidr for cidr in policy.ips["in"] if self._is_ipv4(cidr)}
         ips.update(gre_whitelist_entries((await db.execute(select(GreNode))).scalars().all()))
-
-        settings = await self.get_or_create_settings(db)
-        if settings.user_cidrs:
-            try:
-                for cidr in json.loads(settings.user_cidrs):
-                    cidr = str(cidr).strip()
-                    if self._valid_ip_cidr(cidr):
-                        ips.add(cidr)
-            except (ValueError, TypeError):
-                pass
-
-        for entry in await self.fetch_all_source_ips(db):
-            ips.add(entry)
-
         return sorted(ips)
 
-    # ── auto-source lists (Cloudflare, Yandex Cloud, …) ─────────────────────
+    async def _move_manual_list_to_shared(self) -> None:
+        """У анти-DDoS был свой ручной белый список; теперь список один — общий.
 
-    def _extract_ips(self, content: str) -> list[str]:
-        seen: set[str] = set()
-        out: list[str] = []
-        for match in _IPV4_CIDR_RE.finditer(content):
-            value = match.group(0)
-            if value in seen or not self._valid_ip_cidr(value):
-                continue
-            seen.add(value)
-            out.append(value)
-        return out
-
-    async def _fetch_source(self, url: str, use_cache: bool = True) -> tuple[bool, list[str], str]:
-        now = asyncio.get_event_loop().time()
-        if use_cache:
-            cached = self._source_cache.get(url)
-            if cached and (now - cached[0]) < SOURCE_CACHE_TTL:
-                return True, cached[1], ""
-        try:
-            resp = await get_external_client().get(url, timeout=30.0)
-            if resp.status_code != 200:
-                return False, [], f"HTTP {resp.status_code}"
-            ips = self._extract_ips(resp.text)
-            self._source_cache[url] = (now, ips)
-            return True, ips, ""
-        except httpx.TimeoutException:
-            return False, [], "timeout"
-        except Exception as e:
-            return False, [], str(e)
-
-    async def fetch_all_source_ips(self, db, use_cache: bool = True) -> list[str]:
-        """Fetch every enabled source, merge their IPs, and record per-source
-        stats (count/error/last_updated) back on the rows."""
-        sources = (await db.execute(
-            select(AntiDdosWhitelistSource).where(AntiDdosWhitelistSource.enabled == True)  # noqa: E712
-        )).scalars().all()
-        merged: list[str] = []
-        touched = False
-        for src in sources:
-            ok, ips, err = await self._fetch_source(src.url, use_cache=use_cache)
-            if ok:
-                merged.extend(ips)
-                src.ip_count = len(ips)
-                src.error_message = None
-                src.last_updated = datetime.now(timezone.utc)
-            else:
-                src.error_message = err[:500]
-            touched = True
-        if touched:
+        Идёт при каждом старте: бэкап прежней версии, восстановленный позже,
+        приносит заполненное поле обратно."""
+        async with async_session() as db:
+            settings = await self.get_or_create_settings(db)
+            if not settings.user_cidrs:
+                return
+            blocklist = get_blocklist_manager()
+            wanted = blocklist.deduplicate_ips(self._stored_cidrs(settings.user_cidrs))
+            present = set(await blocklist.get_global_rules(db, "in", list_type="allow"))
+            moved = [cidr for cidr in wanted if cidr not in present]
+            db.add_all([
+                BlocklistRule(
+                    ip_cidr=cidr, direction="in", list_type="allow", source="manual", comment=MOVED_RULE_COMMENT
+                )
+                for cidr in moved
+            ])
+            settings.user_cidrs = None
             await db.commit()
-        return merged
-
-    async def refresh_sources_and_push(self):
-        """Force a fresh fetch of all sources (bypass cache) and push to nodes."""
-        self._source_cache.clear()
-        await self.push_whitelist_all()
+        logger.info(f"Anti-DDoS manual whitelist moved to the shared allowlist: {len(moved)} new of {len(wanted)}")
+        blocklist.request_allowlist_push()
 
     @staticmethod
-    def _valid_ip_cidr(value: str) -> bool:
+    def _stored_cidrs(raw: str) -> list[str]:
         try:
-            if "/" in value:
-                ipaddress.ip_network(value, strict=False)
-            else:
-                ipaddress.ip_address(value)
-            return True
+            stored = json.loads(raw)
+        except ValueError:
+            return []
+        return [str(item) for item in stored] if isinstance(stored, list) else []
+
+    @staticmethod
+    def _is_ipv4(value: str) -> bool:
+        try:
+            return ipaddress.ip_network(value, strict=False).version == 4
         except ValueError:
             return False
 
@@ -375,13 +333,30 @@ class AntiDdosManager:
             out[srv.id] = str(result) if isinstance(result, BaseException) else result[1]
         return out
 
-    async def push_whitelist_all(self) -> dict:
+    def request_whitelist_push(self) -> None:
+        """Попросить разослать whitelist: изменился общий белый список.
+
+        Не ждёт рассылки. Пачка правок схлопывается в одну рассылку, а набор,
+        который от правки не изменился (исходящий адрес), не рассылается вовсе."""
+        self._push_requested.set()
+
+    async def push_whitelist_all(self, only_if_changed: bool = False) -> dict:
+        # Рассылки идут по одной: у параллельных на ноде остался бы набор той,
+        # что дошла последней, а не той, что собрана позже
+        async with self._push_lock:
+            return await self._push_whitelist_all(only_if_changed)
+
+    async def _push_whitelist_all(self, only_if_changed: bool) -> dict:
         async with self._db_sem:
             async with async_session() as db:
                 ips = await self.build_whitelist(db)
                 servers = list(
                     (await db.execute(select(Server).where(Server.is_active == True))).scalars().all()  # noqa: E712
                 )
+
+        digest = hashlib.sha256("\n".join(ips).encode()).hexdigest()
+        if only_if_changed and digest == self._pushed_digest:
+            return {"whitelist_size": len(ips), "nodes": 0, "ok": 0, "queued": 0}
 
         # Офлайн-ноде набор отправить некуда: запрос упрётся в таймаут, а изменение
         # пропадёт. Очередь доставит его сама, когда нода вернётся в сеть.
@@ -403,6 +378,8 @@ class AntiDdosManager:
             settings.last_push_count = len(ips)
             await db.commit()
 
+        # Не принявшие набор ноды уже в очереди — она соберёт его заново
+        self._pushed_digest = digest
         return {
             "whitelist_size": len(ips),
             "nodes": len(servers),
@@ -608,6 +585,18 @@ class AntiDdosManager:
             except Exception as e:
                 logger.error(f"Whitelist push loop error: {e}")
             await asyncio.sleep(interval)
+
+    async def _requested_push_loop(self):
+        """Рассылка по запросу идёт и при выключенном автодетекте: аварийный
+        режим включают и вручную, а набор на ноде должен быть свежим до него."""
+        while self._running:
+            await self._push_requested.wait()
+            await asyncio.sleep(WHITELIST_PUSH_DEBOUNCE)
+            self._push_requested.clear()
+            try:
+                await self.push_whitelist_all(only_if_changed=True)
+            except Exception as e:
+                logger.error(f"Requested whitelist push failed: {e}")
 
     async def _status_loop(self):
         await asyncio.sleep(20)

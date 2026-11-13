@@ -705,9 +705,8 @@ Index("ix_torrent_blocker_bans_expires_at", TorrentBlockerBan.expires_at)
 class AntiDdosSettings(Base):
     """Настройки анти-DDoS защиты (singleton, одна запись).
 
-    Whitelist из двух частей: авто (IP всех нод + IP панели, вычисляется на лету)
-    и ручная (user_cidrs — подсети CDN и пр.). Панель ежечасно объединяет их и
-    рассылает нодам одним набором."""
+    Своего белого списка у анти-DDoS нет: набор, который аварийный режим не
+    ограничивает, панель собирает из общего белого списка (IP Blocklist)."""
     __tablename__ = "antiddos_settings"
 
     id = Column(Integer, primary_key=True)
@@ -715,6 +714,7 @@ class AntiDdosSettings(Base):
     whitelist_push_interval = Column(Integer, default=3600)   # seconds
     status_poll_interval = Column(Integer, default=60)        # seconds
     watchdog_default_enabled = Column(Boolean, default=True)
+    # Прежний ручной список; при старте панели переезжает в общий белый список
     user_cidrs = Column(Text, nullable=True)                  # JSON array of IP/CIDR
 
     last_push_at = Column(DateTime(timezone=True), nullable=True)
@@ -722,12 +722,12 @@ class AntiDdosSettings(Base):
     last_push_count = Column(Integer, default=0)
 
 
-class AntiDdosWhitelistSource(Base):
-    """Авто-источник IP/CIDR для анти-DDoS whitelist (Cloudflare, Yandex Cloud и т.п.).
+class AllowlistSource(Base):
+    """Список IP/CIDR по URL для общего белого списка (Cloudflare, Yandex Cloud и т.п.).
 
     Панель периодически тянет URL, извлекает IPv4/CIDR (JSON, текст — не важно) и
-    добавляет их в набор antiddos_allow на нодах. Этот набор ACCEPT'ится только
-    внутри цепочки ANTIDDOS, т.е. работает лишь когда включён аварийный режим."""
+    добавляет их во входящий белый список. Таблица названа по анти-DDoS: до
+    объединения белых списков эти адреса проходили только мимо его лимитов."""
     __tablename__ = "antiddos_whitelist_sources"
 
     id = Column(Integer, primary_key=True)

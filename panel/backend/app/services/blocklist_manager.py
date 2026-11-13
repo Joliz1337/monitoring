@@ -22,6 +22,7 @@ from typing import Awaitable, Callable, Iterable, Optional
 import httpx
 from sqlalchemy import select, and_
 
+from app.services.allowlist_sources import get_allowlist_sources
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_external_client, node_auth_headers
 from app.services.latest_metrics import get_latest_metrics
@@ -173,6 +174,7 @@ class BlocklistManager:
         # Растёт, когда синк блок-листа доставил части нод белый список,
         # отличный от разосланного на весь парк
         self._allowlist_epoch = 0
+        self._allowlist_listeners: list[Callable[[], None]] = []
         # Что приняла каждая нода, по server_id. Записи нет — что на ноде
         # лежит, неизвестно: новая нода, сбой доставки, рестарт панели
         self._delivered: defaultdict[int, DeliveredLists] = defaultdict(DeliveredLists)
@@ -345,7 +347,8 @@ class BlocklistManager:
         return [r.ip_cidr for r in rules]
 
     async def build_allow_policy(self) -> AllowPolicy:
-        """Белый список по направлениям: ручные allow-правила + авто (IP панели и все адреса нод).
+        """Белый список по направлениям: ручные allow-правила + авто (IP панели и все
+        адреса нод); во входящих — ещё и адреса из списков по URL.
 
         IP панели и нод всегда в allowlist — ACCEPT стоит первым в цепочке,
         поэтому управляющий трафик не попадёт под DROP даже при плохом блок-листе."""
@@ -370,9 +373,11 @@ class BlocklistManager:
         panel_ip = await resolve_panel_ip()
         if panel_ip:
             auto.add(panel_ip)
+        # Списки по URL — про тех, кто приходит к нодам (CDN): только входящие
+        listed = {"in": await get_allowlist_sources().collect()}
 
         ips = {
-            direction: self.deduplicate_ips(sorted(auto.union(manual[direction])))
+            direction: self.deduplicate_ips(sorted(auto.union(manual[direction], listed.get(direction, ()))))
             for direction in DIRECTIONS
         }
         blocked = frozenset(row.id for row in servers if ping_scope.covers(row.id, row.folder))
@@ -1093,12 +1098,20 @@ class BlocklistManager:
         self._allowlist_epoch += 1
         self._allowlist_requested.set()
 
+    def add_allowlist_listener(self, listener: Callable[[], None]) -> None:
+        """Сообщать о смене белого списка: его входящую часть не ограничивает
+        аварийный режим анти-DDoS, и набор на нодах должен обновиться следом."""
+        if listener not in self._allowlist_listeners:
+            self._allowlist_listeners.append(listener)
+
     async def push_allowlist_if_changed(self) -> None:
         epoch = self._allowlist_epoch
         policy = await self.build_allow_policy()
         digest = policy.digest()
         if digest == self._allowlist_pushed_hash:
             return
+        for listener in self._allowlist_listeners:
+            listener()
         # Адрес ноды мог смениться без правок в панели — в общих списках
         # полного синка остался бы прежний белый список
         self.invalidate_shared_lists()

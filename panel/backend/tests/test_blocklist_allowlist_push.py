@@ -147,6 +147,32 @@ class PushIfChangedTest(unittest.IsolatedAsyncioTestCase):
         await self.manager.push_allowlist_if_changed()
         self.assertEqual(self.pushed, [POLICY_A, POLICY_B])
 
+    async def test_changed_list_is_announced_to_listeners(self):
+        # Входящую часть белого списка не ограничивает и аварийный режим
+        # анти-DDoS: его набор на нодах обновляется по этому сигналу
+        heard: list[int] = []
+        self.manager.add_allowlist_listener(lambda: heard.append(1))
+
+        await self.manager.push_allowlist_if_changed()
+        await self.manager.push_allowlist_if_changed()
+        self.assertEqual(len(heard), 1)
+
+        self.current = POLICY_B
+        await self.manager.push_allowlist_if_changed()
+        self.assertEqual(len(heard), 2)
+
+    async def test_listener_added_twice_is_told_once(self):
+        heard: list[int] = []
+
+        def listener() -> None:
+            heard.append(1)
+
+        self.manager.add_allowlist_listener(listener)
+        self.manager.add_allowlist_listener(listener)
+
+        await self.manager.push_allowlist_if_changed()
+        self.assertEqual(len(heard), 1)
+
     async def test_ping_toggle_is_pushed(self):
         await self.manager.push_allowlist_if_changed()
         self.current = POLICY_A_NO_PING
