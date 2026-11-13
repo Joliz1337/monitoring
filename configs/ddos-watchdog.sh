@@ -13,12 +13,16 @@
 # the loop re-adds the jump within one cycle (self-heal). SSH is never dropped;
 # the node API port 9100 is let in by the whitelist only. Client ports are auto-detected (ss), never hardcoded.
 #
+# Транзит — соединения, пришедшие через DNAT (опубликованные порты контейнеров
+# Docker, проброс портов), — цепочку в INPUT не проходит: у него своя цепочка
+# ANTIDDOS_TRANSIT в mangle/POSTROUTING с тем же лимитом новых соединений.
+#
 
 set -u
 
 # Bumped when the script logic changes — the panel compares this against what a
 # node reports and auto-reinstalls on drift, so updates roll out without clicks.
-WATCHDOG_VERSION="2.5.1"
+WATCHDOG_VERSION="2.6.0"
 
 STATE_DIR="/opt/monitoring/antiddos"
 STATE_FILE="$STATE_DIR/state.json"
@@ -28,6 +32,13 @@ AUTO_CONFIG_FILE="$STATE_DIR/config.auto"
 RUN_DIR="$STATE_DIR/run"
 
 CHAIN="ANTIDDOS"
+TRANSIT_CHAIN="ANTIDDOS_TRANSIT"      # mangle/POSTROUTING, см. build_transit_chain
+HANDSHAKE_CHAIN="ANTIDDOS_HANDSHAKE"  # mangle/OUTPUT, см. build_handshake_rules
+TRUSTED_CHAIN="ANTIDDOS_TRUSTED"      # raw/PREROUTING, см. build_trusted_rules
+TRANSIT_HASHLIMIT="ad_emg_fwd"
+INTERNAL_NETS="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
+# Джампы аварийного режима: таблица:встроенная цепочка:своя цепочка
+EMERGENCY_JUMPS="filter:INPUT:$CHAIN raw:PREROUTING:$TRUSTED_CHAIN mangle:POSTROUTING:$TRANSIT_CHAIN mangle:OUTPUT:$HANDSHAKE_CHAIN"
 ALLOW_SET="antiddos_allow"
 TEMP_BLOCK_SET="blocklist_temp"   # created by ipset_manager; used if present
 
@@ -104,6 +115,10 @@ ipt() {
 ipt_raw() {
     if [ "$DRYRUN" = "1" ]; then echo "iptables -t raw $*"; return 0; fi
     iptables -t raw "$@" 2>/dev/null
+}
+ipt_mangle() {
+    if [ "$DRYRUN" = "1" ]; then echo "iptables -t mangle $*"; return 0; fi
+    iptables -t mangle "$@" 2>/dev/null
 }
 
 ensure_dirs() { mkdir -p "$STATE_DIR" "$RUN_DIR" 2>/dev/null || true; }
@@ -194,6 +209,15 @@ detect_client_ports() {
 
 ports_csv() {
     detect_client_ports | paste -sd, - 2>/dev/null
+}
+
+# Опубликованные порты контейнеров из числа клиентских: на хосте их слушает
+# docker-proxy, а сами соединения уходят в контейнер через DNAT.
+detect_docker_ports() {
+    ss -H -tlnp 2>/dev/null | awk '/docker-proxy/ {
+            n = split($4, a, ":")
+            if (a[n] ~ /^[0-9]+$/) print a[n]
+        }' | sort -un | grep -xF -f <(detect_client_ports)
 }
 
 # ── ipset allowlist ─────────────────────────────────────────────────────────
@@ -308,15 +332,21 @@ synproxy_available() {
 
 # iptables -m multiport takes at most 15 ports per rule, and a busy Xray node
 # listens on far more, so every port-scoped rule is emitted per 15-port group.
-port_chunks() {
-    detect_client_ports | awk 'NF{ buf=(c?buf","$0:$0); c++; if(c==15){print buf; buf=""; c=0} } END{ if(c) print buf }'
+chunk_ports() {
+    awk 'NF{ buf=(c?buf","$0:$0); c++; if(c==15){print buf; buf=""; c=0} } END{ if(c) print buf }'
 }
+
+port_chunks() { detect_client_ports | chunk_ports; }
 
 build_chain() {
     local ports; ports=$(ports_csv)
 
     ipt -N "$CHAIN"           # create (ignore "exists")
     ipt -F "$CHAIN"           # rebuild from scratch (ports may have changed)
+    ipt_mangle -N "$HANDSHAKE_CHAIN"
+    ipt_mangle -F "$HANDSHAKE_CHAIN"
+    ipt_raw -N "$TRUSTED_CHAIN"
+    ipt_raw -F "$TRUSTED_CHAIN"
 
     # 1. operator blocklist, if the set exists (populated via ipset_manager)
     if ipset list "$TEMP_BLOCK_SET" >/dev/null 2>&1; then
@@ -403,25 +433,151 @@ build_chain() {
             ipt_raw -C PREROUTING -p tcp --dport "$p" --syn -j CT --notrack \
                 || ipt_raw -A PREROUTING -p tcp --dport "$p" --syn -j CT --notrack || true
         done
+        build_synproxy_helpers
     else
         teardown_synproxy_raw
     fi
 }
 
+build_synproxy_helpers() {
+    build_handshake_rules
+    build_trusted_rules
+}
+
 teardown_synproxy_raw() {
-    local p
+    [ "$DRYRUN" = "1" ] && return 0
+    local p rule
     for p in $(detect_client_ports); do
         iptables -t raw -D PREROUTING -p tcp --dport "$p" --syn -j CT --notrack 2>/dev/null || true
     done
+    # И всё, что осталось от портов, переставших слушать за время режима: в
+    # detect_client_ports такой порт уже не попадает, а его notrack без SYNPROXY —
+    # потеря всех новых соединений, когда порт откроется снова.
+    while read -r _ rule; do
+        [ -n "$rule" ] && iptables -t raw -D $rule 2>/dev/null
+    done < <(iptables -t raw -S PREROUTING 2>/dev/null \
+        | grep -- '--tcp-flags FIN,SYN,RST,ACK SYN -j CT --notrack$')
+    return 0
 }
 
-jump_present() { iptables -C INPUT -j "$CHAIN" >/dev/null 2>&1; }
+# notrack для SYN ломает DNAT: без записи conntrack пакет не переадресуется и
+# попадает не в контейнер, а к docker-proxy на хосте. Тот соединение обслужит,
+# но контейнер увидит адрес моста вместо адреса клиента. Чужие адреса от этого
+# спасает сам SYNPROXY — его SYN к серверу идёт через OUTPUT, где Docker делает
+# DNAT ещё раз. Адреса из белого списка в SYNPROXY не заходят, поэтому их SYN к
+# портам контейнеров выходит из raw раньше notrack и идёт обычным путём.
+# Только для портов контейнеров: на портах хоста белый SYN без записи conntrack
+# дешевле — флуд с подставными адресами из белого списка не занимает таблицу.
+build_trusted_rules() {
+    local chunk
+    while read -r chunk; do
+        [ -z "$chunk" ] && continue
+        ipt_raw -A "$TRUSTED_CHAIN" -p tcp -m tcp --syn -m multiport --dports "$chunk" \
+            -m set --match-set "$ALLOW_SET" src -j ACCEPT
+    done < <(detect_docker_ports | chunk_ports)
+}
 
-add_jump()    { jump_present || ipt -I INPUT 1 -j "$CHAIN"; }
-remove_jump() { while jump_present; do ipt -D INPUT -j "$CHAIN"; done; }
+# SYNPROXY завершает рукопожатие с сервером собственным ACK, и его же хук
+# пересчитывает в этом ACK поле TSecr второй раз. Ядра с проверкой TSecr по
+# RFC 7323 (в /proc/net/netstat у них есть счётчик TSEcrRejected) такой ACK
+# отбрасывают, сервер ждёт повторный SYN-ACK — и каждое новое соединение
+# открывается на секунду дольше. Опция timestamp снимается только с этого
+# пакета: в OUTPUT он единственный идёт с чужим адресом источника на адрес
+# самого хоста. Остальные пакеты соединения несут timestamp как обычно.
+build_handshake_rules() {
+    local chunk
+    while read -r chunk; do
+        [ -z "$chunk" ] && continue
+        if ! ipt_mangle -A "$HANDSHAKE_CHAIN" -p tcp -m tcp --tcp-flags SYN,ACK,FIN,RST,PSH ACK \
+                -m multiport --dports "$chunk" \
+                -m addrtype ! --src-type LOCAL --dst-type LOCAL \
+                -j TCPOPTSTRIP --strip-options timestamp; then
+            log "TCPOPTSTRIP unavailable — where the kernel validates TSecr a SYNPROXY handshake takes an extra second"
+            ipt_mangle -F "$HANDSHAKE_CHAIN"
+            # Непустая цепочка: selfheal не повторяет попытку каждый цикл
+            ipt_mangle -A "$HANDSHAKE_CHAIN" -j RETURN
+            return 0
+        fi
+    done < <(port_chunks)
+}
+
+# Транзит — соединения, пришедшие через DNAT: опубликованные порты контейнеров
+# Docker и проброс портов. Они идут PREROUTING → FORWARD и цепочку в INPUT не
+# проходят, поэтому лимит новых соединений для них стоит в mangle/POSTROUTING:
+#   - там проходит и SYN, которым SYNPROXY открывает соединение с контейнером
+#     (он рождается на хосте и идёт через OUTPUT, минуя FORWARD);
+#   - адрес источника там ещё настоящий — MASQUERADE стоит позже, в nat;
+#   - mangle не трогают ни `ufw reset`, ни Docker, ни ACCEPT'ы в filter/FORWARD.
+# Через POSTROUTING идёт и весь исходящий трафик самого хоста, поэтому первые
+# два правила — выходы: установленные соединения и всё, что пришло не через
+# DNAT. Пакеты INVALID цепочка не трогает: таким conntrack видит SYN-ACK,
+# который SYNPROXY шлёт клиенту.
+# Лимит не действует на сам хост и на приватные сети: оттуда приходят свои
+# контейнеры, а не клиенты, и обратный прокси в контейнере открывает к соседу
+# больше NEWRATE соединений в секунду как раз под нагрузкой.
+build_transit_chain() {
+    local ok=1 net
+
+    ipt_mangle -N "$TRANSIT_CHAIN"
+    ipt_mangle -F "$TRANSIT_CHAIN"
+
+    ipt_mangle -A "$TRANSIT_CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN || ok=0
+    ipt_mangle -A "$TRANSIT_CHAIN" -m conntrack ! --ctstate DNAT -j RETURN || ok=0
+
+    if ipset list "$TEMP_BLOCK_SET" >/dev/null 2>&1; then
+        ipt_mangle -A "$TRANSIT_CHAIN" -m set --match-set "$TEMP_BLOCK_SET" src -j DROP || ok=0
+    fi
+    ensure_allow_set
+    ipt_mangle -A "$TRANSIT_CHAIN" -m set --match-set "$ALLOW_SET" src -j RETURN || ok=0
+
+    ipt_mangle -A "$TRANSIT_CHAIN" -m addrtype --src-type LOCAL -j RETURN || ok=0
+    for net in $INTERNAL_NETS; do
+        ipt_mangle -A "$TRANSIT_CHAIN" -s "$net" -j RETURN || ok=0
+    done
+
+    ipt_mangle -A "$TRANSIT_CHAIN" -p tcp ! --syn -m conntrack --ctstate NEW -j DROP || ok=0
+    ipt_mangle -A "$TRANSIT_CHAIN" -p tcp -m conntrack --ctstate NEW \
+        -m hashlimit --hashlimit-above "${NEWRATE}/sec" --hashlimit-burst "$NEWBURST" \
+        --hashlimit-mode srcip --hashlimit-name "$TRANSIT_HASHLIMIT" \
+        --hashlimit-srcmask "$HASHLIMIT_SRCMASK" \
+        --hashlimit-htable-max "$HL_MAX" --hashlimit-htable-expire 60000 -j DROP || ok=0
+
+    # Цепочка без одного из выходов резала бы чужой трафик — лучше никакой.
+    # Остаётся один RETURN: по непустой цепочке selfheal не повторяет попытку
+    # каждый цикл, а self-test видит, что лимита в ней нет.
+    if [ "$ok" != "1" ]; then
+        ipt_mangle -F "$TRANSIT_CHAIN"
+        ipt_mangle -A "$TRANSIT_CHAIN" -j RETURN
+        log "transit chain rejected — container ports and port forwarding stay without the rate limit"
+    fi
+}
+
+chain_has_rules() { iptables -t "$1" -S "$2" 2>/dev/null | grep -q '^-A '; }
+
+jump_present() { iptables -t "$1" -C "$2" -j "$3" >/dev/null 2>&1; }
+
+add_jump() {
+    local jump table hook chain
+    for jump in $EMERGENCY_JUMPS; do
+        IFS=: read -r table hook chain <<< "$jump"
+        jump_present "$table" "$hook" "$chain" \
+            || iptables -t "$table" -I "$hook" 1 -j "$chain" 2>/dev/null
+    done
+}
+
+remove_jump() {
+    local jump table hook chain
+    for jump in $EMERGENCY_JUMPS; do
+        IFS=: read -r table hook chain <<< "$jump"
+        while jump_present "$table" "$hook" "$chain"; do
+            iptables -t "$table" -D "$hook" -j "$chain" 2>/dev/null || break
+        done
+    done
+}
 
 apply_rules() {
     build_chain
+    build_transit_chain
     add_jump
 }
 
@@ -429,6 +585,9 @@ clear_rules() {
     remove_jump
     teardown_synproxy_raw
     ipt -F "$CHAIN"
+    ipt_mangle -F "$TRANSIT_CHAIN"
+    ipt_mangle -F "$HANDSHAKE_CHAIN"
+    ipt_raw -F "$TRUSTED_CHAIN"
 }
 
 # Emergency mode inserts a chain at INPUT position 1. If a rule bug there ever
@@ -490,8 +649,20 @@ safety_net_cleared() {
 }
 
 # self-heal: while active, guarantee the chain+jump survive a foreign ufw reset
+# Цепочка «на месте», когда в ней есть правила: сторонний `iptables -F` оставляет
+# пустую цепочку с тем же именем, и по одному её существованию режим считался бы
+# целым, хотя не делает ничего.
 selfheal() {
-    ipt -nL "$CHAIN" >/dev/null 2>&1 || build_chain
+    chain_has_rules filter "$CHAIN" || build_chain
+    chain_has_rules mangle "$TRANSIT_CHAIN" || build_transit_chain
+    # Режим мог включить сторож прежней версии: правила SYNPROXY стоят, а
+    # вспомогательных цепочек к ним ещё нет
+    if ! chain_has_rules mangle "$HANDSHAKE_CHAIN" && iptables -S "$CHAIN" 2>/dev/null | grep -q SYNPROXY; then
+        ipt_mangle -N "$HANDSHAKE_CHAIN"
+        ipt_raw -N "$TRUSTED_CHAIN"
+        ipt_raw -F "$TRUSTED_CHAIN"
+        build_synproxy_helpers
+    fi
     add_jump
 }
 
@@ -654,8 +825,7 @@ sample_signals() {
     # indentation doesn't shift columns. Из pps вычитаются пакеты FORWARD
     # (ForwDatagrams из /proc/net/snmp): транзит DNAT-релея — сотни тысяч мелких
     # ACK/SYN клиентов с одного интерфейса — иначе стабильно выглядит как флуд,
-    # хотя к самой ноде из них не адресован ни один; аварийный режим на INPUT
-    # такому трафику ничем не поможет и только шумит уведомлениями.
+    # хотя это обычная работа релея, и режим включался бы на ровном месте.
     local cur_pkts cur_bytes prev_pkts prev_bytes dpkts dbytes pps avg
     local cur_fwd prev_fwd dfwd local_pkts
     read cur_pkts cur_bytes < <(awk -F: '
@@ -844,6 +1014,40 @@ audit_never_drop() {
     return $failed
 }
 
+# Транзитная цепочка стоит на пути всего исходящего трафика хоста: до первого
+# DROP обязаны стоять оба выхода, а пакеты INVALID она не трогает совсем.
+# Правила — вывод dry-run или `iptables -t mangle -S`.
+audit_transit() {
+    local rules=$1 failed=0 line total=0 drops=0 established_exit=0 dnat_gate=0
+    while read -r line; do
+        [[ $line == *"-A $TRANSIT_CHAIN "* ]] || continue
+        total=$((total + 1))
+        [[ $line == *"-j DROP"* ]] && drops=$((drops + 1))
+        if [[ $line == *"INVALID"* ]]; then
+            echo "self-test: FAIL  transit chain matches INVALID packets — SYNPROXY's own SYN-ACK is one"
+            failed=1
+        fi
+        if [[ $line == *"-j RETURN"* ]]; then
+            [[ $line == *"ESTABLISHED"* ]] && established_exit=1
+            [[ $line == *"! --ctstate DNAT"* ]] && dnat_gate=1
+        elif [[ $line == *"-j DROP"* ]] && [ "$((established_exit + dnat_gate))" -lt 2 ]; then
+            echo "self-test: FAIL  transit chain drops before its exits: $line"
+            failed=1
+        fi
+    done <<< "$rules"
+
+    if [ "$total" = 0 ]; then
+        echo "self-test: FAIL  transit chain $TRANSIT_CHAIN has no rules"
+        return 1
+    fi
+    if [ "$drops" = 0 ]; then
+        echo "self-test: WARN  transit chain was rejected by the kernel — container ports and port forwarding are not rate-limited"
+        return $failed
+    fi
+    [ "$failed" = 0 ] && echo "self-test: OK  transit: established and non-DNAT traffic leave before any DROP, INVALID untouched"
+    return $failed
+}
+
 # Structural proof that the SYNPROXY ordering fix is actually in place. A
 # passing curl proves nothing here — it also passes when SYNPROXY is silently
 # absent — so assert on the rule positions and on the raw/filter pairing.
@@ -857,6 +1061,18 @@ do_self_test() {
     fi
 
     audit_never_drop "$(iptables -S "$CHAIN" 2>/dev/null)" || ok=1
+
+    local transit
+    transit=$(iptables -t mangle -S "$TRANSIT_CHAIN" 2>/dev/null | grep -- '^-A ')
+    if [ -z "$transit" ]; then
+        echo "self-test: WARN  transit chain is empty — container ports and port forwarding are not rate-limited"
+    else
+        audit_transit "$transit" || ok=1
+        if ! jump_present mangle POSTROUTING "$TRANSIT_CHAIN"; then
+            echo "self-test: FAIL  transit chain is built but not jumped from mangle POSTROUTING"
+            ok=1
+        fi
+    fi
 
     local syn_line inv_line
     syn_line=$(printf '%s\n' "$out" | awk '/SYNPROXY/{print $1; exit}')
@@ -877,7 +1093,8 @@ do_self_test() {
     # raw --notrack must exist if and only if SYNPROXY does: one without the
     # other is the blackhole.
     local raw_count
-    raw_count=$(iptables -t raw -nL PREROUTING 2>/dev/null | grep -c 'CT notrack' || echo 0)
+    # grep -c сам печатает 0, когда совпадений нет
+    raw_count=$(iptables -t raw -nL PREROUTING 2>/dev/null | grep -c 'CT notrack')
     if [ -z "$syn_line" ] && [ "${raw_count:-0}" -gt 0 ]; then
         echo "self-test: FAIL  $raw_count raw --notrack rules with no SYNPROXY rule"
         ok=1
@@ -913,11 +1130,24 @@ case "${1:-loop}" in
     detect-ports)    ports_csv ;;
     dry-run)
         read_state; DRYRUN=1
-        dry_rules=$(build_chain)
+        dry_rules=$(build_chain; build_transit_chain)
         printf '%s\n' "$dry_rules"
         echo "iptables -I INPUT 1 -j $CHAIN"
-        audit_never_drop "$dry_rules" ;;
-    audit-rules)     audit_never_drop "$(cat)" ;;
+        echo "iptables -t raw -I PREROUTING 1 -j $TRUSTED_CHAIN"
+        echo "iptables -t mangle -I POSTROUTING 1 -j $TRANSIT_CHAIN"
+        echo "iptables -t mangle -I OUTPUT 1 -j $HANDSHAKE_CHAIN"
+        audit_status=0
+        audit_never_drop "$dry_rules" || audit_status=1
+        audit_transit "$dry_rules" || audit_status=1
+        exit "$audit_status" ;;
+    audit-rules)
+        audit_input=$(cat)
+        audit_status=0
+        audit_never_drop "$audit_input" || audit_status=1
+        if [[ $audit_input == *"-A $TRANSIT_CHAIN "* ]]; then
+            audit_transit "$audit_input" || audit_status=1
+        fi
+        exit "$audit_status" ;;
     self-test)       do_self_test ;;
     self-check)
         if via=$(reachable_via); then

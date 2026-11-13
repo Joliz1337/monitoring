@@ -10,12 +10,19 @@ Four block lists (two per direction):
 Two allow lists (one per direction):
 - allowlist / allowlist_out: trusted IPs that must always pass (hash:net)
 
-Incoming (in): iptables INPUT chain, match src → DROP (block) / ACCEPT (allow)
-Outgoing (out): iptables OUTPUT chain, match dst → DROP (block) / ACCEPT (allow)
+Блокировки действуют на весь сервер, а не только на сам хост: трафик к
+опубликованным портам Docker и DNAT-проброс идут через FORWARD и цепочек
+INPUT/OUTPUT не видят вовсе.
 
-Правило ACCEPT белого списка всегда вставляется в позицию 1 цепочки (выше всех
-DROP) — iptables идёт сверху вниз и ACCEPT обрывает обход, поэтому доверенный IP
-проходит ещё до блокировок, даже если попадает под заблокированный CIDR.
+Incoming (in): raw/PREROUTING, match src → DROP — первый хук на пути пакета, до
+conntrack и до DNAT.
+Outgoing (out): filter/OUTPUT (трафик самого хоста) и mangle/FORWARD (транзит),
+match dst → DROP.
+
+Белый список исключён внутри каждого DROP-правила, поэтому доверенный IP
+проходит, даже если попадает под заблокированный CIDR, и от порядка правил это
+не зависит. Отдельный ACCEPT белого списка в позиции 1 цепочек INPUT/OUTPUT
+пропускает доверенные адреса мимо UFW.
 
 Закрытый ping — молчаливый DROP входящих echo-request всем, кроме белого списка:
 сканер не отличает сервер от выключенного, а панель и соседние ноды пингуют как
@@ -36,7 +43,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from app.services.container_detect import running_in_container
 
@@ -99,10 +106,20 @@ PORT_BAN_RULE = [
 ]
 _PORT_SPEC_RE = re.compile(r"^(\d{1,5})(?:-(\d{1,5}))?$")
 
-# Direction config: chain + match flag
+# hooks — (таблица, цепочка), где стоит DROP блок-листа. Входящие: raw/PREROUTING
+# проходит каждый пакет ещё до развилки на INPUT и FORWARD. Исходящие: в FORWARD
+# адрес назначения уже после DNAT, а mangle идёт раньше filter, где Docker и UFW
+# принимают транзит своими ACCEPT.
+# legacy_chain — где правило стояло раньше и где остаётся, если хуки недоступны.
 _DIR_CONFIG = {
-    "in":  {"chain": "INPUT",  "match": "src", "perm": SET_PERMANENT,     "temp": SET_TEMP},
-    "out": {"chain": "OUTPUT", "match": "dst", "perm": SET_OUT_PERMANENT, "temp": SET_OUT_TEMP},
+    "in": {
+        "match": "src", "perm": SET_PERMANENT, "temp": SET_TEMP,
+        "hooks": (("raw", "PREROUTING"),), "legacy_chain": "INPUT",
+    },
+    "out": {
+        "match": "dst", "perm": SET_OUT_PERMANENT, "temp": SET_OUT_TEMP,
+        "hooks": (("filter", "OUTPUT"), ("mangle", "FORWARD")), "legacy_chain": "OUTPUT",
+    },
 }
 
 # Allow config: chain + match flag + set name per direction
@@ -110,6 +127,21 @@ _ALLOW_CONFIG = {
     "in":  {"chain": "INPUT",  "match": "src", "set": SET_ALLOW},
     "out": {"chain": "OUTPUT", "match": "dst", "set": SET_ALLOW_OUT},
 }
+
+
+def block_rule(chain: str, set_name: str, match: str, allow_set: str) -> list[str]:
+    return [
+        chain, "-m", "set", "--match-set", set_name, match,
+        "-m", "set", "!", "--match-set", allow_set, match, "-j", "DROP",
+    ]
+
+
+def legacy_block_rule(chain: str, set_name: str, match: str) -> list[str]:
+    return [chain, "-m", "set", "--match-set", set_name, match, "-j", "DROP"]
+
+
+# Правило вместе с исполнителем iptables своей таблицы; rule начинается с цепочки
+HostRule = tuple[Callable[[list[str]], tuple[bool, str, str]], list[str]]
 
 
 class InvalidPortSpecError(ValueError):
@@ -280,50 +312,90 @@ class IpsetManager:
         return False, f"Failed to create set: {stderr}"
     
     # ── iptables rules (direction-aware) ──
-    
-    def _iptables_rule_exists(self, set_name: str, direction: str = "in") -> bool:
-        cfg = self._get_dir_cfg(direction)
-        success, _, _ = self._run_iptables([
-            "-C", cfg["chain"], "-m", "set",
-            "--match-set", set_name, cfg["match"], "-j", "DROP"
-        ])
-        return success
-    
-    def _add_iptables_rule(self, set_name: str, direction: str = "in") -> tuple[bool, str]:
-        if self._iptables_rule_exists(set_name, direction):
-            return True, f"Rule for {set_name} already exists"
-        cfg = self._get_dir_cfg(direction)
-        success, stdout, stderr = self._run_iptables([
-            "-I", cfg["chain"], "-m", "set",
-            "--match-set", set_name, cfg["match"], "-j", "DROP"
-        ])
-        if success:
-            logger.info(f"Added iptables {cfg['chain']} rule for {set_name}")
-            return True, f"Rule for {set_name} added"
-        logger.error(f"Failed to add iptables rule for {set_name}: {stderr}")
-        return False, f"Failed to add rule: {stderr}"
-    
-    def _remove_iptables_rule(self, set_name: str, direction: str = "in") -> tuple[bool, str]:
-        if not self._iptables_rule_exists(set_name, direction):
-            return True, f"Rule for {set_name} does not exist"
-        cfg = self._get_dir_cfg(direction)
-        success, stdout, stderr = self._run_iptables([
-            "-D", cfg["chain"], "-m", "set",
-            "--match-set", set_name, cfg["match"], "-j", "DROP"
-        ])
-        if success:
-            logger.info(f"Removed iptables {cfg['chain']} rule for {set_name}")
-            return True, f"Rule for {set_name} removed"
-        return False, f"Failed to remove rule: {stderr}"
 
-    # ── allowlist iptables rule (ACCEPT, must sit above DROP rules) ──
+    def _iptables_in(self, table: str) -> Callable[[list[str]], tuple[bool, str, str]]:
+        if table == "filter":
+            return self._run_iptables
+        return lambda args: self._run_iptables(["-t", table] + args)
+
+    def _hook_block_rules(self, set_name: str, direction: str) -> list[HostRule]:
+        cfg = self._get_dir_cfg(direction)
+        allow_set = self._get_allow_cfg(direction)["set"]
+        return [
+            (self._iptables_in(table), block_rule(chain, set_name, cfg["match"], allow_set))
+            for table, chain in cfg["hooks"]
+        ]
+
+    def _legacy_block_rules(self, set_name: str, direction: str) -> list[HostRule]:
+        cfg = self._get_dir_cfg(direction)
+        return [(self._run_iptables, legacy_block_rule(cfg["legacy_chain"], set_name, cfg["match"]))]
+
+    def _sync_rules(self, rules: list[HostRule], present: bool) -> tuple[bool, str]:
+        for run, rule in rules:
+            ok, stderr = self._sync_rule(run, rule, present)
+            if not ok:
+                return False, stderr
+        return True, ""
+
+    @staticmethod
+    def _rules_exist(rules: list[HostRule]) -> bool:
+        return all(run(["-C"] + rule)[0] for run, rule in rules)
+
+    def _block_rules_exist(self, set_name: str, direction: str = "in") -> bool:
+        return (
+            self._rules_exist(self._hook_block_rules(set_name, direction))
+            or self._rules_exist(self._legacy_block_rules(set_name, direction))
+        )
+
+    def _install_block_rules(self, set_name: str, direction: str = "in") -> tuple[bool, str]:
+        """Поставить DROP по сету на всех хуках направления.
+
+        Сет белого списка к этому моменту обязан существовать: правило ссылается
+        на него, и без сета ядро правило не примет. Если хук недоступен (в ядре
+        хоста нет таблицы raw или mangle), правило остаётся на прежнем месте:
+        хост защищён, как раньше, транзит — нет.
+        """
+        hook_rules = self._hook_block_rules(set_name, direction)
+        legacy_rules = self._legacy_block_rules(set_name, direction)
+        legacy_chain = self._get_dir_cfg(direction)["legacy_chain"]
+
+        ok, hooks_error = self._sync_rules(hook_rules, present=True)
+        if ok:
+            ok, stderr = self._sync_rules(legacy_rules, present=False)
+            if not ok:
+                logger.warning(f"Stale {legacy_chain} rule for {set_name} not removed: {stderr}")
+            logger.info(f"Block rules for {set_name} in place ({direction})")
+            return True, f"Rules for {set_name} added"
+
+        logger.error(
+            f"Block rules for {set_name} not installed ({hooks_error}) — "
+            f"falling back to {legacy_chain}, transit traffic stays unfiltered"
+        )
+        self._sync_rules(hook_rules, present=False)
+        ok, stderr = self._sync_rules(legacy_rules, present=True)
+        if not ok:
+            return False, f"Failed to add rule: {stderr}"
+        return True, f"Rule for {set_name} added to {legacy_chain} only"
+
+    def _remove_block_rules(self, set_name: str, direction: str = "in") -> tuple[bool, str]:
+        """Снять DROP по сету отовсюду: пока на сет ссылается хоть одно правило,
+        ядро не даст его уничтожить."""
+        rules = self._hook_block_rules(set_name, direction) + self._legacy_block_rules(set_name, direction)
+        ok, stderr = self._sync_rules(rules, present=False)
+        if not ok:
+            return False, f"Failed to remove rule: {stderr}"
+        return True, f"Rules for {set_name} removed"
+
+    # ── allowlist ACCEPT (мимо UFW и запасного DROP в INPUT/OUTPUT) ──
 
     def _ensure_allow_rule_priority(self, direction: str = "in") -> None:
         """Гарантирует, что ACCEPT белого списка стоит первым в цепочке.
 
-        Удаляет существующее правило (если есть) и вставляет в позицию 1, выше
-        всех DROP. Вызывается после любой операции, способной всплыть DROP-правило
-        наверх (init_sets, set_timeout)."""
+        Удаляет существующее правило (если есть) и вставляет в позицию 1. DROP
+        блок-листа исключает белый список сам, а этот ACCEPT проводит доверенные
+        адреса мимо UFW и мимо запасного DROP в INPUT/OUTPUT (тот исключения не
+        несёт). Вызывается после операций, способных поставить запасной DROP
+        выше (init_sets, set_timeout)."""
         cfg = self._get_allow_cfg(direction)
         rule = ["-m", "set", "--match-set", cfg["set"], cfg["match"], "-j", "ACCEPT"]
         # idempotent: снимаем дубликаты, затем ставим единственное правило на верх
@@ -378,9 +450,6 @@ class IpsetManager:
 
     # ── бан по портам ──
 
-    def _run_raw_iptables(self, args: list[str]) -> tuple[bool, str, str]:
-        return self._run_iptables(["-t", "raw"] + args)
-
     def _ensure_port_ban(self) -> tuple[bool, str]:
         """Сет и правило бана по портам: после ребута хоста их нет, ставятся заново.
 
@@ -395,7 +464,7 @@ class IpsetManager:
         ])
         if not ok:
             return False, f"Failed to create {SET_PORT_BAN}: {stderr}"
-        return self._sync_rule(self._run_raw_iptables, PORT_BAN_RULE, present=True)
+        return self._sync_rule(self._iptables_in("raw"), PORT_BAN_RULE, present=True)
 
     def port_ban(self, ips: list[str], ports: list[str], timeout: int) -> tuple[int, int, list[str]]:
         """Временный бан IP только на портах `ports` (вывод normalize_port_specs), TCP и UDP."""
@@ -432,29 +501,22 @@ class IpsetManager:
         self._run_cmd(["mkdir", "-p", "/var/lib/monitoring"])
         self._load_config()
         
-        # Create sets + iptables rules for both directions
+        # Сначала все сеты: DROP блок-листа ссылается и на белый список
         for direction, cfg in _DIR_CONFIG.items():
-            success, msg = self._create_set(cfg["perm"], with_timeout=False)
-            if not success:
-                return False, f"Failed to create {direction} permanent set: {msg}"
-            
-            success, msg = self._create_set(cfg["temp"], with_timeout=True)
-            if not success:
-                return False, f"Failed to create {direction} temp set: {msg}"
-            
-            success, msg = self._add_iptables_rule(cfg["perm"], direction)
-            if not success:
-                return False, f"Failed to add iptables rule for {direction} permanent: {msg}"
-            
-            success, msg = self._add_iptables_rule(cfg["temp"], direction)
-            if not success:
-                return False, f"Failed to add iptables rule for {direction} temp: {msg}"
+            for set_name, with_timeout, label in (
+                (cfg["perm"], False, "permanent"),
+                (cfg["temp"], True, "temp"),
+                (self._get_allow_cfg(direction)["set"], False, "allow"),
+            ):
+                success, msg = self._create_set(set_name, with_timeout=with_timeout)
+                if not success:
+                    return False, f"Failed to create {direction} {label} set: {msg}"
 
-        # Allow lists: create set, затем поставить ACCEPT выше всех DROP
-        for direction, cfg in _ALLOW_CONFIG.items():
-            success, msg = self._create_set(cfg["set"], with_timeout=False)
-            if not success:
-                return False, f"Failed to create {direction} allow set: {msg}"
+        for direction, cfg in _DIR_CONFIG.items():
+            for set_name, label in ((cfg["perm"], "permanent"), (cfg["temp"], "temp")):
+                success, msg = self._install_block_rules(set_name, direction)
+                if not success:
+                    return False, f"Failed to add iptables rule for {direction} {label}: {msg}"
             self._ensure_allow_rule_priority(direction)
 
         # Правило ping ссылается на allowlist — ставится после создания сета.
@@ -686,22 +748,23 @@ class IpsetManager:
             # Recreate temp sets for both directions
             for direction, cfg in _DIR_CONFIG.items():
                 temp_set = cfg["temp"]
-                self._remove_iptables_rule(temp_set, direction)
+                self._remove_block_rules(temp_set, direction)
                 self._run_ipset(["destroy", temp_set])
 
                 success, msg = self._create_set(temp_set, with_timeout=True)
                 if not success:
                     self._temp_timeout = old_timeout
                     self._create_set(temp_set, with_timeout=True)
-                    self._add_iptables_rule(temp_set, direction)
+                    self._install_block_rules(temp_set, direction)
                     self._ensure_allow_rule_priority(direction)
                     return False, f"Failed to recreate {direction} temp set: {msg}"
 
-                success, msg = self._add_iptables_rule(temp_set, direction)
+                success, msg = self._install_block_rules(temp_set, direction)
                 if not success:
                     return False, f"Failed to re-add iptables rule for {direction} temp: {msg}"
 
-                # temp-DROP всплыл в позицию 1 — вернуть ACCEPT белого списка выше него
+                # Запасной DROP (если хуки недоступны) встаёт в позицию 1 —
+                # вернуть ACCEPT белого списка выше него
                 self._ensure_allow_rule_priority(direction)
 
             self._save_config()
@@ -860,8 +923,8 @@ class IpsetManager:
                 permanent_count=self._set_count(cfg["perm"]),
                 temp_count=self._set_count(cfg["temp"]),
                 iptables_rules_exist=(
-                    self._iptables_rule_exists(cfg["perm"], direction)
-                    and self._iptables_rule_exists(cfg["temp"], direction)
+                    self._block_rules_exist(cfg["perm"], direction)
+                    and self._block_rules_exist(cfg["temp"], direction)
                 ),
                 allow_count=self._set_count(self._get_allow_cfg(direction)["set"]),
             )

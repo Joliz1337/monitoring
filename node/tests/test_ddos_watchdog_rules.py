@@ -1,4 +1,4 @@
-"""Аварийная цепочка ANTIDDOS: порт API ноды не пускается безусловно.
+"""Аварийный режим: порт API ноды не пускается безусловно, транзит ограничен отдельной цепочкой.
 
 Гоняет настоящий configs/ddos-watchdog.sh (dry-run, audit-rules, version) под bash.
 Запуск:  python -m unittest discover -s node/tests   (на Windows — под WSL)
@@ -17,12 +17,17 @@ LOOPBACK_NET = "127.0.0.0/8"
 NODE_API_PORT = 9100
 AGENT_PORT = 7500
 FAKE_SS = "#!/bin/sh\nexit 0\n"
+TRANSIT_CHAIN = "ANTIDDOS_TRANSIT"
+# Цепочка INPUT, к которой у аудита нет претензий, — чтобы отказ был только из-за транзита
+SSH_AND_AGENT_RULES = (
+    "iptables -A ANTIDDOS -p tcp --dport 22 -j ACCEPT\n"
+    f"iptables -A ANTIDDOS -s {LOOPBACK_NET} -p tcp --dport {AGENT_PORT} -j ACCEPT\n"
+)
 
 ACCEPT_DPORT = re.compile(r"--dport\s+(\d+)\b.*-j ACCEPT")
 
 
-@unittest.skipIf(sys.platform == "win32", "bash-скрипт хоста: на Windows гоняется под WSL")
-class WatchdogNeverDropTest(unittest.TestCase):
+class WatchdogCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.stub_dir = tempfile.TemporaryDirectory()
@@ -41,6 +46,9 @@ class WatchdogNeverDropTest(unittest.TestCase):
             input=stdin.encode(), capture_output=True, env=env, timeout=60,
         )
 
+
+@unittest.skipIf(sys.platform == "win32", "bash-скрипт хоста: на Windows гоняется под WSL")
+class WatchdogNeverDropTest(WatchdogCase):
     def accept_lines(self) -> list[str]:
         result = self.run_watchdog("dry-run")
         self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
@@ -86,7 +94,79 @@ class WatchdogNeverDropTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout.decode())
 
     def test_version_bumped(self):
-        self.assertEqual(self.run_watchdog("version").stdout.decode().strip(), "2.5.1")
+        self.assertEqual(self.run_watchdog("version").stdout.decode().strip(), "2.6.0")
+
+
+@unittest.skipIf(sys.platform == "win32", "bash-скрипт хоста: на Windows гоняется под WSL")
+class WatchdogTransitChainTest(WatchdogCase):
+    """Транзит (порты контейнеров, проброс) идёт мимо INPUT — у него своя цепочка.
+
+    Она стоит в mangle/POSTROUTING, где проходит и весь исходящий трафик хоста,
+    поэтому важно не только что она режет, но и чего она не трогает.
+    """
+
+    def dry_run_lines(self) -> list[str]:
+        result = self.run_watchdog("dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+        return result.stdout.decode().splitlines()
+
+    def transit_rules(self) -> list[str]:
+        return [l for l in self.dry_run_lines() if f"-A {TRANSIT_CHAIN} " in l]
+
+    def test_own_traffic_leaves_before_any_drop(self):
+        rules = self.transit_rules()
+        first_drop = next(i for i, l in enumerate(rules) if "-j DROP" in l)
+        exits = rules[:first_drop]
+        self.assertTrue(any("ESTABLISHED" in l and "-j RETURN" in l for l in exits), exits)
+        self.assertTrue(any("! --ctstate DNAT" in l and "-j RETURN" in l for l in exits), exits)
+
+    def test_invalid_packets_are_never_matched(self):
+        # SYN-ACK, который SYNPROXY шлёт клиенту, conntrack видит как INVALID
+        for line in self.transit_rules():
+            self.assertNotIn("INVALID", line)
+
+    def test_limit_spares_whitelist_host_and_private_sources(self):
+        rules = self.transit_rules()
+        limit = next(i for i, l in enumerate(rules) if "hashlimit" in l)
+        before_limit = "\n".join(rules[:limit])
+        for exemption in (
+            "--match-set antiddos_allow src -j RETURN",
+            "--src-type LOCAL -j RETURN",
+            "-s 10.0.0.0/8 -j RETURN",
+            "-s 172.16.0.0/12 -j RETURN",
+            "-s 192.168.0.0/16 -j RETURN",
+        ):
+            self.assertIn(exemption, before_limit)
+
+    def test_limit_counts_new_connections_per_source_in_its_own_table(self):
+        # Общая с INPUT таблица делила бы один запас соединений на порты хоста и транзит
+        limits = [l for l in self.transit_rules() if "hashlimit" in l]
+        self.assertEqual(len(limits), 1, limits)
+        self.assertIn("--ctstate NEW", limits[0])
+        self.assertIn("--hashlimit-mode srcip", limits[0])
+        self.assertIn("--hashlimit-name ad_emg_fwd", limits[0])
+        self.assertTrue(limits[0].endswith("-j DROP"))
+
+    def test_chain_is_jumped_from_mangle_postrouting(self):
+        self.assertIn(f"iptables -t mangle -I POSTROUTING 1 -j {TRANSIT_CHAIN}", self.dry_run_lines())
+
+    def test_audit_accepts_generated_chain(self):
+        result = self.run_watchdog("audit-rules", stdin=SSH_AND_AGENT_RULES + "\n".join(self.transit_rules()) + "\n")
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.assertIn("transit: established and non-DNAT traffic leave before any DROP", result.stdout.decode())
+
+    def test_audit_rejects_drop_ahead_of_the_exits(self):
+        rules = self.transit_rules()
+        first_drop = next(l for l in rules if "-j DROP" in l)
+        result = self.run_watchdog("audit-rules", stdin=SSH_AND_AGENT_RULES + "\n".join([first_drop] + rules) + "\n")
+        self.assertNotEqual(result.returncode, 0, result.stdout.decode())
+
+    def test_audit_rejects_chain_matching_invalid(self):
+        broken = self.transit_rules() + [
+            f"iptables -t mangle -A {TRANSIT_CHAIN} -p tcp -m conntrack --ctstate INVALID -j DROP",
+        ]
+        result = self.run_watchdog("audit-rules", stdin=SSH_AND_AGENT_RULES + "\n".join(broken) + "\n")
+        self.assertNotEqual(result.returncode, 0, result.stdout.decode())
 
 
 if __name__ == "__main__":
