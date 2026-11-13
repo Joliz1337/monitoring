@@ -185,9 +185,7 @@ class InstallViaPanelTests(unittest.IsolatedAsyncioTestCase):
     async def collect(self, port: int) -> list[dict]:
         target = SSHTarget(host="127.0.0.1", port=port, password="pw")
         return [
-            event async for event in install_via_panel(
-                target, None, lambda proxy: f"install --proxy {proxy}"
-            )
+            event async for event in install_via_panel(target, lambda proxy: f"install --proxy {proxy}")
         ]
 
     async def test_command_runs_with_tunnel_proxy_and_reports_exit_code(self):
@@ -207,7 +205,7 @@ class InstallViaPanelTests(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_password(self):
         port = await self.start_ssh(_PasswordSshServer)
         target = SSHTarget(host="127.0.0.1", port=port, password="wrong")
-        events = [e async for e in install_via_panel(target, None, lambda proxy: "true")]
+        events = [e async for e in install_via_panel(target, lambda proxy: "true")]
 
         self.assertEqual(events, [{"type": "error", "message": "SSH: неверный логин, пароль или ключ"}])
 

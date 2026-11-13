@@ -240,7 +240,7 @@ class SshFallbackTests(unittest.IsolatedAsyncioTestCase):
             for event in agent_events:
                 yield event
 
-        async def ssh(target, socks5_proxy, command_for):
+        async def ssh(target, command_for):
             ssh_calls.append(target)
             yield {"type": "log", "line": "ssh: HAProxy 2.8 → 3.2"}
             yield {"type": "done", "exit_code": 0}

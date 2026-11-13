@@ -13,6 +13,28 @@ export NEEDRESTART_SUSPEND=1
 
 CONTAINERS_STOPPED=0
 
+# Образы без тега — прежние версии панели и образа ноды, который панель держит
+# для доставки на ноды, — и кэш сборки. Без уборки каждое обновление оставляло
+# их на диске навсегда
+cleanup_docker_leftovers() {
+    docker image prune -f >/dev/null 2>&1 || true
+    docker builder prune -f --keep-storage=500MB >/dev/null 2>&1 || true
+}
+
+# Образы панели и образа ноды под тегом, отличным от действующего в .env: остались
+# после смены канала или отката на версию. Тег у них есть, поэтому image prune их
+# не видит. Только после запуска на новых образах: до него контейнеры остановлены,
+# и образ прежнего тега — то, на чём сбой поднимет панель обратно. Образ, занятый
+# контейнером, docker rmi не удаляет
+remove_stale_panel_images() {
+    local keep_tag stale
+    keep_tag=$(sed -n 's/^MON_IMAGE_TAG=//p' "$PANEL_DIR/.env" 2>/dev/null | tail -1)
+    docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
+        | grep -E '^ghcr\.io/joliz1337/monitoring-(panel-backend|panel-frontend|node-api):' \
+        | grep -vE ":${keep_tag:-latest}\$" \
+        | while read -r stale; do docker rmi "$stale" >/dev/null 2>&1 || true; done
+}
+
 # Любой сбой после остановки контейнеров не должен оставить панель лежать:
 # поднимаем то, что есть на диске (старую или уже скопированную версию)
 cleanup() {
@@ -343,6 +365,7 @@ fi
 
 # Pull new Docker images
 cd "$PANEL_DIR"
+cleanup_docker_leftovers
 
 set +e
 # Pull ready images from GHCR (normal flow)
@@ -391,6 +414,10 @@ done
 if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
     log_warn "Health check timed out, but containers are running"
 fi
+
+# Контейнеры уже на новых образах — прежние остались без тега или под прежним тегом
+cleanup_docker_leftovers
+remove_stale_panel_images || true
 
 # Final version
 FINAL_VERSION="unknown"

@@ -6,11 +6,17 @@
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
 
 import asyncssh
+from python_socks import ProxyError as SocksProxyError
+from python_socks import ProxyType
+from python_socks.async_.asyncio import Proxy as SocksProxy
+
+from app.services.http_client import parse_proxy_input, sanitize_proxy
 
 if TYPE_CHECKING:
     from app.models import Server
@@ -26,6 +32,9 @@ class SSHTarget:
     password: Optional[str] = None
     private_key: Optional[str] = None
     passphrase: Optional[str] = None
+    # SOCKS5-прокси панель→сервер ("ip:port[@login:pass]"): сервер, до которого
+    # панель достаёт только через прокси, по SSH напрямую тоже не ответит
+    socks5_proxy: Optional[str] = None
 
 
 class SSHTargetError(Exception):
@@ -70,6 +79,7 @@ def resolve_ssh_target(
     return SSHTarget(
         host=host, port=port, user=user,
         password=password, private_key=private_key, passphrase=passphrase,
+        socks5_proxy=server.proxy_url or None,
     )
 
 
@@ -90,3 +100,30 @@ def ssh_connect_kwargs(t: SSHTarget) -> dict:
     elif t.password:
         kwargs["password"] = t.password
     return kwargs
+
+
+async def open_ssh_connection(
+    connect_kwargs: dict, socks5_proxy: Optional[str],
+) -> asyncssh.SSHClientConnection:
+    """SSH-подключение напрямую или через SOCKS5-прокси панель→сервер.
+
+    С прокси сокет открывает python-socks, asyncssh получает его через sock=.
+    Ошибки прокси приходят как OSError с адресом прокси без логина и пароля —
+    их ловят те же обработчики, что и сетевые ошибки прямого подключения.
+    """
+    if not socks5_proxy:
+        return await asyncssh.connect(**connect_kwargs)
+
+    host, port, login, password = parse_proxy_input(socks5_proxy)
+    proxy = SocksProxy(ProxyType.SOCKS5, host, port, username=login, password=password)
+    timeout = connect_kwargs.get("connect_timeout", CONNECT_TIMEOUT)
+    proxy_address = sanitize_proxy(socks5_proxy)
+    try:
+        sock = await proxy.connect(
+            dest_host=connect_kwargs["host"], dest_port=connect_kwargs["port"], timeout=timeout,
+        )
+    except asyncio.TimeoutError as exc:
+        raise OSError(f"SOCKS5-прокси {proxy_address} не ответил за {timeout} с") from exc
+    except (SocksProxyError, OSError) as exc:
+        raise OSError(f"SOCKS5-прокси {proxy_address}: {exc}") from exc
+    return await asyncssh.connect(**connect_kwargs, sock=sock)

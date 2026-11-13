@@ -71,7 +71,6 @@ async def install_remnawave(
     else:
         events = install_via_panel(
             ssh_target,
-            server.proxy_url,
             lambda tunnel_proxy: build_remnawave_install_command(cert, tunnel_proxy),
         )
     job_id = get_remnawave_install_manager().start(server, events)

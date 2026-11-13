@@ -214,7 +214,7 @@ async def _agent_then_ssh(
         yield failure
         return
     yield {"type": "log", "line": "[panel] Через агента обновление не скачалось — повторяю по SSH, пакеты через панель"}
-    async for event in install_via_panel(ssh_target, server.proxy_url, build_haproxy_upgrade_command):
+    async for event in install_via_panel(ssh_target, build_haproxy_upgrade_command):
         yield event
 
 
@@ -229,7 +229,7 @@ def start_upgrade(server: Server, ssh_target: Optional[SSHTarget] = None) -> str
     """Запустить обновление по SSH с загрузкой через панель (ssh_target) или через
     агента ноды — с повтором по сохранённому SSH-доступу, если сервер не скачал обновление."""
     if ssh_target is not None:
-        events = install_via_panel(ssh_target, server.proxy_url, build_haproxy_upgrade_command)
+        events = install_via_panel(ssh_target, build_haproxy_upgrade_command)
     else:
         events = _agent_then_ssh(server, *_saved_ssh_target(server))
     return _manager.start(server, _queued(events))

@@ -7,11 +7,13 @@ Runnable with plain stdlib:  python -m unittest discover -s node/tests
 контейнер), и опоздавший итог старой попытки не затирает новую.
 """
 
+import errno
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -153,6 +155,49 @@ class StoreTest(unittest.TestCase):
         self.store.save(new_attempt("main", "1"))
         self.store._path.write_text("{not json")
         self.assertIsNone(self.store.load())
+
+
+class FullDiskStoreTest(unittest.TestCase):
+    """Диск ноды забит, файл состояния не пишется. Итог попытки при этом теряться
+    не должен: иначе панель получает «апдейтер завершился, не оставив итога»
+    вместо настоящей причины."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "update-state.json"
+        self.store = UpdateStateStore(self.path)
+
+    @staticmethod
+    def disk_full():
+        return mock.patch.object(Path, "write_text", side_effect=OSError(errno.ENOSPC, "No space left on device"))
+
+    def test_outcome_survives_unwritable_state_file(self):
+        attempt = new_attempt("dev", "10.35.0")
+        self.store.save(attempt)
+        with self.disk_full():
+            self.store.record(
+                attempt.attempt_id,
+                UpdateOutcome(UpdateResult.FAILED, error="Docker error: no space left on device"),
+            )
+            loaded = self.store.load()
+        self.assertIs(loaded.result, UpdateResult.FAILED)
+        self.assertEqual(loaded.error, "Docker error: no space left on device")
+        self.assertEqual(resolve_orphaned(loaded, None), loaded)
+
+    def test_attempt_started_on_full_disk_is_tracked(self):
+        attempt = new_attempt("dev", "10.35.0")
+        with self.disk_full():
+            self.store.save(attempt)
+            self.assertEqual(self.store.load(), attempt)
+
+    def test_state_returns_to_disk_when_there_is_room_again(self):
+        attempt = new_attempt("dev", "10.35.0")
+        with self.disk_full():
+            self.store.save(attempt)
+        finished = finish(attempt, UpdateOutcome(UpdateResult.SUCCESS))
+        self.store.save(finished)
+        self.assertEqual(UpdateStateStore(self.path).load(), finished)
 
 
 class CurrentStageTest(unittest.TestCase):

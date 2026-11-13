@@ -24,13 +24,10 @@ from enum import Enum
 from typing import AsyncIterator, Callable
 
 import asyncssh
-from python_socks import ProxyType
-from python_socks import ProxyError as SocksProxyError
-from python_socks.async_.asyncio import Proxy as SocksProxy
 
-from app.services.http_client import parse_proxy_input, sanitize_proxy
+from app.services.http_client import sanitize_proxy
 from app.services.install_tunnel import InstallTunnel, TunnelForwardingDenied, open_install_tunnel
-from app.services.ssh_target import SSHTarget, ssh_connect_kwargs
+from app.services.ssh_target import SSHTarget, open_ssh_connection, ssh_connect_kwargs
 from app.services import update_channel
 
 REMOTE_SCRIPT = "/tmp/mon-install.sh"
@@ -271,31 +268,6 @@ def _connect_kwargs(params: DeployParams) -> dict:
     return kwargs
 
 
-async def _ssh_connect(
-    connect_kwargs: dict, socks5_proxy: str | None
-) -> asyncssh.SSHClientConnection:
-    """SSH-подключение: напрямую или через SOCKS5-прокси.
-
-    С прокси сокет открывается python-socks и передаётся в asyncssh через sock=
-    (поддерживается с asyncssh 2.12). Ошибки прокси нормализуются в OSError с
-    адресом без креденшалов — существующие обработчики вызовов их уже ловят.
-    """
-    if not socks5_proxy:
-        return await asyncssh.connect(**connect_kwargs)
-
-    host, port, login, password = parse_proxy_input(socks5_proxy)
-    proxy = SocksProxy(ProxyType.SOCKS5, host, port, username=login, password=password)
-    try:
-        sock = await proxy.connect(
-            dest_host=connect_kwargs["host"],
-            dest_port=connect_kwargs["port"],
-            timeout=CONNECT_TIMEOUT,
-        )
-    except (SocksProxyError, OSError, asyncio.TimeoutError) as exc:
-        raise OSError(f"SOCKS5-прокси {sanitize_proxy(socks5_proxy)}: {exc}") from exc
-    return await asyncssh.connect(**connect_kwargs, sock=sock)
-
-
 # Адрес прокси панели на сервере (None без туннеля) → команда установки
 CommandForProxy = Callable[[str | None], str]
 
@@ -311,9 +283,7 @@ def _run_install_once(connect_kwargs: dict, params: DeployParams) -> AsyncIterat
     )
 
 
-async def install_via_panel(
-    target: SSHTarget, socks5_proxy: str | None, command_for: CommandForProxy
-) -> AsyncIterator[dict]:
+async def install_via_panel(target: SSHTarget, command_for: CommandForProxy) -> AsyncIterator[dict]:
     """Установка на уже добавленный сервер по SSH, всё качается через панель.
 
     Через агента ноды так нельзя: установщик перезапускает Docker, чтобы тот
@@ -326,7 +296,7 @@ async def install_via_panel(
         yield {"type": "error", "message": f"Некорректный SSH-ключ: {exc}"}
         return
 
-    async for event in _stream_ssh_install(connect_kwargs, socks5_proxy, True, command_for):
+    async for event in _stream_ssh_install(connect_kwargs, target.socks5_proxy, True, command_for):
         if event["type"] == "_result":
             yield {"type": "done", "exit_code": event["exit_code"]}
         else:
@@ -351,8 +321,8 @@ async def _stream_ssh_install(
     result: dict | None = None
 
     try:
-        async with await _ssh_connect(connect_kwargs, socks5_proxy) as conn:
-            via_proxy = f" через SOCKS5 {sanitize_proxy(socks5_proxy)}" if socks5_proxy else ""
+        async with await open_ssh_connection(connect_kwargs, socks5_proxy) as conn:
+            via_proxy =f" через SOCKS5 {sanitize_proxy(socks5_proxy)}" if socks5_proxy else ""
             yield {
                 "type": "log",
                 "line": f"[panel] SSH-подключение к {connect_kwargs['host']}:{connect_kwargs['port']} "
@@ -451,7 +421,7 @@ async def _change_expired_password(
     паролем, поэтому здесь достаточно отработать диалог и отсечь явный отказ.
     """
     try:
-        async with await _ssh_connect(connect_kwargs, socks5_proxy) as conn:
+        async with await open_ssh_connection(connect_kwargs, socks5_proxy) as conn:
             process = await conn.create_process(term_type="ansi", term_size=(120, 40))
             answered_current = answered_new = answered_retype = False
             buffer = ""

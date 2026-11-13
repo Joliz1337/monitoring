@@ -6,6 +6,8 @@
 записывает тот, кто его увидел: прежний процесс, если дождался апдейтера, или
 новый — по коду выхода оставшегося контейнера. Панель по идентификатору отличает
 итог своей попытки от чужой и решает, нужен ли запасной путь через SSH.
+Если файл не записался (диск забит), попытка остаётся в памяти процесса: причина
+провала в этот момент важнее всего.
 """
 
 import json
@@ -164,8 +166,13 @@ def status_payload(
 class UpdateStateStore:
     def __init__(self, path: Path = STATE_FILE):
         self._path = path
+        # Попытка, которую не удалось записать: на забитом диске файл не пишется,
+        # а итог нужен как раз тогда — по нему панель узнаёт, что кончилось место
+        self._unsaved: Optional[UpdateAttempt] = None
 
     def load(self) -> Optional[UpdateAttempt]:
+        if self._unsaved is not None:
+            return self._unsaved
         try:
             raw = json.loads(self._path.read_text())
             return UpdateAttempt(**{**raw, "result": UpdateResult(raw["result"])})
@@ -176,10 +183,16 @@ class UpdateStateStore:
             return None
 
     def save(self, attempt: UpdateAttempt) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({**asdict(attempt), "result": attempt.result.value}))
-        os.replace(tmp, self._path)
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({**asdict(attempt), "result": attempt.result.value}))
+            os.replace(tmp, self._path)
+        except OSError as e:
+            logger.error(f"Update state not written to {self._path}, kept in memory: {e}")
+            self._unsaved = attempt
+            return
+        self._unsaved = None
 
     def record(self, attempt_id: str, outcome: UpdateOutcome) -> None:
         """Записать итог, если файл всё ещё про эту попытку — опоздавший итог

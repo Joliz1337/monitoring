@@ -13,6 +13,43 @@ export NEEDRESTART_SUSPEND=1
 
 CONTAINERS_STOPPED=0
 
+# Сборке образа на ноде нужны базовый образ, слои apt и pip и кэш — около 1,5 ГБ.
+# На диске, где свободно меньше, она забила бы его до отказа
+MIN_FREE_MB_FOR_BUILD=2000
+
+# Свободно на разделе с хранилищем Docker, МБ. Пусто — узнать не удалось
+docker_free_mb() {
+    local root
+    root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)
+    [ -d "$root" ] || root=/var/lib/docker
+    df -Pm "$root" 2>/dev/null | awk 'NR==2 {print $4}'
+}
+
+# Образы ноды под тегом, отличным от действующего в .env: остались после смены
+# канала или отката на версию, сюда же локальная сборка старых версий, чей compose
+# ещё не называл образ. Тег у них есть, поэтому image prune их не видит. Образ,
+# занятый контейнером, docker rmi не удаляет
+remove_stale_node_images() {
+    local keep_tag stale
+    keep_tag=$(sed -n 's/^MON_IMAGE_TAG=//p' "${NODE_DIR:-/opt/monitoring-node}/.env" 2>/dev/null | tail -1)
+    docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
+        | grep -E '^(ghcr\.io/joliz1337/monitoring-node-api|monitoring-node-api):' \
+        | grep -vxF "ghcr.io/joliz1337/monitoring-node-api:${keep_tag:-latest}" \
+        | while read -r stale; do docker rmi "$stale" >/dev/null 2>&1 || true; done
+}
+
+# Остатки обновлений: образы без тега (прежние версии ноды), образы ноды под
+# другим тегом, кэш сборки, архив образа от прежних версий панели. Убираются и
+# перед скачиванием, и после сорвавшегося обновления: на ноде, которая раз за
+# разом не может обновиться, уборка в конце удачного прохода не наступает
+# никогда, и диск забивается
+cleanup_update_leftovers() {
+    docker image prune -f >/dev/null 2>&1 || true
+    remove_stale_node_images || true
+    docker builder prune -f --keep-storage=500MB >/dev/null 2>&1 || true
+    rm -f /tmp/mon-node-img.tar.gz 2>/dev/null || true
+}
+
 cleanup() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
@@ -30,6 +67,11 @@ cleanup() {
                 echo -e "\033[0;31m[RECOVERY] Failed to restart containers! Manual intervention required\033[0m"
                 echo -e "\033[0;31m[RECOVERY] Run: cd /opt/monitoring-node && docker compose up -d\033[0m"
             fi
+        else
+            # Сбой до рестарта — на скачивании или сборке: убираем то, что они
+            # оставили. Сорвался сам рестарт — образы не трогаем: прежний ещё
+            # может понадобиться, чтобы вернуть ноду руками
+            cleanup_update_leftovers
         fi
     fi
     exit $exit_code
@@ -708,6 +750,8 @@ fi
 # Если скачать/собрать не удалось — обновление отменяется без даунтайма.
 cd "$NODE_DIR"
 stage images
+cleanup_update_leftovers
+log_info "Free space for Docker images: $(docker_free_mb) MB"
 
 set +e
 # Блок-режим (MON_ALLOW_LOCAL_BUILD=0, панель-триггер для заблокированной ноды):
@@ -725,6 +769,12 @@ elif ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RE
     if compose_images_present; then
         log_success "Registry unreachable — using images already present locally"
     else
+        free_mb=$(docker_free_mb)
+        if [ -n "$free_mb" ] && [ "$free_mb" -lt "$MIN_FREE_MB_FOR_BUILD" ]; then
+            # Тот же выход, что при запрещённой сборке: образ довезёт панель по SSH
+            log_error "Not enough free disk space to build the image locally: ${free_mb} MB free, ${MIN_FREE_MB_FOR_BUILD} MB needed — expecting delivery from panel"
+            exit 20
+        fi
         log_warn "Failed to pull from registry, building locally..."
         spin "Pulling base images" bash -c \
             'docker compose pull --ignore-buildable 2>/dev/null || true'
@@ -778,10 +828,10 @@ if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
     log_warn "Health check timed out, but containers are running"
 fi
 
-# Cleanup old Docker images and build cache
 log_info "Cleaning up old Docker images..."
-docker image prune -f >/dev/null 2>&1 || true
-docker builder prune -f --keep-storage=500MB >/dev/null 2>&1 || true
+cleanup_update_leftovers
+# Недокачанные архивы образа от панели: нода обновилась сама, докачивать их незачем
+rm -f /var/tmp/mon-node-img-*.tar.gz 2>/dev/null || true
 log_success "Docker cleanup done"
 
 # Final version
