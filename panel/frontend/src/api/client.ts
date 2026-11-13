@@ -1464,6 +1464,8 @@ export interface VersionBaseInfo {
   }
   nodes: VersionBaseNode[]
   update_in_progress: boolean
+  // Ноды из «Обновить всё», которым панель ещё не разослала обновление
+  pending_node_rollout?: number
 }
 
 // Сводка для значка в меню: версии нод панель берёт из своей БД, к нодам не ходит
@@ -1714,6 +1716,9 @@ export const systemApi = {
   nodeUpdates: () => api.get<{ updates: NodeUpdateProgress[] }>('/system/node-updates'),
   updatePanel: (targetRef?: string) =>
     api.post<UpdateResponse>('/system/update', undefined, targetRef ? { params: { target_ref: targetRef } } : undefined),
+  // Панель обновляется первой и сама рассылает обновление этим нодам, когда поднимется
+  updateEverything: (serverIds: number[]) =>
+    api.post<UpdateResponse>('/system/update-everything', { server_ids: serverIds }),
   
   // Node updates via proxy
   updateNode: (serverId: number, targetVersion?: string) =>

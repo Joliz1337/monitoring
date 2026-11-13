@@ -413,6 +413,24 @@ export default function Updates() {
     return () => clearInterval(id)
   }, [hasActiveNodeUpdate, fetchNodeUpdates])
 
+  // После «Обновить всё» панель, поднявшись, сама рассылает обновление нодам. Пока список
+  // не разослан, перечитываем только его остаток и идущие обновления — без обхода нод
+  const pendingRollout = baseInfo?.pending_node_rollout ?? 0
+
+  useEffect(() => {
+    if (pendingRollout === 0) return
+    const id = setInterval(async () => {
+      try {
+        const { data } = await systemApi.getVersionBase()
+        setBaseInfo(prev => prev && { ...prev, pending_node_rollout: data.pending_node_rollout ?? 0 })
+        fetchNodeUpdates()
+      } catch {
+        // панель могла ещё не подняться — следующая попытка через интервал
+      }
+    }, JOB_POLL_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [pendingRollout, fetchNodeUpdates])
+
   useEffect(() => {
     const id = setInterval(() => {
       const isIdle = Date.now() - lastActivityRef.current > IDLE_THRESHOLD
@@ -464,14 +482,15 @@ export default function Updates() {
     }
   }, [t])
 
-  const handleUpdatePanel = async () => {
+  // request — чем запускается обновление: одной панели или панели с нодами после неё
+  const startPanelUpdate = async (request: () => ReturnType<typeof systemApi.updatePanel>) => {
     if (updatingPanel) return
 
     setUpdatingPanel(true)
     setUpdateResults(prev => ({ ...prev, panel: { success: true, message: t('updates.in_progress') } }))
 
     try {
-      const response = await systemApi.updatePanel()
+      const response = await request()
       setUpdateResults(prev => ({
         ...prev,
         panel: { success: true, message: response.data.message }
@@ -487,6 +506,8 @@ export default function Updates() {
       setUpdatingPanel(false)
     }
   }
+
+  const handleUpdatePanel = () => startPanelUpdate(() => systemApi.updatePanel())
 
   const handleUpdateNode = async (nodeId: number, nodeName: string) => {
     if (updatingNodes.has(nodeId)) return
@@ -535,27 +556,26 @@ export default function Updates() {
     setUpdatingAll(false)
   }
 
-  // «Обновить всё»: сначала рассылаются запуски обновления на все подходящие ноды
-  // (каждая обновляет себя сама, результат отдельной ноды не блокирует процесс),
-  // и как только все запросы отправлены — панель запускает обновление самой себя.
+  // «Обновить всё»: панель обновляется первой, а список нод уходит ей — команду нодам
+  // разошлёт уже новая панель, когда поднимется. Ноду, которая не обновится сама,
+  // тогда довозит по SSH новый код, и перезапуск панели не обрывает доставку.
+  // Панель уже актуальна — ноды обновляются сразу отсюда.
   const handleUpdateEverything = async () => {
-    if (updatingEverything || updatingAll || updatingPanel || !allNodesLoaded || !baseInfo) return
+    if (updatingEverything || updatingAll || updatingPanel || pendingRollout > 0 || !allNodesLoaded || !baseInfo) return
 
     setUpdatingEverything(true)
     try {
       const targets = collectNodeUpdateTargets()
-      if (targets.length > 0) {
-        toast.info(t('updates.everything_nodes_started', { count: targets.length }))
-        setUpdatingAll(true)
-        await Promise.all(targets.map(n => handleUpdateNode(n.id, n.name)))
-        setUpdatingAll(false)
+      if (panelCanUpdate) {
+        if (targets.length > 0) toast.info(t('updates.everything_panel_first', { count: targets.length }))
+        await startPanelUpdate(() => systemApi.updateEverything(targets.map(n => n.id)))
+        return
       }
 
-      if (panelCanUpdate) {
-        await handleUpdatePanel()
-      } else {
-        toast.success(t('updates.everything_panel_skipped'))
-      }
+      setUpdatingAll(true)
+      await Promise.all(targets.map(n => handleUpdateNode(n.id, n.name)))
+      setUpdatingAll(false)
+      toast.success(t('updates.everything_panel_skipped'))
     } finally {
       setUpdatingEverything(false)
     }
@@ -849,7 +869,7 @@ export default function Updates() {
             <Tooltip label={t('updates.update_everything_hint')} maxWidth={320}>
             <motion.button
               onClick={handleUpdateEverything}
-              disabled={!allNodesLoaded || updatingEverything || updatingAll || updatingPanel || updatingNodes.size > 0}
+              disabled={!allNodesLoaded || updatingEverything || updatingAll || updatingPanel || updatingNodes.size > 0 || pendingRollout > 0}
               className="btn btn-primary"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
@@ -867,6 +887,13 @@ export default function Updates() {
           )}
         </div>
       </motion.div>
+
+      {pendingRollout > 0 && (
+        <div className="flex items-center gap-3 p-4 mb-6 bg-accent-500/10 border border-accent-500/20 rounded-xl text-accent-400">
+          <Loader2 className="w-5 h-5 flex-shrink-0 animate-spin" />
+          <span className="text-sm">{t('updates.nodes_after_panel', { count: pendingRollout })}</span>
+        </div>
+      )}
 
       {/* Error */}
       <AnimatePresence>
@@ -1016,7 +1043,7 @@ export default function Updates() {
             {updateAllCount > 0 && (
               <motion.button
                 onClick={handleUpdateAllNodes}
-                disabled={updatingAll || !allNodesLoaded}
+                disabled={updatingAll || !allNodesLoaded || pendingRollout > 0}
                 className="btn btn-secondary"
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}

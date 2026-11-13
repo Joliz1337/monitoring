@@ -932,21 +932,10 @@ async def remove_tracked_port(
 
 # ==================== System / Updates ====================
 
-@router.post("/{server_id}/system/update")
-async def trigger_node_update(
-    server_id: int,
-    data: dict = None,
-    db: AsyncSession = Depends(get_db),
-    _: dict = Depends(verify_auth)
-):
-    """
-    Trigger node update.
-    Optional data: { "target_version": "v1.1.0" }
-    If not specified, updates to the selected update channel (main/dev).
-    Итог панель дождётся сама и при провале обновит ноду по SSH (node_update_watcher).
-    """
-    server = await get_server_by_id(server_id, db)
-    data = data or {}
+async def start_node_update(db: AsyncSession, server: Server, data: Optional[dict] = None) -> dict:
+    """Запустить обновление ноды через её агента и записать попытку наблюдателю.
+    Одним путём идут кнопка «Обновить» и рассылка нодам после обновления панели."""
+    data = dict(data or {})
     if not data.get("target_version"):
         data["target_version"] = update_channel.current_branch()
     target_ref = data["target_version"]
@@ -970,6 +959,23 @@ async def trigger_node_update(
         }
     await node_update_watcher.track(db, server, target_ref, result.get("attempt_id"))
     return result
+
+
+@router.post("/{server_id}/system/update")
+async def trigger_node_update(
+    server_id: int,
+    data: dict = None,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """
+    Trigger node update.
+    Optional data: { "target_version": "v1.1.0" }
+    If not specified, updates to the selected update channel (main/dev).
+    Итог панель дождётся сама и при провале обновит ноду по SSH (node_update_watcher).
+    """
+    server = await get_server_by_id(server_id, db)
+    return await start_node_update(db, server, data)
 
 
 @router.post("/{server_id}/system/execute")

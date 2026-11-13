@@ -13,6 +13,7 @@ import psutil
 from app.services.http_client import get_node_client, get_external_client, node_auth_headers
 from docker.errors import DockerException, ImageNotFound
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,8 +21,9 @@ from app.auth import verify_auth
 from app.config import get_settings
 from app.database import get_db, async_session
 from app.models import Server, PanelSettings
+from app.routers.proxy import start_node_update
 from app.security import is_direct_local_request
-from app.services import node_update_watcher, release_versions, update_channel, upstream_commit
+from app.services import node_rollout, node_update_watcher, release_versions, update_channel, upstream_commit
 from app.services.haproxy_upgrade import describe_haproxy
 from app.services.net_utils import panel_ip_info
 from app.services.panel_host_metrics import HostHistoryPeriod, load_host_history
@@ -291,6 +293,8 @@ async def get_version_base(
         "optimizations": {"latest_version": latest.optimizations},
         "nodes": nodes,
         "update_in_progress": _update_status["in_progress"],
+        # Ноды из «Обновить всё», которым панель ещё не разослала обновление
+        "pending_node_rollout": await node_rollout.pending_count(),
     }
 
 
@@ -489,6 +493,50 @@ async def run_panel_update_in_container(target_ref: str | None = None):
         logger.error(f"Unexpected error: {e}")
     finally:
         _update_status["in_progress"] = False
+        if _update_status["last_result"] == "failed":
+            # Раз этот процесс дожил до провала, панель не перезапустится — ноды из
+            # «Обновить всё» ждать её не должны
+            node_rollout.start(launch_node_update, delay=0)
+
+
+async def launch_node_update(server_id: int, target_ref: str) -> None:
+    """Обновление одной ноды для рассылки после обновления панели — тем же
+    путём, что кнопка «Обновить». Удалённый или выключенный сервер пропускается."""
+    async with async_session() as db:
+        server = (await db.execute(
+            select(Server).where(Server.id == server_id, Server.is_active == True)
+        )).scalar_one_or_none()
+        if server is None:
+            return
+        # Коннект пула не держим на время запроса к ноде
+        await db.commit()
+        await start_node_update(db, server, {"target_version": target_ref})
+
+
+class UpdateEverythingRequest(BaseModel):
+    server_ids: list[int] = Field(default_factory=list, max_length=node_rollout.MAX_ROLLOUT_SERVERS)
+
+
+@router.post("/update-everything")
+async def update_everything(req: UpdateEverythingRequest, _: dict = Depends(verify_auth)):
+    """Обновить панель, а после неё — перечисленные ноды.
+
+    Список нод пишется в базу, рассылку делает бэкенд, поднявшийся после
+    обновления: нодам, которые не обновятся сами, образ довезёт уже новая панель.
+    """
+    if _update_status["in_progress"] or await node_rollout.pending_count():
+        raise HTTPException(status_code=409)
+
+    target_ref = update_channel.current_branch()
+    nodes = await node_rollout.schedule(req.server_ids, target_ref)
+    asyncio.create_task(run_panel_update_in_container())
+
+    return {
+        "success": True,
+        "message": "Panel update started. Nodes will be updated after the panel restarts.",
+        "target": target_ref,
+        "nodes": nodes,
+    }
 
 
 @router.post("/update")

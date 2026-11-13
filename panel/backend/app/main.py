@@ -30,6 +30,7 @@ from app.services.torrent_blocker import start_torrent_blocker, stop_torrent_blo
 from app.services.antiddos_manager import start_antiddos_manager, stop_antiddos_manager
 from app.services.node_sync_queue import start_node_sync_queue, stop_node_sync_queue
 from app.services.node_update_watcher import start_node_update_watcher, stop_node_update_watcher
+from app.services import node_rollout
 from app.services.exit_proxy.service import start_exit_proxy, stop_exit_proxy
 from app.services.source_pool.service import start_source_pool, stop_source_pool
 from app.services.gre.service import start_gre, stop_gre
@@ -104,6 +105,8 @@ async def lifespan(app: FastAPI):
     await start_node_sync_queue()
     # Попытки обновления нод тоже в базе: итог дождётся и рестарта панели после «Обновить всё».
     await start_node_update_watcher()
+    # «Обновить всё» обновляет панель первой: ноды из её списка получают команду отсюда.
+    node_rollout.start(system.launch_node_update)
     await start_exit_proxy()
     await start_source_pool()
     await start_gre()
@@ -131,6 +134,7 @@ async def lifespan(app: FastAPI):
     await stop_gre()
     await stop_source_pool()
     await stop_exit_proxy()
+    await node_rollout.stop()
     await stop_node_update_watcher()
     await stop_node_sync_queue()
     await stop_antiddos_manager()

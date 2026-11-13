@@ -1140,9 +1140,10 @@
     "update_all_nodes": "Update All Nodes",
     "update_everything": "Update Everything",
     "updating_everything": "Updating everything...",
-    "update_everything_hint": "Start updating all nodes, then the panel itself",
+    "update_everything_hint": "Update the panel, then all nodes once it is back up. You can close the tab: the panel sends the command to the nodes itself",
     "nodes_loading": "Loading nodes {{loaded}}/{{total}}",
-    "everything_nodes_started": "Update started for {{count}} nodes, the panel will update next",
+    "everything_panel_first": "The panel is updating, nodes will update right after it: {{count}}",
+    "nodes_after_panel": "The panel is updated and is rolling the update out to nodes, remaining: {{count}}",
     "everything_panel_skipped": "Node updates started, the panel is already up to date",
     "dev_channel_badge": "Dev channel: updates always available",
     "in_progress": "Updating...",
@@ -1588,7 +1589,7 @@
       },
       {
         "title": "Emergency mode",
-        "body": "Turns on a firewall ruleset: SYNPROXY (validates the TCP handshake before a connection reaches the server — kills SYN floods from spoofed addresses), a per-IP new-connections-per-second limit and dropping of junk packets (the concurrent-connection cap was removed: it walked the conntrack table on every new packet, so it got expensive exactly during an attack, and it punished subscribers sharing a carrier NAT). Applied only to client ports (auto-detected); SSH and the panel port are never touched."
+        "body": "Turns on a firewall ruleset: SYNPROXY (validates the TCP handshake before a connection reaches the server — kills SYN floods from spoofed addresses), a per-IP new-connections-per-second limit and dropping of junk packets (the concurrent-connection cap was removed: it walked the conntrack table on every new packet, so it got expensive exactly during an attack, and it punished subscribers sharing a carrier NAT). Applied to the server's client ports (auto-detected); the new-connection limit also covers published Docker container ports and port forwarding. SSH and the panel port are never touched."
       },
       {
         "title": "Auto-detect (watchdog)",

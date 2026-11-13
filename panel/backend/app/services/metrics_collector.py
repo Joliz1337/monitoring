@@ -129,42 +129,123 @@ class PersistSchedule:
             self._next_at[server_id] = offset + (periods_passed + 1) * self._period
 
 
-class SlowCycles:
-    """Счёт циклов сбора, не уложившихся в интервал, за окно отчёта.
+@dataclass
+class CyclePhases:
+    """Сколько цикл ждал ноды и сколько чистил историю; остальное его время —
+    разбор ответов и запись в базу."""
+    nodes: float = 0.0
+    cleanup: float = 0.0
 
-    Такой цикл пропускает такт: на графиках точки идут реже, а со стороны это
-    ничем, кроме лога, не видно. Отдельные медленные циклы на живом парке
-    случаются постоянно, поэтому в лог идёт сводка за окно, а не строка на каждый.
+
+@dataclass
+class NodePoll:
+    """Опрос ноды, начатый циклом сбора: дождаться его цикл не обязан."""
+    task: asyncio.Task
+    started_in_cycle: int
+
+
+class CollectionReport:
+    """Сводка о сборе за окно: циклы дольше интервала, такты, начатые с опозданием,
+    и опросы нод, не успевшие к сроку.
+
+    Цикл дольше интервала пропускает такт: на графиках точки идут реже. Такт,
+    начатый позже отметки, сдвигает точки всему парку. Опоздавший опрос такта не
+    отнимает, но его нода остаётся в этом цикле без снапшота. Со стороны ничего из
+    этого не видно ничем, кроме лога, а на живом парке случается постоянно —
+    поэтому в лог идёт сводка за окно, а не строка на каждый случай.
     """
+
+    NAMED_NODES = 5  # поимённо — ноды с наибольшим числом опозданий, остальные счётчиком
+    # Проснуться позже отметки цикл может только из-за занятого event loop панели;
+    # опоздание меньше этого порога — обычный разброс таймера
+    LATE_TICK_SECONDS = 1.0
 
     def __init__(self, window_seconds: float, clock: Callable[[], float]) -> None:
         self._window = window_seconds
         self._clock = clock
-        self._started = clock()
+        self._open_window(clock())
+
+    def _open_window(self, now: float) -> None:
+        self._started = now
         self._cycles = 0
         self._slow = 0
         self._slowest = 0.0
+        self._slowest_phases: Optional[CyclePhases] = None
+        self._late_polls: dict[str, tuple[int, float]] = {}
+        self._late_ticks = 0
+        self._worst_tick_delay = 0.0
 
-    def note(self, duration: float, interval: float) -> Optional[str]:
-        """Учесть цикл. На границе окна вернуть сводку, если медленные циклы были."""
+    def note_tick_delay(self, seconds: float) -> None:
+        if seconds <= self.LATE_TICK_SECONDS:
+            return
+        self._late_ticks += 1
+        self._worst_tick_delay = max(self._worst_tick_delay, seconds)
+
+    def note_late_poll(self, node_name: str, seconds: float) -> None:
+        count, longest = self._late_polls.get(node_name, (0, 0.0))
+        self._late_polls[node_name] = (count + 1, max(longest, seconds))
+
+    def note_cycle(
+        self, duration: float, interval: float, phases: Optional[CyclePhases] = None
+    ) -> list[str]:
+        """Учесть цикл. На границе окна вернуть строки сводки — пусто, если всё шло в срок."""
         self._cycles += 1
         if duration > interval:
             self._slow += 1
-            self._slowest = max(self._slowest, duration)
+            if duration > self._slowest:
+                self._slowest, self._slowest_phases = duration, phases
 
         now = self._clock()
         elapsed = now - self._started
         if elapsed < self._window:
-            return None
+            return []
 
-        report = None
-        if self._slow:
-            report = (
-                f"Metrics cycles over the {interval}s interval: {self._slow} of {self._cycles} "
-                f"in the last {elapsed / 60:.0f} min, slowest {self._slowest:.1f}s — ticks are being skipped"
-            )
-        self._started, self._cycles, self._slow, self._slowest = now, 0, 0, 0.0
-        return report
+        period = f"in the last {elapsed / 60:.0f} min"
+        candidates = (
+            self._slow_cycles_line(interval, period),
+            self._late_ticks_line(period),
+            self._late_polls_line(period),
+        )
+        self._open_window(now)
+        return [line for line in candidates if line]
+
+    def _slow_cycles_line(self, interval: float, period: str) -> Optional[str]:
+        if not self._slow:
+            return None
+        where = ""
+        phases = self._slowest_phases
+        if phases is not None:
+            storing = max(0.0, self._slowest - phases.nodes - phases.cleanup)
+            where = f" (nodes {phases.nodes:.1f}s, storing {storing:.1f}s, cleanup {phases.cleanup:.1f}s)"
+        return (
+            f"Metrics cycles over the {interval}s interval: {self._slow} of {self._cycles} "
+            f"{period}, slowest {self._slowest:.1f}s{where} — ticks are being skipped"
+        )
+
+    def _late_ticks_line(self, period: str) -> Optional[str]:
+        if not self._late_ticks:
+            return None
+        return (
+            f"Metrics ticks started late: {self._late_ticks} {period}, "
+            f"worst {self._worst_tick_delay:.1f}s — the panel process was busy"
+        )
+
+    def _late_polls_line(self, period: str) -> Optional[str]:
+        if not self._late_polls:
+            return None
+        worst_first = sorted(self._late_polls.items(), key=lambda entry: (-entry[1][0], entry[0]))
+        named = ", ".join(
+            f"{name}: {count} (up to {longest:.1f}s)"
+            for name, (count, longest) in worst_first[:self.NAMED_NODES]
+        )
+        unnamed = len(worst_first) - self.NAMED_NODES
+        if unnamed > 0:
+            named += f", and {unnamed} more"
+        total = sum(count for count, _ in self._late_polls.values())
+        return (
+            f"Node polls that missed their cycle: {total} {period} "
+            f"from {len(worst_first)} node(s) — {named}"
+        )
 
 
 class MetricsCollector:
@@ -176,6 +257,9 @@ class MetricsCollector:
     ACTIVITY_TTL = 60
     
     HTTP_CONCURRENCY = 100  # одновременных запросов метрик к нодам
+    # Доля интервала, которую цикл ждёт ответов нод; остаток — на запись в базу.
+    # Опрос, не успевший к этому сроку, не обрывается: ответ заберёт следующий цикл
+    POLL_WAIT_SHARE = 0.7
     # Кэш HAProxy и проверка Xray ходят своим лимитом: на общем их обход парка
     # вставал в очередь перед сбором метрик, и тот пропускал такты
     AUX_HTTP_CONCURRENCY = 20
@@ -230,7 +314,8 @@ class MetricsCollector:
 
     # Жёсткий потолок на весь запрос метрик, поверх httpx-таймаутов (2+2+10+2=16s).
     # httpx не покрывает SOCKS5-рукопожатие: запрос через прокси может повиснуть навсегда,
-    # а один такой await замораживает gather цикла — вся флотилия уходит в offline (26.07.2026).
+    # а пока опрос ноды не завершён, новый ей не уходит — нода осталась бы offline
+    # до перезапуска панели.
     FETCH_HARD_TIMEOUT = 20
 
     def __init__(self, clock: Callable[[], float] = time.monotonic):
@@ -262,7 +347,11 @@ class MetricsCollector:
         self._http_sem = asyncio.Semaphore(self.HTTP_CONCURRENCY)
         self._aux_http_sem = asyncio.Semaphore(self.AUX_HTTP_CONCURRENCY)
         self._db_sem = asyncio.Semaphore(self.DB_CONCURRENCY)
-        self._slow_cycles = SlowCycles(self.SLOW_CYCLE_REPORT_SECONDS, clock)
+        self._report = CollectionReport(self.SLOW_CYCLE_REPORT_SECONDS, clock)
+        # Незавершённые опросы нод по id сервера и номер цикла, по которому
+        # видно, что опрос начат раньше текущего
+        self._polls: dict[int, NodePoll] = {}
+        self._cycle_number = 0
 
         self._node_failures: dict[int, int] = {}
         self._node_skip_cycles: dict[int, int] = {}
@@ -363,6 +452,12 @@ class MetricsCollector:
                     await task
                 except asyncio.CancelledError:
                     pass
+        # Опросы отставших нод живут дольше цикла, который их начал
+        polls = [poll.task for poll in self._polls.values()]
+        self._polls.clear()
+        for poll_task in polls:
+            poll_task.cancel()
+        await asyncio.gather(*polls, return_exceptions=True)
         await get_load_weights_runner().stop()
         # Финальный flush уже после остановки цикла сбора — иначе он гнался бы с observe().
         await get_traffic_ingest().stop()
@@ -417,37 +512,36 @@ class MetricsCollector:
         next_tick = time.monotonic()
         while self._running:
             started = time.monotonic()
+            self._report.note_tick_delay(started - next_tick)
+            phases = None
             try:
-                await self._collect_all_servers()
+                phases = await self._collect_all_servers()
             except Exception as e:
                 logger.error(f"Collection error: {e}")
-            self._note_cycle_duration(time.monotonic() - started)
+            self._note_cycle_duration(time.monotonic() - started, phases)
 
             next_tick = next_collection_tick(next_tick, self._collect_interval, time.monotonic())
             await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
 
-    def _note_cycle_duration(self, duration: float) -> None:
-        report = self._slow_cycles.note(duration, self._collect_interval)
-        if report:
-            logger.warning(report)
+    def _note_cycle_duration(self, duration: float, phases: Optional[CyclePhases] = None) -> None:
+        for line in self._report.note_cycle(duration, self._collect_interval, phases):
+            logger.warning(line)
 
-    async def _collect_all_servers(self):
-        """Collect metrics from all active servers with bounded concurrency."""
+    async def _collect_all_servers(self) -> CyclePhases:
+        """Собрать ответы нод, готовые к сроку цикла, и записать их одной транзакцией."""
         async with async_session() as db:
             result = await db.execute(
                 select(Server).where(Server.is_active == True)
             )
             servers = result.scalars().all()
 
-        # Phase 1: fetch metrics from all servers (HTTP-bound, limited by semaphore)
-        results = await asyncio.gather(
-            *[self._fetch_server_metrics(server) for server in servers],
-            return_exceptions=True
-        )
+        phases = CyclePhases()
+        polling_started = time.monotonic()
+        polled_servers, results = await self._poll_servers(servers)
+        phases.nodes = time.monotonic() - polling_started
 
-        # Phase 2: batch write all results in a single DB session
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        batch = await self._build_cycle_batch(servers, results, now_utc)
+        batch = await self._build_cycle_batch(polled_servers, results, now_utc)
         snapshots, server_updates = batch.snapshots, batch.server_updates
 
         if snapshots:
@@ -498,9 +592,62 @@ class MetricsCollector:
         # Cleanup throttled — only every CLEANUP_INTERVAL seconds
         now = time.time()
         if now - self._last_cleanup >= self.CLEANUP_INTERVAL:
+            cleanup_started = time.monotonic()
             async with async_session() as db:
                 await self._cleanup_old_data(db)
             self._last_cleanup = now
+            phases.cleanup = time.monotonic() - cleanup_started
+        return phases
+
+    async def _poll_servers(self, servers: list[Server]) -> tuple[list[Server], list]:
+        """Опросить парк и вернуть серверы с ответами, готовыми к сроку цикла.
+
+        Отставших цикл не ждёт: нода, отвечающая дольше интервала, задерживала
+        снапшоты всему парку и отнимала у него такты. Её опрос идёт дальше сам,
+        ответ заберёт цикл, который застанет его готовым, а новый запрос этой
+        ноде до тех пор не уходит.
+        """
+        self._cycle_number += 1
+        by_id = {server.id: server for server in servers}
+        for server_id in self._polls.keys() - by_id.keys():
+            # Сервер удалили или выключили, пока шёл его опрос
+            self._polls.pop(server_id).task.cancel()
+        for server in servers:
+            if server.id not in self._polls:
+                self._polls[server.id] = NodePoll(
+                    asyncio.create_task(self._timed_fetch(server)), self._cycle_number
+                )
+        if not self._polls:
+            return [], []
+
+        await asyncio.wait(
+            [poll.task for poll in self._polls.values()],
+            timeout=self._collect_interval * self.POLL_WAIT_SHARE,
+        )
+
+        polled_servers, results = [], []
+        for server_id, poll in list(self._polls.items()):
+            if not poll.task.done():
+                continue
+            del self._polls[server_id]
+            if poll.task.cancelled():
+                continue
+            result, seconds = poll.task.result()
+            if poll.started_in_cycle < self._cycle_number:
+                self._report.note_late_poll(by_id[server_id].name, seconds)
+            polled_servers.append(by_id[server_id])
+            results.append(result)
+        return polled_servers, results
+
+    async def _timed_fetch(self, server: Server) -> tuple[object, float]:
+        """Ответ ноды (или исключение опроса) и время, которое опрос занял."""
+        started = time.monotonic()
+        try:
+            result = await self._fetch_server_metrics(server)
+        except Exception as e:
+            # Сбой одного опроса не должен сорвать цикл остальным нодам
+            result = e
+        return result, time.monotonic() - started
 
     @staticmethod
     async def _update_servers(conn: AsyncConnection, columns: tuple[str, ...], updates: list[dict]) -> None:
@@ -647,7 +794,7 @@ class MetricsCollector:
 
         try:
             client = get_node_client(server)
-            # Таймаут берётся из клиента (_NODE_TIMEOUT = 2/5/2/2) — без лишних аллокаций.
+            # Таймаут берётся из клиента (_NODE_TIMEOUT) — без лишних аллокаций.
             response = await client.get(
                 url, headers=node_auth_headers(server), params={"window": self._window_seconds(server.id)}
             )
