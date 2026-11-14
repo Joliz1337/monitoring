@@ -21,7 +21,15 @@ from sqlalchemy.dialects import postgresql  # noqa: E402
 
 from app.models import Server  # noqa: E402
 from app.services import backend_quarantine_runner as runner_module  # noqa: E402
-from app.services.backend_quarantine import Event, EventKind, Mode, PairState, RestoreCause  # noqa: E402
+from app.services.backend_quarantine import (  # noqa: E402
+    Event,
+    EventKind,
+    Mode,
+    Pair,
+    PairState,
+    ReasonKind,
+    RestoreCause,
+)
 from app.services.backend_quarantine_runner import QuarantineRunner, pairs_delete, pairs_select  # noqa: E402
 from app.services.backend_quarantine_settings import QuarantineSettings, parse_settings  # noqa: E402
 from app.services.loss_registry import LossRegistry  # noqa: E402
@@ -475,6 +483,20 @@ class ViewTests(RunnerTestCase):
             "strikes": 1, "sessions": 7, "blocked_reason": None, "partial_reason": None,
         }])
         self.assertEqual((view["chronic"], view["paused_relays"]), ([], []))
+
+    async def test_chronic_address_is_listed_with_its_owner_even_when_back_in_service(self):
+        # Адрес уже вернули, но сегодня его отключали четыре раза: строке на странице нужны ip, порт и владелец
+        now = self.clock.now
+        self.runner.tracker.pairs[(RELAY_ID, TARGET)] = Pair(
+            relay_id=RELAY_ID, relay_name="relay10", target=TARGET, state=PairState.IDLE,
+            reason_kind=ReasonKind.LOSS, loss_pct=30.0, downs=0, decided_at=now, last_data_at=now,
+            strikes=[now - 3000, now - 2000, now - 1000, now - 10],
+        )
+        view = self.runner.view({"10.0.0.5": "nl-3"})
+        self.assertEqual(view["items"], [])
+        self.assertEqual(view["chronic"], [
+            {"target": TARGET, "ip": "10.0.0.5", "port": 443, "owner": "nl-3", "strikes": 4},
+        ])
 
     async def test_blocked_pair_shows_why(self):
         self.skip_reason = "last_server"

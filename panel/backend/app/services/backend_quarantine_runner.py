@@ -276,12 +276,19 @@ class QuarantineRunner:
         return {
             "mode": settings.mode.value,
             "items": items,
-            "chronic": [{"target": target, "strikes": strikes} for target, strikes in sorted(chronic.items())],
+            "chronic": [self._chronic_entry(target, strikes, owners) for target, strikes in sorted(chronic.items())],
             "paused_relays": [
                 {"server_id": relay_id, "name": pause.name, "since": pause.since}
                 for relay_id, pause in sorted(self.tracker.paused_relays().items())
             ],
         }
+
+    @staticmethod
+    def _chronic_entry(target: str, strikes: int, owners: dict[str, str]) -> dict:
+        # Адрес с постоянными проблемами показывается и когда он сейчас в работе —
+        # строке страницы нужны его части и владелец
+        ip, _, port = target.rpartition(":")
+        return {"target": target, "ip": ip, "port": int(port), "owner": owners.get(ip), "strikes": strikes}
 
     def disabled_relays(self) -> dict[str, list[int]]:
         """Адрес → релеи, на которых он сейчас отключён."""
