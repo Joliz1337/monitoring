@@ -471,7 +471,9 @@ async def notify_events(events: list[Event], settings: QuarantineSettings) -> No
     if settings.notify and telegram_ready:
         service = get_telegram_bot_service()
         sent = [
-            await service.send_message(alerts.telegram_bot_token, alerts.telegram_chat_id, text)
+            await service.send_message(
+                alerts.telegram_bot_token, alerts.telegram_chat_id, text, retry_later=True
+            )
             for text in format_digest(events, owners, lang)
         ]
         notified = all(sent)
