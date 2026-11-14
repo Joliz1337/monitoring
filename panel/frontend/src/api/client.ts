@@ -2282,12 +2282,15 @@ export interface QuarantineItem {
   // Сколько соединений было на сервере в момент отключения
   sessions: number
   blocked_reason: QuarantineBlockedReason | null
+  // Только у disabled: в части правил релея нода отключить сервер отказалась
+  partial_reason: QuarantineBlockedReason | null
 }
 
 export interface QuarantineOverview {
   mode: QuarantineMode
   items: QuarantineItem[]
-  chronic: { target: string; strikes: number }[]
+  // Адреса может не быть в items: за сутки отключался не раз, а сейчас в работе
+  chronic: { target: string; ip: string; port: number; owner: string | null; strikes: number }[]
   paused_relays: { server_id: number; name: string; since: number }[]
 }
 

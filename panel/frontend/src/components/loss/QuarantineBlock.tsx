@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Loader2, PauseCircle, ShieldOff } from 'lucide-react'
-import { lossApi, type QuarantineItem, type QuarantineOverview } from '../../api/client'
+import { lossApi, type QuarantineBlockedReason, type QuarantineItem, type QuarantineOverview } from '../../api/client'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
@@ -48,12 +48,16 @@ function formatSpan(seconds: number, t: Translate): string {
   return hours ? t('loss.span_days_hours', { days, hours }) : t('loss.span_days', { days })
 }
 
-function groupByAddress(items: QuarantineItem[]): AddressGroup[] {
+function groupByAddress({ items, chronic }: QuarantineOverview): AddressGroup[] {
   const groups = new Map<string, AddressGroup>()
   for (const item of items) {
     const group = groups.get(item.target)
     if (group) group.items.push(item)
     else groups.set(item.target, { target: item.target, ip: item.ip, port: item.port, owner: item.owner, items: [item] })
+  }
+  // Адрес с постоянными проблемами показывается и когда он сейчас в работе — строкой без релеев
+  for (const { target, ip, port, owner } of chronic) {
+    if (!groups.has(target)) groups.set(target, { target, ip, port, owner, items: [] })
   }
   return [...groups.values()]
 }
@@ -62,7 +66,7 @@ function groupByAddress(items: QuarantineItem[]): AddressGroup[] {
 function groupBySituation(items: QuarantineItem[]): QuarantineItem[][] {
   const situations = new Map<string, QuarantineItem[]>()
   for (const item of items) {
-    const key = `${item.state}|${item.reason.kind}|${item.blocked_reason}`
+    const key = `${item.state}|${item.reason.kind}|${item.blocked_reason}|${item.partial_reason}`
     const situation = situations.get(key)
     if (situation) situation.push(item)
     else situations.set(key, [item])
@@ -85,16 +89,20 @@ function reasonText(relays: QuarantineItem[], sustainedSeconds: number | null, t
     : t('loss.quarantine_reason_loss', { loss, duration: formatSpan(sustainedSeconds, t) })
 }
 
+function refusalText(reason: QuarantineBlockedReason | null, t: Translate): string {
+  return t(`loss.quarantine_blocked_${reason ?? 'error'}`)
+}
+
 // У строки из нескольких релеев — худшая причина, самое раннее отключение и самый ранний возврат
 function situationText(relays: QuarantineItem[], sustainedSeconds: number | null, now: number, t: Translate): string {
-  const [{ state, blocked_reason: blockedReason }] = relays
+  const [{ state, blocked_reason: blockedReason, partial_reason: partialReason }] = relays
   const parts = [reasonText(relays, sustainedSeconds, t)]
   const since = earliest(relays.map(relay => relay.disabled_at))
 
   if (state === 'pending') {
     parts.push(t('loss.quarantine_pending'))
   } else if (state === 'blocked') {
-    parts.push(t('loss.quarantine_blocked', { reason: t(`loss.quarantine_blocked_${blockedReason ?? 'error'}`) }))
+    parts.push(t('loss.quarantine_blocked', { reason: refusalText(blockedReason, t) }))
   } else if (state === 'would_disable') {
     if (since !== null) parts.push(t('loss.quarantine_would_disable_ago', { span: formatSpan(now - since, t) }))
   } else {
@@ -105,6 +113,7 @@ function situationText(relays: QuarantineItem[], sustainedSeconds: number | null
       : t('loss.quarantine_returns_when_calm'))
     const sessions = relays.reduce((sum, relay) => sum + relay.sessions, 0)
     if (sessions > 0) parts.push(t('loss.quarantine_sessions_moved', { count: sessions }))
+    if (partialReason) parts.push(t('loss.quarantine_partial', { reason: refusalText(partialReason, t) }))
   }
   return parts.join(' · ')
 }
@@ -193,6 +202,9 @@ function AddressRow({ group, chronicStrikes, now, sustainedSeconds, canExempt, o
           {situationText(relays, sustainedSeconds, now, t)}
         </p>
       ))}
+      {group.items.length === 0 && chronicStrikes !== undefined && (
+        <p className="text-xs text-dark-400">{t('loss.quarantine_chronic_in_service', { count: chronicStrikes })}</p>
+      )}
     </div>
   )
 }
@@ -201,7 +213,7 @@ export default function QuarantineBlock({ view, ...rowProps }: Props) {
   const { t } = useTranslation()
   if (!view) return null
 
-  const groups = groupByAddress(view.items)
+  const groups = groupByAddress(view)
   const nothingToShow = groups.length === 0 && view.paused_relays.length === 0
   if (view.mode === 'off' && nothingToShow) return null
 
