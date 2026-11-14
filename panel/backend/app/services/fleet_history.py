@@ -8,6 +8,10 @@ per-server истории (`metrics_snapshots` и `aggregated_metrics`) двум
 бакету. Без внутреннего уровня нода, отдавшая в бакет два снапшота, весила бы
 вдвое.
 
+Час и сутки считаются по сырым снапшотам — на 2000 нодах это миллионы строк.
+Посчитанные бакеты лежат в памяти (`RawSeries`), и каждая пересборка читает из
+базы только хвост: бакеты, которых ещё нет, и те, что ещё могут измениться.
+
 CPU и память взвешиваются ёмкостью ноды: 100% на 8 ядрах весят больше, чем на
 двух. Ёмкость в истории не хранится, поэтому берётся текущая — из последнего
 ответа ноды (хранилище `latest_metrics`). Ресайз VPS переписывает вес всей его
@@ -17,7 +21,7 @@ CPU и память взвешиваются ёмкостью ноды: 100% н�
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Literal, Mapping, Optional
 
@@ -34,6 +38,7 @@ from app.services.metrics_history import (
     DataSource,
     PeriodSpec,
     _as_db_param,
+    _as_naive,
     _iso_utc,
     _utcnow,
     align_down,
@@ -55,10 +60,19 @@ FLEET_PERIODS: dict[str, PeriodSpec] = {
 }
 
 # Ответ читает снапшоты всего парка — без кэша каждая открытая вкладка
-# дашборда гоняла бы запрос заново. TTL — не чаще появления новой точки.
-# У суток он равен бакету: пересборка читает сырые снапшоты за 24 часа, на
-# большом парке это секунды, а новой точки раньше всё равно не появится.
+# дашборда гоняла бы запрос заново. TTL — не чаще появления новой точки:
+# у суток он равен бакету.
 CACHE_TTL_SEC: dict[str, float] = {"1h": 30.0, "24h": 300.0, "7d": 300.0, "30d": 300.0, "365d": 300.0}
+
+# Сутки сырых снапшотов на 2000 нодах — 17 млн строк: одним запросом это
+# десятки секунд на диске VPS. Сырой период читается кусками и только там,
+# где посчитанных бакетов ещё нет. Кусок кратен бакету: точку бакета нельзя
+# сложить из двух запросов.
+RAW_CHUNK_SEC = HOUR_SEC
+# Метку времени снапшоты цикла получают до записи, а в базе появляются после
+# коммита — на загруженной базе секундами позже. Бакет считается окончательным,
+# когда после его конца прошло столько; до этого он перечитывается.
+RAW_SETTLE_SEC = 120
 
 # Простой самой панели (перерыва в сборе) — единственное, что рвёт линию парка:
 # падение одной ноды просто вычитает её из суммы. Строка пишется на каждый
@@ -101,7 +115,9 @@ _FLEET_SELECT = """
 """
 
 # origin date_bin — epoch: границы бакетов не зависят от момента запроса,
-# при автообновлении дашборда точки не «дышат».
+# при автообновлении дашборда точки не «дышат». Правая граница не включена:
+# куски идут встык по сетке бакетов, и снапшот ровно на стыке должен попасть
+# только в следующий.
 _RAW_CTE = """
     WITH per_server AS (
         SELECT date_bin(make_interval(secs => :bucket), m.timestamp, TIMESTAMPTZ 'epoch') AS bucket,
@@ -115,7 +131,7 @@ _RAW_CTE = """
                AVG(m.net_tx_bytes_per_sec) AS tx,
                MAX(COALESCE(m.net_tx_bytes_per_sec_max, m.net_tx_bytes_per_sec)) AS tx_max
         FROM metrics_snapshots m
-        WHERE m.server_id = ANY(:ids) AND m.timestamp >= :start AND m.timestamp <= :end
+        WHERE m.server_id = ANY(:ids) AND m.timestamp >= :start AND m.timestamp < :end
         GROUP BY bucket, m.server_id
     )
 """
@@ -243,27 +259,114 @@ async def load_panel_downtime(
     return [(started_at, ended_at) for started_at, ended_at in result.all()]
 
 
-async def load_points(
-    db: AsyncSession,
-    capacity: FleetCapacity,
-    spec: PeriodSpec,
-    start: datetime,
-    end: datetime,
-) -> list[dict[str, Any]]:
-    params: dict[str, Any] = {
+def _query_params(capacity: FleetCapacity, start: datetime, end: datetime) -> dict[str, Any]:
+    return {
         "ids": capacity.ids,
         "cores": capacity.cores,
         "ram": capacity.ram,
         "start": _as_db_param(start),
         "end": _as_db_param(end),
     }
-    if spec.source is DataSource.RAW:
-        params["bucket"] = float(spec.bucket_sec)
-        result = await db.execute(RAW_SQL, params)
-    else:
-        params["period_type"] = spec.source.value
-        result = await db.execute(AGGREGATED_SQL, params)
+
+
+async def load_aggregated_points(
+    db: AsyncSession,
+    capacity: FleetCapacity,
+    spec: PeriodSpec,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    params = _query_params(capacity, start, end) | {"period_type": spec.source.value}
+    result = await db.execute(AGGREGATED_SQL, params)
     return [fleet_point(row) for row in result.mappings().all()]
+
+
+async def load_bucket_points(
+    db: AsyncSession,
+    capacity: FleetCapacity,
+    bucket_sec: int,
+    start: datetime,
+    end: datetime,
+) -> dict[datetime, dict[str, Any]]:
+    """Точки бакетов из снапшотов за [start, end); обе границы — на сетке бакетов."""
+    params = _query_params(capacity, start, end) | {"bucket": float(bucket_sec)}
+    result = await db.execute(RAW_SQL, params)
+    return {_as_naive(row["bucket"]): fleet_point(row) for row in result.mappings().all()}
+
+
+# Ключ — (период, папка); None — весь парк.
+CacheKey = tuple[str, Optional[str]]
+
+
+@dataclass
+class RawSeries:
+    """Посчитанные бакеты сырого периода одного ключа.
+
+    Точка бакета зависит от состава нод и их весов, поэтому бакеты живут, пока
+    ёмкость та же. `settled_until` — граница на сетке бакетов: всё, что раньше
+    неё, уже не изменится и из базы больше не читается.
+    """
+    weights: dict[int, tuple[float, float]]
+    settled_until: datetime
+    points: dict[datetime, dict[str, Any]] = field(default_factory=dict)
+    refreshed_at: float = 0.0
+
+
+_raw_series: dict[CacheKey, RawSeries] = {}
+
+
+def _capacity_weights(capacity: FleetCapacity) -> dict[int, tuple[float, float]]:
+    # Словарём, а не массивами: порядок строк в выборке серверов не гарантирован,
+    # и те же ноды в другом порядке не должны обнулять посчитанное.
+    return dict(zip(capacity.ids, zip(capacity.cores, capacity.ram)))
+
+
+async def refresh_raw_series(
+    db: AsyncSession,
+    key: CacheKey,
+    capacity: FleetCapacity,
+    bucket_sec: int,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    """Точки сырого периода: из базы — только бакеты, которых нет или которые ещё меняются."""
+    weights = _capacity_weights(capacity)
+    series = _raw_series.get(key)
+    if series is None or series.weights != weights:
+        series = _raw_series[key] = RawSeries(weights, settled_until=start)
+    series.points = {bucket: point for bucket, point in series.points.items() if bucket >= start}
+    series.refreshed_at = time.monotonic()
+
+    settled_by_now = align_down(end - timedelta(seconds=RAW_SETTLE_SEC), bucket_sec)
+    window_end = align_down(end, bucket_sec) + timedelta(seconds=bucket_sec)
+    chunk_start = max(series.settled_until, start)
+    while chunk_start < window_end:
+        chunk_end = min(chunk_start + timedelta(seconds=RAW_CHUNK_SEC), window_end)
+        fresh = await load_bucket_points(db, capacity, bucket_sec, chunk_start, chunk_end)
+        # Серия меняется куском целиком и без await внутри: оборванная холодная
+        # сборка оставляет готовые куски, следующая продолжает с места обрыва.
+        for bucket in [b for b in series.points if chunk_start <= b < chunk_end]:
+            del series.points[bucket]
+        series.points.update(fresh)
+        series.settled_until = min(chunk_end, settled_by_now)
+        chunk_start = chunk_end
+    return [series.points[bucket] for bucket in sorted(series.points)]
+
+
+async def _load_points(
+    db: AsyncSession,
+    key: CacheKey,
+    capacity: FleetCapacity,
+    spec: PeriodSpec,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    if not capacity:
+        _raw_series.pop(key, None)
+        return []
+    if spec.source is DataSource.RAW:
+        return await refresh_raw_series(db, key, capacity, spec.bucket_sec, start, end)
+    return await load_aggregated_points(db, capacity, spec, start, end)
 
 
 async def _build_history(db: AsyncSession, period: FleetPeriod, folder: Optional[str]) -> dict[str, Any]:
@@ -274,7 +377,7 @@ async def _build_history(db: AsyncSession, period: FleetPeriod, folder: Optional
     start = align_down(end - spec.span, spec.bucket_sec)
 
     capacity = await load_capacity(db, folder)
-    points = await load_points(db, capacity, spec, start, end) if capacity else []
+    points = await _load_points(db, (period, folder), capacity, spec, start, end)
     gaps = merge_downtime(await load_panel_downtime(db, start, end), start, end)
     interval = await load_collect_interval(db)
     min_gap_sec = max(GAP_MIN_SEC, 2 * interval, spec.bucket_sec)
@@ -291,9 +394,6 @@ async def _build_history(db: AsyncSession, period: FleetPeriod, folder: Optional
         "gaps": [{"from": _iso_utc(gap_start), "to": _iso_utc(gap_end)} for gap_start, gap_end in gaps],
     }
 
-
-# Ключ — (период, папка); None — весь парк.
-CacheKey = tuple[str, Optional[str]]
 
 _cache: dict[CacheKey, tuple[float, dict[str, Any]]] = {}
 # Лок на ключ, а не один на всех: холодная сборка суток не должна держать в
@@ -322,6 +422,19 @@ def _store(key: CacheKey, payload: dict[str, Any]) -> None:
     _cache[key] = (now, payload)
     for idle in [k for k, lock in _build_locks.items() if k not in _cache and not lock.locked()]:
         del _build_locks[idle]
+    # Серия, которую не обновляли дольше её окна, целиком из него вышла.
+    for gone in [k for k, series in _raw_series.items() if not _is_reusable(k, series, now)]:
+        del _raw_series[gone]
+
+
+def _is_reusable(key: CacheKey, series: RawSeries, now: float) -> bool:
+    return now - series.refreshed_at < FLEET_PERIODS[key[0]].span.total_seconds()
+
+
+def forget_fleet_history() -> None:
+    """Забыть всё посчитанное — база под сводкой заменена целиком (восстановление из бэкапа)."""
+    _cache.clear()
+    _raw_series.clear()
 
 
 async def load_fleet_history(

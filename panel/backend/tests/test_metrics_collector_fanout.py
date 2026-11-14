@@ -38,16 +38,6 @@ def node(server_id: int = 1) -> SimpleNamespace:
     )
 
 
-class FakeResponse:
-    status_code = 200
-
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def json(self) -> dict:
-        return self._payload
-
-
 class FakeNodeClient:
     """Клиент ноды: на каждый путь — своё поведение, все обращения записываются."""
 
@@ -66,10 +56,6 @@ def patched_client(client: FakeNodeClient):
 
 async def unreachable(url: str):
     raise httpx.ConnectTimeout("no route")
-
-
-async def answers_empty(url: str):
-    return FakeResponse({})
 
 
 class HaproxyRefreshTest(unittest.IsolatedAsyncioTestCase):
@@ -102,12 +88,11 @@ class HaproxyRefreshTest(unittest.IsolatedAsyncioTestCase):
         never = asyncio.Event()
 
         async def behaviour(url: str):
-            if "/api/haproxy/" in url:
-                await never.wait()
-            return FakeResponse({"cpu": {}})
+            await never.wait()
 
         client = FakeNodeClient(behaviour)
-        with patched_client(client):
+        metrics_answer = mock.AsyncMock(return_value=(200, {"cpu": {}}))
+        with patched_client(client), mock.patch.object(metrics_collector, "request_metrics", metrics_answer):
             stuck = [
                 asyncio.create_task(collector._cache_server_haproxy(node(i), HAPROXY_TIMEOUT))
                 for i in range(2, collector.HTTP_CONCURRENCY + 12)
@@ -121,6 +106,42 @@ class HaproxyRefreshTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(*stuck, return_exceptions=True)
         self.assertIsNone(error)
         self.assertIsNotNone(metrics)
+
+
+class MetricsPollConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    """При ста одновременных запросах парк в 2000 нод со средним ответом 0,4 с
+    не укладывался в срок цикла: каждая десятая нода оставалась без снапшота."""
+
+    FLEET = 2000
+    AVERAGE_ANSWER_SECONDS = 0.4
+    COLLECT_INTERVAL = 10
+
+    def test_slow_fleet_fits_into_the_cycle_with_double_headroom(self):
+        wait_budget = self.COLLECT_INTERVAL * MetricsCollector.POLL_WAIT_SHARE
+        polled_in_time = MetricsCollector.HTTP_CONCURRENCY / self.AVERAGE_ANSWER_SECONDS * wait_budget
+        self.assertGreaterEqual(polled_in_time, 2 * self.FLEET)
+
+    async def test_polls_run_as_many_at_once_as_the_limit_allows(self):
+        collector = MetricsCollector()
+        never = asyncio.Event()
+        in_flight = 0
+
+        async def hangs(server: SimpleNamespace, window_seconds: int):
+            nonlocal in_flight
+            in_flight += 1
+            await never.wait()
+
+        with mock.patch.object(metrics_collector, "request_metrics", hangs):
+            polls = [
+                asyncio.create_task(collector._fetch_server_metrics(node(i)))
+                for i in range(collector.HTTP_CONCURRENCY + 50)
+            ]
+            await asyncio.sleep(0.05)
+            for task in polls:
+                task.cancel()
+            await asyncio.gather(*polls, return_exceptions=True)
+
+        self.assertEqual(in_flight, collector.HTTP_CONCURRENCY)
 
 
 class XrayProbeTest(unittest.IsolatedAsyncioTestCase):

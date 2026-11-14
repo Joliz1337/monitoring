@@ -509,41 +509,96 @@ export default function Updates() {
 
   const handleUpdatePanel = () => startPanelUpdate(() => systemApi.updatePanel())
 
-  const handleUpdateNode = async (nodeId: number, nodeName: string) => {
-    if (updatingNodes.has(nodeId)) return
+  const releaseUpdatingNodes = (nodeIds: number[]) => {
+    setUpdatingNodes(prev => {
+      const next = new Set(prev)
+      nodeIds.forEach(id => next.delete(id))
+      return next
+    })
+  }
 
-    const delivery = deliveryJobs.get(nodeId)
-    if (delivery && (delivery.status === 'success' || delivery.status === 'error')) {
-      setSupersededDeliveries(prev => new Set(prev).add(delivery.job_id))
+  // Команду обновиться ноды получают ограниченной пачкой, как и запросы версий при обходе:
+  // тысячи одновременных запросов забивают панель. Возвращает причины отказов —
+  // по одной на каждую ноду, не принявшую команду
+  const startNodeUpdates = async (targets: NodeState[]): Promise<string[]> => {
+    const finishedDeliveries: string[] = []
+    for (const { id } of targets) {
+      const delivery = deliveryJobs.get(id)
+      if (delivery && (delivery.status === 'success' || delivery.status === 'error')) finishedDeliveries.push(delivery.job_id)
     }
-    setUpdatingNodes(prev => new Set(prev).add(nodeId))
+    if (finishedDeliveries.length > 0) setSupersededDeliveries(prev => new Set([...prev, ...finishedDeliveries]))
+
+    // Отметку «обновляется» получают сразу все: нода, ждущая своей очереди, не выглядит забытой,
+    // и повторно её не запустить
+    const targetIds = targets.map(node => node.id)
+    setUpdatingNodes(prev => new Set([...prev, ...targetIds]))
     setUpdateResults(prev => ({
       ...prev,
-      [`node-${nodeId}`]: { success: true, message: t('updates.in_progress') }
+      ...Object.fromEntries(targetIds.map(id => [`node-${id}`, { success: true, message: t('updates.in_progress') }])),
     }))
 
-    try {
-      await systemApi.updateNode(nodeId)
-      // Дальше статус ведёт панель: этап обновления приходит из списка идущих обновлений
+    const refusals: string[] = []
+    let accepted: number[] = []
+
+    // Дальше статус ведёт панель: этап обновления приходит из списка идущих обновлений.
+    // Пока список не перечитан, принявшая команду нода остаётся «обновляется» — иначе её
+    // карточка на время предложила бы обновить ноду снова. Список читается раз на всех, кто
+    // успел принять команду, а не после каждой ноды
+    const handOverAccepted = async () => {
+      if (accepted.length === 0) return
+      const handedOver = accepted
+      accepted = []
+      await fetchNodeUpdates()
       setUpdateResults(prev => {
         const next = { ...prev }
-        delete next[`node-${nodeId}`]
+        handedOver.forEach(id => delete next[`node-${id}`])
         return next
       })
-      await fetchNodeUpdates()
-    } catch (err: any) {
-      setUpdateResults(prev => ({
-        ...prev,
-        [`node-${nodeId}`]: { success: false, message: err.response?.data?.detail || t('updates.failed_update') }
-      }))
-      toast.error(`${nodeName}: ${err.response?.data?.detail || t('updates.failed_update')}`)
-    } finally {
-      setUpdatingNodes(prev => {
-        const next = new Set(prev)
-        next.delete(nodeId)
-        return next
-      })
+      releaseUpdatingNodes(handedOver)
     }
+
+    let nextIndex = 0
+    const worker = async () => {
+      while (nextIndex < targets.length) {
+        const nodeId = targets[nextIndex++].id
+        try {
+          await systemApi.updateNode(nodeId)
+          accepted.push(nodeId)
+        } catch (err: any) {
+          const reason = err.response?.data?.detail || t('updates.failed_update')
+          refusals.push(reason)
+          setUpdateResults(prev => ({ ...prev, [`node-${nodeId}`]: { success: false, message: reason } }))
+          releaseUpdatingNodes([nodeId])
+        }
+      }
+    }
+
+    const handOverTimer = setInterval(handOverAccepted, JOB_POLL_INTERVAL_MS)
+    await Promise.all(Array.from({ length: Math.min(NODE_SWEEP_POOL_SIZE, targets.length) }, worker))
+    clearInterval(handOverTimer)
+    await handOverAccepted()
+    return refusals
+  }
+
+  const handleUpdateNode = async (node: NodeState) => {
+    if (updatingNodes.has(node.id)) return
+
+    const [refusal] = await startNodeUpdates([node])
+    if (refusal) toast.error(`${node.name}: ${refusal}`)
+  }
+
+  // Итог массового запуска — одним сообщением: причина отказа каждой ноды остаётся на её карточке
+  const updateNodesInBulk = async (targets: NodeState[]) => {
+    if (targets.length === 0) return
+
+    const refusals = await startNodeUpdates(targets)
+    const started = targets.length - refusals.length
+    if (refusals.length === 0) {
+      toast.success(t('updates.nodes_update_started', { count: started }))
+      return
+    }
+    const notify = started === 0 ? toast.error : toast.warning
+    notify(t('updates.nodes_update_partial', { started, failed: refusals.length }))
   }
 
   const collectNodeUpdateTargets = () => Array.from(nodes.values()).filter(canAgentUpdate)
@@ -552,7 +607,7 @@ export default function Updates() {
     if (updatingAll || !allNodesLoaded || !baseInfo) return
 
     setUpdatingAll(true)
-    await Promise.all(collectNodeUpdateTargets().map(n => handleUpdateNode(n.id, n.name)))
+    await updateNodesInBulk(collectNodeUpdateTargets())
     setUpdatingAll(false)
   }
 
@@ -572,10 +627,10 @@ export default function Updates() {
         return
       }
 
+      toast.info(t('updates.everything_panel_skipped'))
       setUpdatingAll(true)
-      await Promise.all(targets.map(n => handleUpdateNode(n.id, n.name)))
+      await updateNodesInBulk(targets)
       setUpdatingAll(false)
-      toast.success(t('updates.everything_panel_skipped'))
     } finally {
       setUpdatingEverything(false)
     }
@@ -589,7 +644,8 @@ export default function Updates() {
 
   // Обновление через агента ноды: только онлайн, не идущее уже, и на стабильном канале — только отстающие
   const canAgentUpdate = (node: NodeState): boolean =>
-    node.loadState === 'loaded' && node.status === 'online' && !nodeUpdates.has(node.id)
+    node.loadState === 'loaded' && node.status === 'online'
+    && !updatingNodes.has(node.id) && !nodeUpdates.has(node.id)
     && (isDevChannel || getNodeNeedsUpdate(node))
 
   const toggleSelected = useCallback((ids: number[], on: boolean) => {
@@ -649,7 +705,7 @@ export default function Updates() {
   const handleUpdateSelected = async () => {
     const targets = selectedAgentTargets
     setSelected(new Set())
-    await Promise.all(targets.map(n => handleUpdateNode(n.id, n.name)))
+    await updateNodesInBulk(targets)
   }
 
   const handleBulkDeliveryStarted = () => {
@@ -718,7 +774,7 @@ export default function Updates() {
   const handleUpdateNodeRef = useRef(handleUpdateNode)
   handleUpdateNodeRef.current = handleUpdateNode
   const updateNodeFromCard = useCallback((node: NodeState) => {
-    handleUpdateNodeRef.current(node.id, node.name)
+    handleUpdateNodeRef.current(node)
   }, [])
   const toggleNodeSelected = useCallback((nodeId: number, on: boolean) => {
     toggleSelected([nodeId], on)

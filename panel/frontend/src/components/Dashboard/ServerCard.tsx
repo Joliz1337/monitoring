@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { Component, memo, useEffect, useState, type ReactNode } from 'react'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -41,6 +41,34 @@ interface ServerTraffic {
 // Высота карточки сетки, пока настоящая неизвестна: столько места получает карточка,
 // которую браузер не рисует (content-visibility), и заглушка LazyServerCard до первого замера
 export const GRID_CARD_HEIGHT_ESTIMATE = 320
+
+const NO_VALUE = '—'
+
+// «5m ago» считается от текущего времени, а минуты — самая мелкая единица в подписи
+const TIME_AGO_REFRESH_MS = 30_000
+
+// Срез метрик собирает бэкенд (card_metrics) и молча пропускает то, чего нода не прислала:
+// у старой или сбойной ноды нет отдельных чисел, а то и целого блока
+interface PartialCardMetrics {
+  cpu?: Partial<ServerCardMetrics['cpu']>
+  memory?: { ram?: Partial<ServerCardMetrics['memory']['ram']> }
+  disk?: { partitions?: Array<Partial<ServerCardMetrics['disk']['partitions'][number]>> }
+  network?: { total?: Partial<NonNullable<ServerCardMetrics['network']['total']>> | null }
+  system?: Partial<ServerCardMetrics['system']>
+  certificates?: ServerCardMetrics['certificates']
+}
+
+function isNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function percentText(value: number | undefined, digits = 1): string {
+  return isNumber(value) ? `${value.toFixed(digits)}%` : NO_VALUE
+}
+
+function uptimeText(seconds: number | undefined): string {
+  return isNumber(seconds) ? formatUptime(seconds) : NO_VALUE
+}
 
 function getLoadAvgColor(loadAvg: number, coresLogical: number): string {
   const percent = (loadAvg / coresLogical) * 100
@@ -140,7 +168,9 @@ function ServerCardView({
         },
   }
 
-  const metrics = server.metrics
+  const metrics: PartialCardMetrics | null | undefined = server.metrics
+  const cpu = metrics?.cpu
+  const ram = metrics?.memory?.ram
 
   const handleClick = () => {
     navigate(`/${uid}/server/${server.id}`)
@@ -273,11 +303,11 @@ function ServerCardView({
                 )}
                 <div className="flex items-center gap-2 text-dark-400">
                   <Cpu className="w-4 h-4" />
-                  <span className="font-mono">{metrics.cpu.usage_percent.toFixed(1)}%</span>
+                  <span className="font-mono">{percentText(cpu?.usage_percent)}</span>
                 </div>
                 <div className="flex items-center gap-2 text-dark-400">
                   <MemoryStick className="w-4 h-4" />
-                  <span className="font-mono">{metrics.memory.ram.percent.toFixed(1)}%</span>
+                  <span className="font-mono">{percentText(ram?.percent)}</span>
                 </div>
                 {server.traffic && (server.traffic.rx_bytes > 0 || server.traffic.tx_bytes > 0) && (
                   <div className="flex items-center gap-2 text-dark-400">
@@ -316,7 +346,7 @@ function ServerCardView({
                 )}
                 <div className="flex items-center gap-2 text-dark-400">
                   <Clock className="w-4 h-4" />
-                  <span className="font-mono">{formatUptime(metrics.system.uptime_seconds)}</span>
+                  <span className="font-mono">{uptimeText(metrics.system?.uptime_seconds)}</span>
                 </div>
               </div>
             )}
@@ -366,14 +396,14 @@ function ServerCardView({
               </div>
               {metrics && (
                 <p className="text-xs text-dark-500 mt-0.5">
-                  {metrics.system.hostname}
+                  {metrics.system?.hostname}
                 </p>
               )}
             </div>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
             {server.status === 'offline' && metrics && (
-              <Tooltip label={server.last_seen ? t('cache.last_update', { time: formatTimeAgo(server.last_seen) }) : t('cache.cached')}>
+              <Tooltip label={server.last_seen ? <TimeAgoLabel labelKey="cache.last_update" date={server.last_seen} /> : t('cache.cached')}>
                 <div className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-warning/15 border border-warning/25 rounded text-2xs text-warning">
                   <Database className="w-3.5 h-3.5" />
                   <span className="font-medium">{t('cache.cached')}</span>
@@ -400,14 +430,14 @@ function ServerCardView({
                   <Cpu className="w-4 h-4 text-accent-500" />
                   <span className="text-sm text-dark-300">{t('common.cpu')}</span>
                   <span className="ml-auto text-sm font-mono text-dark-200">
-                    {metrics.cpu.usage_percent.toFixed(1)}%
+                    {percentText(cpu?.usage_percent)}
                   </span>
                 </div>
                 <div className="flex items-center gap-2 flex-1">
                   <MemoryStick className="w-4 h-4 text-accent-500" />
                   <span className="text-sm text-dark-300">{t('common.ram')}</span>
                   <span className="ml-auto text-sm font-mono text-dark-200">
-                    {metrics.memory.ram.percent.toFixed(1)}%
+                    {percentText(ram?.percent)}
                   </span>
                 </div>
               </div>
@@ -419,77 +449,20 @@ function ServerCardView({
                   <MetricItem
                     icon={<Cpu className="w-4 h-4" />}
                     label={t('common.cpu')}
-                    value={metrics.cpu.usage_percent}
+                    value={cpu?.usage_percent}
                   />
                   <MetricItem
                     icon={<MemoryStick className="w-4 h-4" />}
                     label={t('common.ram')}
-                    value={metrics.memory.ram.percent}
-                    usedBytes={metrics.memory.ram.used}
-                    totalBytes={metrics.memory.ram.total}
+                    value={ram?.percent}
+                    usedBytes={ram?.used}
+                    totalBytes={ram?.total}
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-4 mb-4">
-                  <MetricItem
-                    icon={<HardDrive className="w-4 h-4" />}
-                    label={t('common.disk')}
-                    value={metrics.disk.partitions[0]?.percent || 0}
-                    usedBytes={metrics.disk.partitions[0]?.used}
-                    totalBytes={metrics.disk.partitions[0]?.total}
-                  />
-                  <NetworkSpeedItem
-                    serverId={server.id}
-                    rxBytesPerSec={metrics.network.total?.rx_bytes_per_sec || 0}
-                    txBytesPerSec={metrics.network.total?.tx_bytes_per_sec || 0}
-                  />
-                </div>
+                <DiskAndNetwork serverId={server.id} metrics={metrics} />
 
-                <div className="pt-3 border-t border-dark-700/50 flex flex-wrap items-center text-xs text-dark-400 gap-x-3 gap-y-1">
-                  <div className="flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5" />
-                    <span>{formatUptime(metrics.system.uptime_seconds)}</span>
-                  </div>
-                  <Tooltip label={t('server_card.load_avg_tooltip', { cores: metrics.cpu.cores_logical })}>
-                    <div className="flex items-center gap-1.5">
-                      <Activity className="w-3.5 h-3.5" />
-                      <span className="font-mono">
-                        <span className={getLoadAvgColor(metrics.cpu.load_avg_1, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_1.toFixed(2)}</span>
-                        {' / '}
-                        <span className={getLoadAvgColor(metrics.cpu.load_avg_5, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_5.toFixed(2)}</span>
-                        {' / '}
-                        <span className={getLoadAvgColor(metrics.cpu.load_avg_15, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_15.toFixed(2)}</span>
-                      </span>
-                    </div>
-                  </Tooltip>
-                  {metrics.certificates?.closest_expiry ? (
-                    <div className={`flex items-center gap-1 ${
-                      metrics.certificates.closest_expiry.expired
-                        ? 'text-danger'
-                        : metrics.certificates.closest_expiry.days_left < 30
-                          ? 'text-warning'
-                          : 'text-success'
-                    }`}>
-                      <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0" />
-                      <Tooltip label={metrics.certificates.closest_expiry.domain}>
-                        <span className="truncate">
-                          {metrics.certificates.closest_expiry.expired
-                            ? t('server_card.cert_expired_domain', { domain: metrics.certificates.closest_expiry.domain })
-                            : t('server_card.cert_days_domain', {
-                                domain: metrics.certificates.closest_expiry.domain,
-                                days: metrics.certificates.closest_expiry.days_left
-                              })}
-                        </span>
-                      </Tooltip>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-1 text-dark-500">
-                      <ShieldAlert className="w-3.5 h-3.5" />
-                      <span>{t('server_card.no_certs')}</span>
-                    </div>
-                  )}
-                  <span className="text-dark-500 truncate max-w-[140px] ml-auto">{metrics.system.os}</span>
-                </div>
+                <CardFooter metrics={metrics} />
               </>
             )}
 
@@ -499,32 +472,19 @@ function ServerCardView({
                   <CpuCoresItem
                     icon={<Cpu className="w-4 h-4" />}
                     label={t('common.cpu')}
-                    totalUsage={metrics.cpu.usage_percent}
-                    perCpuPercent={metrics.cpu.per_cpu_percent}
+                    totalUsage={cpu?.usage_percent}
+                    perCpuPercent={cpu?.per_cpu_percent}
                   />
                   <MetricItem
                     icon={<MemoryStick className="w-4 h-4" />}
                     label={t('common.ram')}
-                    value={metrics.memory.ram.percent}
-                    usedBytes={metrics.memory.ram.used}
-                    totalBytes={metrics.memory.ram.total}
+                    value={ram?.percent}
+                    usedBytes={ram?.used}
+                    totalBytes={ram?.total}
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-4 mb-4">
-                  <MetricItem
-                    icon={<HardDrive className="w-4 h-4" />}
-                    label={t('common.disk')}
-                    value={metrics.disk.partitions[0]?.percent || 0}
-                    usedBytes={metrics.disk.partitions[0]?.used}
-                    totalBytes={metrics.disk.partitions[0]?.total}
-                  />
-                  <NetworkSpeedItem
-                    serverId={server.id}
-                    rxBytesPerSec={metrics.network.total?.rx_bytes_per_sec || 0}
-                    txBytesPerSec={metrics.network.total?.tx_bytes_per_sec || 0}
-                  />
-                </div>
+                <DiskAndNetwork serverId={server.id} metrics={metrics} />
 
                 {server.traffic && (server.traffic.rx_bytes > 0 || server.traffic.tx_bytes > 0) && (
                   <div className="mb-4 p-3 bg-dark-800/40 rounded-xl border border-dark-700/30">
@@ -548,51 +508,7 @@ function ServerCardView({
                   </div>
                 )}
 
-                <div className="pt-3 border-t border-dark-700/50 flex flex-wrap items-center text-xs text-dark-400 gap-x-3 gap-y-1">
-                  <div className="flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5" />
-                    <span>{formatUptime(metrics.system.uptime_seconds)}</span>
-                  </div>
-                  <Tooltip label={t('server_card.load_avg_tooltip', { cores: metrics.cpu.cores_logical })}>
-                    <div className="flex items-center gap-1.5">
-                      <Activity className="w-3.5 h-3.5" />
-                      <span className="font-mono">
-                        <span className={getLoadAvgColor(metrics.cpu.load_avg_1, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_1.toFixed(2)}</span>
-                        {' / '}
-                        <span className={getLoadAvgColor(metrics.cpu.load_avg_5, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_5.toFixed(2)}</span>
-                        {' / '}
-                        <span className={getLoadAvgColor(metrics.cpu.load_avg_15, metrics.cpu.cores_logical)}>{metrics.cpu.load_avg_15.toFixed(2)}</span>
-                      </span>
-                    </div>
-                  </Tooltip>
-                  {metrics.certificates?.closest_expiry ? (
-                    <div className={`flex items-center gap-1 ${
-                      metrics.certificates.closest_expiry.expired
-                        ? 'text-danger'
-                        : metrics.certificates.closest_expiry.days_left < 30
-                          ? 'text-warning'
-                          : 'text-success'
-                    }`}>
-                      <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0" />
-                      <Tooltip label={metrics.certificates.closest_expiry.domain}>
-                        <span className="truncate">
-                          {metrics.certificates.closest_expiry.expired
-                            ? t('server_card.cert_expired_domain', { domain: metrics.certificates.closest_expiry.domain })
-                            : t('server_card.cert_days_domain', {
-                                domain: metrics.certificates.closest_expiry.domain,
-                                days: metrics.certificates.closest_expiry.days_left
-                              })}
-                        </span>
-                      </Tooltip>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-1 text-dark-500">
-                      <ShieldAlert className="w-3.5 h-3.5" />
-                      <span>{t('server_card.no_certs')}</span>
-                    </div>
-                  )}
-                  <span className="text-dark-500 truncate max-w-[140px] ml-auto">{metrics.system.os}</span>
-                </div>
+                <CardFooter metrics={metrics} />
               </>
             )}
           </div>
@@ -619,7 +535,7 @@ function ServerCardView({
             )}
             {server.last_seen && (
               <span className="text-xs text-dark-500">
-                {t('server_card.last_seen', { time: formatTimeAgo(server.last_seen) })}
+                <TimeAgoLabel labelKey="server_card.last_seen" date={server.last_seen} />
               </span>
             )}
           </div>
@@ -664,7 +580,12 @@ export function areServerCardPropsEqual(prevProps: ServerCardProps, nextProps: S
   const a = prevProps.server
   const b = nextProps.server
   if (a.id !== b.id) return false
+  if (a.name !== b.name) return false
+  if (a.url !== b.url) return false
   if (a.status !== b.status) return false
+  if (a.last_seen !== b.last_seen) return false
+  if (a.last_error !== b.last_error) return false
+  if (a.error_code !== b.error_code) return false
   if (a.is_active !== b.is_active) return false
   if (a.antiddos_emergency_mode !== b.antiddos_emergency_mode) return false
   if (prevProps.compact !== nextProps.compact) return false
@@ -674,22 +595,22 @@ export function areServerCardPropsEqual(prevProps: ServerCardProps, nextProps: S
   if (a.folder !== b.folder) return false
   if (a.note !== b.note) return false
 
-  const am = a.metrics
-  const bm = b.metrics
+  const am: PartialCardMetrics | null | undefined = a.metrics
+  const bm: PartialCardMetrics | null | undefined = b.metrics
   if (!am !== !bm) return false
   if (am && bm) {
-    if (am.cpu.usage_percent !== bm.cpu.usage_percent) return false
-    if (am.cpu.load_avg_1 !== bm.cpu.load_avg_1) return false
-    if (am.memory.ram.percent !== bm.memory.ram.percent) return false
-    if (am.memory.ram.used !== bm.memory.ram.used) return false
-    if (am.disk.partitions[0]?.percent !== bm.disk.partitions[0]?.percent) return false
-    if (am.network.total?.rx_bytes_per_sec !== bm.network.total?.rx_bytes_per_sec) return false
-    if (am.network.total?.tx_bytes_per_sec !== bm.network.total?.tx_bytes_per_sec) return false
-    if (am.system.uptime_seconds !== bm.system.uptime_seconds) return false
+    if (am.cpu?.usage_percent !== bm.cpu?.usage_percent) return false
+    if (am.cpu?.load_avg_1 !== bm.cpu?.load_avg_1) return false
+    if (am.memory?.ram?.percent !== bm.memory?.ram?.percent) return false
+    if (am.memory?.ram?.used !== bm.memory?.ram?.used) return false
+    if (am.disk?.partitions?.[0]?.percent !== bm.disk?.partitions?.[0]?.percent) return false
+    if (am.network?.total?.rx_bytes_per_sec !== bm.network?.total?.rx_bytes_per_sec) return false
+    if (am.network?.total?.tx_bytes_per_sec !== bm.network?.total?.tx_bytes_per_sec) return false
+    if (am.system?.uptime_seconds !== bm.system?.uptime_seconds) return false
     // per_cpu_percent — мелкий массив, сравним длиной и поэлементно
     if (prevProps.detailLevel === 'detailed') {
-      const ac = am.cpu.per_cpu_percent
-      const bc = bm.cpu.per_cpu_percent
+      const ac = am.cpu?.per_cpu_percent ?? []
+      const bc = bm.cpu?.per_cpu_percent ?? []
       if (ac.length !== bc.length) return false
       for (let i = 0; i < ac.length; i++) if (ac[i] !== bc[i]) return false
     }
@@ -701,7 +622,51 @@ export function areServerCardPropsEqual(prevProps: ServerCardProps, nextProps: S
   return true
 }
 
-const ServerCard = memo(SortableServerCard, areServerCardPropsEqual)
+function BrokenCard({ name }: { name: string }) {
+  const { t } = useTranslation()
+  return (
+    <div className="card flex items-center gap-3">
+      <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0" />
+      <div className="min-w-0">
+        <h3 className="font-semibold text-dark-200 truncate">{name}</h3>
+        <p className="text-xs text-dark-500">{t('server_card.render_failed')}</p>
+      </div>
+    </div>
+  )
+}
+
+interface CardErrorBoundaryProps {
+  server: ServerCardProps['server']
+  children: ReactNode
+}
+
+// Исключение в одной карточке без своей границы уходит в границу страницы и заменяет
+// весь дашборд экраном ошибки. Новые данные сервера — новая попытка отрисовки
+class CardErrorBoundary extends Component<CardErrorBoundaryProps, { failed: boolean }> {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  componentDidUpdate(prevProps: CardErrorBoundaryProps) {
+    if (this.state.failed && prevProps.server !== this.props.server) this.setState({ failed: false })
+  }
+
+  render() {
+    return this.state.failed ? <BrokenCard name={this.props.server.name} /> : this.props.children
+  }
+}
+
+function GuardedServerCard(props: ServerCardProps) {
+  return (
+    <CardErrorBoundary server={props.server}>
+      <SortableServerCard {...props} />
+    </CardErrorBoundary>
+  )
+}
+
+const ServerCard = memo(GuardedServerCard, areServerCardPropsEqual)
 
 export default ServerCard
 
@@ -712,10 +677,24 @@ export function ServerCardOverlay(props: ServerCardProps) {
   return <ServerCardView {...props} isOverlay />
 }
 
+// «N назад» устаревает и без новых данных: у оффлайн-сервера пропсы карточки не меняются,
+// memo её не перерисовывает — подпись обновляет себя сама
+function TimeAgoLabel({ labelKey, date }: { labelKey: string; date: string }) {
+  const { t } = useTranslation()
+  const [, setTick] = useState(0)
+
+  useEffect(() => {
+    const timer = setInterval(() => setTick(tick => tick + 1), TIME_AGO_REFRESH_MS)
+    return () => clearInterval(timer)
+  }, [])
+
+  return <>{t(labelKey, { time: formatTimeAgo(date) })}</>
+}
+
 interface MetricItemProps {
   icon: React.ReactNode
   label: string
-  value: number
+  value: number | undefined
   usedBytes?: number
   totalBytes?: number
 }
@@ -727,11 +706,11 @@ function MetricItem({ icon, label, value, usedBytes, totalBytes }: MetricItemPro
         <span className="text-accent-500">{icon}</span>
         <span className="text-sm text-dark-300">{label}</span>
         <span className="ml-auto text-sm font-mono text-dark-200">
-          {value.toFixed(1)}%
+          {percentText(value)}
         </span>
       </div>
-      <ProgressBar value={value} size="sm" animated />
-      {usedBytes !== undefined && totalBytes !== undefined && (
+      <ProgressBar value={isNumber(value) ? value : 0} size="sm" animated />
+      {isNumber(usedBytes) && isNumber(totalBytes) && (
         <div className="text-xs text-dark-500 mt-1 font-mono">
           {formatBytes(usedBytes)} / {formatBytes(totalBytes)}
         </div>
@@ -740,15 +719,97 @@ function MetricItem({ icon, label, value, usedBytes, totalBytes }: MetricItemPro
   )
 }
 
+function DiskAndNetwork({ serverId, metrics }: { serverId: number; metrics: PartialCardMetrics }) {
+  const { t } = useTranslation()
+  const disk = metrics.disk?.partitions?.[0]
+  const speed = metrics.network?.total
+
+  return (
+    <div className="grid grid-cols-2 gap-4 mb-4">
+      <MetricItem
+        icon={<HardDrive className="w-4 h-4" />}
+        label={t('common.disk')}
+        value={disk?.percent}
+        usedBytes={disk?.used}
+        totalBytes={disk?.total}
+      />
+      <NetworkSpeedItem
+        serverId={serverId}
+        rxBytesPerSec={speed?.rx_bytes_per_sec}
+        txBytesPerSec={speed?.tx_bytes_per_sec}
+      />
+    </div>
+  )
+}
+
+function LoadAvgValue({ value, cores }: { value: number | undefined; cores: number | undefined }) {
+  if (!isNumber(value)) return <span>{NO_VALUE}</span>
+  const tone = isNumber(cores) && cores > 0 ? getLoadAvgColor(value, cores) : ''
+  return <span className={tone}>{value.toFixed(2)}</span>
+}
+
+function CardFooter({ metrics }: { metrics: PartialCardMetrics }) {
+  const { t } = useTranslation()
+  const cores = metrics.cpu?.cores_logical
+  const expiry = metrics.certificates?.closest_expiry
+
+  return (
+    <div className="pt-3 border-t border-dark-700/50 flex flex-wrap items-center text-xs text-dark-400 gap-x-3 gap-y-1">
+      <div className="flex items-center gap-1.5">
+        <Clock className="w-3.5 h-3.5" />
+        <span>{uptimeText(metrics.system?.uptime_seconds)}</span>
+      </div>
+      <Tooltip label={t('server_card.load_avg_tooltip', { cores: cores ?? NO_VALUE })}>
+        <div className="flex items-center gap-1.5">
+          <Activity className="w-3.5 h-3.5" />
+          <span className="font-mono">
+            <LoadAvgValue value={metrics.cpu?.load_avg_1} cores={cores} />
+            {' / '}
+            <LoadAvgValue value={metrics.cpu?.load_avg_5} cores={cores} />
+            {' / '}
+            <LoadAvgValue value={metrics.cpu?.load_avg_15} cores={cores} />
+          </span>
+        </div>
+      </Tooltip>
+      {expiry ? (
+        <div className={`flex items-center gap-1 ${
+          expiry.expired
+            ? 'text-danger'
+            : expiry.days_left < 30
+              ? 'text-warning'
+              : 'text-success'
+        }`}>
+          <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0" />
+          <Tooltip label={expiry.domain}>
+            <span className="truncate">
+              {expiry.expired
+                ? t('server_card.cert_expired_domain', { domain: expiry.domain })
+                : t('server_card.cert_days_domain', { domain: expiry.domain, days: expiry.days_left })}
+            </span>
+          </Tooltip>
+        </div>
+      ) : (
+        <div className="flex items-center gap-1 text-dark-500">
+          <ShieldAlert className="w-3.5 h-3.5" />
+          <span>{t('server_card.no_certs')}</span>
+        </div>
+      )}
+      <span className="text-dark-500 truncate max-w-[140px] ml-auto">{metrics.system?.os}</span>
+    </div>
+  )
+}
+
 interface NetworkSpeedItemProps {
   serverId: number
-  rxBytesPerSec: number
-  txBytesPerSec: number
+  rxBytesPerSec: number | undefined
+  txBytesPerSec: number | undefined
 }
 
 // Наведение открывает разбивку скорости по IP, интерфейсам и портам
 function NetworkSpeedItem({ serverId, rxBytesPerSec, txBytesPerSec }: NetworkSpeedItemProps) {
   const { t } = useTranslation()
+  const speedText = (bytesPerSec: number | undefined) =>
+    isNumber(bytesPerSec) ? formatBitsPerSecLocalized(bytesPerSec, t) : NO_VALUE
   return (
     <HoverCard content={() => <NetworkBreakdown serverId={serverId} />}>
       <div className="flex items-center gap-2 mb-2">
@@ -759,10 +820,10 @@ function NetworkSpeedItem({ serverId, rxBytesPerSec, txBytesPerSec }: NetworkSpe
       </div>
       <div className="flex gap-2 text-xs font-mono">
         <span className="text-success flex items-center gap-1">
-          ↓ {formatBitsPerSecLocalized(rxBytesPerSec, t)}
+          ↓ {speedText(rxBytesPerSec)}
         </span>
         <span className="text-accent-400 flex items-center gap-1">
-          ↑ {formatBitsPerSecLocalized(txBytesPerSec, t)}
+          ↑ {speedText(txBytesPerSec)}
         </span>
       </div>
     </HoverCard>
@@ -772,8 +833,8 @@ function NetworkSpeedItem({ serverId, rxBytesPerSec, txBytesPerSec }: NetworkSpe
 interface CpuCoresItemProps {
   icon: React.ReactNode
   label: string
-  totalUsage: number
-  perCpuPercent: number[]
+  totalUsage: number | undefined
+  perCpuPercent: number[] | undefined
 }
 
 function getColorForPercent(percent: number): string {
@@ -782,14 +843,14 @@ function getColorForPercent(percent: number): string {
   return 'bg-success'
 }
 
-function CpuCoresItem({ icon, label, totalUsage, perCpuPercent }: CpuCoresItemProps) {
+function CpuCoresItem({ icon, label, totalUsage, perCpuPercent = [] }: CpuCoresItemProps) {
   return (
     <div>
       <div className="flex items-center gap-2 mb-2">
         <span className="text-accent-500">{icon}</span>
         <span className="text-sm text-dark-300">{label}</span>
         <span className="ml-auto text-sm font-mono text-dark-200">
-          {totalUsage.toFixed(1)}%
+          {percentText(totalUsage)}
         </span>
       </div>
       <div className="space-y-1">
@@ -802,7 +863,7 @@ function CpuCoresItem({ icon, label, totalUsage, perCpuPercent }: CpuCoresItemPr
                 style={{ width: `${Math.min(100, percent)}%` }}
               />
             </div>
-            <span className="text-xs font-mono text-dark-400 w-10 text-right">{percent.toFixed(0)}%</span>
+            <span className="text-xs font-mono text-dark-400 w-10 text-right">{percentText(percent, 0)}</span>
           </div>
         ))}
       </div>

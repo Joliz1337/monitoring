@@ -7,20 +7,26 @@ Background loops:
     before an attack. Anti-DDoS has no whitelist of its own; a change of the shared
     allowlist asks for an extra push right away (request_whitelist_push).
   - status poll: reads each node's emergency state into Server.antiddos_*, and
-    fires a Telegram alert when a node auto-enters emergency mode.
+    fires a Telegram alert when a node auto-enters emergency mode. The same pass
+    installs or updates the watchdog where its version differs from the one on
+    GitHub — checked before it is sent, and rolled out as a canary (WatchdogRollout).
 
 Also exposes on-demand actions used by the API: install watchdog, toggle
-emergency per-node / on all nodes, toggle the watchdog.
+emergency per-node / on all nodes, toggle the watchdog. A fleet-wide action
+runs in the background and leaves its per-node outcome in `last_action`.
 """
 
 import asyncio
 import hashlib
+import html
 import ipaddress
 import json
 import logging
 import re
-from datetime import datetime, timezone
-from typing import Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from typing import Awaitable, Callable, Optional
 
 import httpx
 from sqlalchemy import select
@@ -32,18 +38,265 @@ from app.services.blocklist_manager import get_blocklist_manager
 from app.services.gre.render import whitelist_entries as gre_whitelist_entries
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, get_node_apply_client, get_external_client, node_auth_headers
-from app.services.node_capabilities import Capability, denied_message, server_allows
+from app.services.metrics_collector import get_collector
+from app.services.node_capabilities import Capability, denied_message, server_allows, server_allows_path
 from app.services.node_sync_queue import KIND_ANTIDDOS_WHITELIST, enqueue
 from app.services import update_channel
 
 logger = logging.getLogger(__name__)
 
 FILES_CACHE_TTL = 300   # seconds
+# GitHub не ответил — повтор не раньше: иначе при рассылке на парк каждая нода
+# по очереди ждала бы свой таймаут скачивания
+RELEASE_RETRY_INTERVAL = 30
+BASH_CHECK_TIMEOUT = 15.0
 # Дольше ждать нечего: nginx ноды обрывает этот запрос через те же 30 секунд
+WATCHDOG_INSTALL_PATH = "/api/antiddos/install"
 WHITELIST_SYNC_TIMEOUT = 30.0
 NODE_CONNECT_TIMEOUT = 3.0
 WHITELIST_PUSH_DEBOUNCE = 3.0  # пачка правок общего белого списка — одна рассылка
 MOVED_RULE_COMMENT = "из белого списка анти-DDoS"
+# Строка сервера без изменений переписывается не чаще: иначе опрос статуса
+# каждую минуту обновлял бы всю таблицу servers
+STATUS_REFRESH_INTERVAL = timedelta(minutes=5)
+MESSAGE_LIMIT = 300
+FAILED_NODES_SHOWN = 200
+
+# Новая версия сторожа сначала уходит горстке нод; остальным — когда опрос
+# статуса подтвердил её на нескольких из них
+CANARY_INSTALLS = 5
+CANARY_CONFIRMATIONS = 3
+ROLLOUT_FAILURE_LIMIT = 3
+# После канарейки три отказа на парк в тысячи нод — обычный фон (полный диск,
+# зависший агент): раскатку останавливает только заметная доля отказов
+ROLLOUT_FAILURE_SHARE = 0.05
+# Нода, принявшая версию и замолчавшая, — отказ: сторож правит iptables и мог её отрезать
+CONFIRM_TIMEOUT = 600.0
+
+_VERSION_LINE_RE = re.compile(r'^WATCHDOG_VERSION="([0-9][0-9.]*)"\s*$', re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class WatchdogRelease:
+    script: str
+    service: str
+    version: str
+
+
+def watchdog_version(script: str) -> Optional[str]:
+    match = _VERSION_LINE_RE.search(script)
+    return match.group(1) if match else None
+
+
+def release_problem(script: str, service: str) -> Optional[str]:
+    """Чем скачанный сторож не годится для рассылки, либо None.
+
+    С GitHub вместо скрипта приходят и пустой ответ, и страница ошибки, и файл,
+    оборванный посередине; нода запустила бы это от root."""
+    if not script.strip():
+        return "script is empty"
+    if not script.startswith("#!"):
+        return "script does not start with a shebang"
+    if watchdog_version(script) is None:
+        return 'script has no WATCHDOG_VERSION="x.y.z" line'
+    if "ExecStart=" not in service:
+        return "service file is not a systemd unit"
+    return None
+
+
+async def bash_syntax_problem(script: str) -> Optional[str]:
+    """Синтаксическая ошибка скрипта по `bash -n`, либо None.
+
+    Без bash в образе пропускается только эта проверка: остальные от него не
+    зависят, а нода перед заменой проверяет скрипт ещё раз."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "bash", "-n",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        logger.warning("bash is not available: watchdog script syntax is not checked on the panel")
+        return None
+    except OSError as e:
+        return f"bash -n could not run: {e}"
+
+    try:
+        _, stderr = await asyncio.wait_for(process.communicate(script.encode()), BASH_CHECK_TIMEOUT)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        return "bash -n timed out"
+    if process.returncode == 0:
+        return None
+    return f"bash -n: {stderr.decode(errors='replace').strip()[:MESSAGE_LIMIT] or process.returncode}"
+
+
+@dataclass
+class WatchdogRollout:
+    """Раскатка одной версии сторожа по парку.
+
+    Пока версию не подтвердили CANARY_CONFIRMATIONS нод, её получают не больше
+    CANARY_INSTALLS. Подтверждает версию опрос статуса, пришедший после
+    установки, а не ответ самой установки: скрипт, падающий через минуту, в нём
+    ещё жив. Останавливают раскатку ROLLOUT_FAILURE_LIMIT неудачных установок,
+    если отказавших нод при этом больше ROLLOUT_FAILURE_SHARE от всех, кто
+    версию получил.
+
+    Живёт в памяти: рестарт панели начинает канарейку заново — она проходит
+    сразу, если версия уже стоит хотя бы на трёх нодах."""
+    version: str
+    started: set[int] = field(default_factory=set)
+    # server_id → когда нода приняла версию; ждёт подтверждения опросом статуса
+    awaiting: dict[int, float] = field(default_factory=dict)
+    confirmed: set[int] = field(default_factory=set)
+    failed: dict[int, dict] = field(default_factory=dict)
+    # Неудачные установки считаются вместе с повторами: на парке из двух нод
+    # трёх разных отказавших не набралось бы никогда
+    failures: int = 0
+    halted: bool = False
+
+    @property
+    def proven(self) -> bool:
+        return len(self.confirmed) >= CANARY_CONFIRMATIONS
+
+    def may_install(self, server_id: int) -> bool:
+        if self.halted:
+            return False
+        return self.proven or server_id in self.started or len(self.started) < CANARY_INSTALLS
+
+    def installed(self, server_id: int, at: float) -> None:
+        self.failed.pop(server_id, None)
+        self.awaiting[server_id] = at
+
+    def confirm(self, server_id: int) -> None:
+        self.awaiting.pop(server_id, None)
+        self.failed.pop(server_id, None)
+        self.confirmed.add(server_id)
+
+    def fail(self, server: Server, message: str) -> bool:
+        """True — этим отказом раскатка остановлена."""
+        self.awaiting.pop(server.id, None)
+        self.confirmed.discard(server.id)
+        self.failed[server.id] = {
+            "server_id": server.id, "server_name": server.name, "message": message[:MESSAGE_LIMIT],
+        }
+        self.failures += 1
+        if self.halted or self.failures < ROLLOUT_FAILURE_LIMIT:
+            return False
+        received = len(self.confirmed) + len(self.awaiting) + len(self.failed)
+        if len(self.failed) <= ROLLOUT_FAILURE_SHARE * received:
+            return False
+        self.halted = True
+        return True
+
+    def overdue(self, now: float) -> list[int]:
+        return [server_id for server_id, at in self.awaiting.items() if now - at > CONFIRM_TIMEOUT]
+
+    def to_dict(self) -> dict:
+        return {
+            "version": self.version,
+            "confirmed": len(self.confirmed),
+            "pending": len(self.awaiting),
+            "failed": len(self.failed),
+            "halted": self.halted,
+            "failed_nodes": list(self.failed.values())[:FAILED_NODES_SHOWN],
+        }
+
+
+class FleetActionKind(str, Enum):
+    EMERGENCY = "emergency"
+    WATCHDOG = "watchdog"
+    INSTALL = "install"
+
+
+@dataclass
+class FleetAction:
+    """Ход и итог одной команды на весь парк. Хранится в памяти только последняя."""
+    kind: FleetActionKind
+    enabled: Optional[bool]
+    total: int
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    finished_at: Optional[datetime] = None
+    ok: int = 0
+    failed: list[dict] = field(default_factory=list)
+
+    def record(self, server: Server, ok: bool, message: str) -> None:
+        if ok:
+            self.ok += 1
+            return
+        self.failed.append({
+            "server_id": server.id, "server_name": server.name, "message": message[:MESSAGE_LIMIT],
+        })
+
+    def to_dict(self) -> dict:
+        return {
+            "action": self.kind.value,
+            "enabled": self.enabled,
+            "started_at": self.started_at.isoformat(),
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "total": self.total,
+            "ok": self.ok,
+            "failed_count": len(self.failed),
+            "failed": self.failed[:FAILED_NODES_SHOWN],
+        }
+
+
+@dataclass(frozen=True)
+class NodeState:
+    """Состояние сторожа в том виде, в каком оно лежит в колонках servers.antiddos_*."""
+    emergency: bool
+    source: Optional[str]
+    reason: Optional[str]
+    watchdog: bool
+    since: Optional[datetime]
+
+    @classmethod
+    def reported(cls, status: dict) -> "NodeState":
+        since_epoch = int(status.get("since", 0) or 0)
+        return cls(
+            emergency=status.get("mode") == "on",
+            source=status.get("source", "none"),
+            reason=(status.get("reason") or "")[:200],
+            watchdog=status.get("watchdog", "on") == "on",
+            since=datetime.fromtimestamp(since_epoch, tz=timezone.utc) if since_epoch else None,
+        )
+
+    @classmethod
+    def stored(cls, server: Server) -> "NodeState":
+        return cls(
+            emergency=bool(server.antiddos_emergency_mode),
+            source=server.antiddos_source,
+            reason=server.antiddos_reason,
+            watchdog=bool(server.antiddos_watchdog),
+            since=_as_utc(server.antiddos_since),
+        )
+
+
+def _as_utc(moment: Optional[datetime]) -> Optional[datetime]:
+    if moment is None or moment.tzinfo is not None:
+        return moment
+    return moment.replace(tzinfo=timezone.utc)
+
+
+def _synced_recently(server: Server, now: datetime) -> bool:
+    last_sync = _as_utc(server.antiddos_last_sync_at)
+    return last_sync is not None and now - last_sync < STATUS_REFRESH_INTERVAL
+
+
+class _OncePerPass:
+    """Whitelist на один проход опроса: собирается при первой установке и
+    достаётся всем остальным — сборка на каждую ноду держала бы event loop."""
+
+    def __init__(self, build: Callable[[], Awaitable[list[str]]]):
+        self._build = build
+        self._task: Optional[asyncio.Task] = None
+
+    async def get(self) -> list[str]:
+        if self._task is None:
+            self._task = asyncio.ensure_future(self._build())
+        return await self._task
 
 
 class AntiDdosManager:
@@ -58,7 +311,12 @@ class AntiDdosManager:
         self._requested_push_task: Optional[asyncio.Task] = None
         self._db_sem = asyncio.Semaphore(self.DB_CONCURRENCY)
         self._http_sem = asyncio.Semaphore(self.HTTP_CONCURRENCY)
-        self._files_cache: Optional[tuple[float, str, str]] = None
+        # (до какого момента верить, проверенный сторож либо None — рассылать нечего)
+        self._release_cache: Optional[tuple[float, Optional[WatchdogRelease]]] = None
+        self._release_lock = asyncio.Lock()
+        self._rollout: Optional[WatchdogRollout] = None
+        self._last_action: Optional[FleetAction] = None
+        self._fleet_tasks: set[asyncio.Task] = set()
         self._install_cooldown: dict[int, float] = {}
         self._push_requested = asyncio.Event()
         self._push_lock = asyncio.Lock()
@@ -82,7 +340,7 @@ class AntiDdosManager:
 
     async def stop(self):
         self._running = False
-        for task in (self._whitelist_task, self._status_task, self._requested_push_task):
+        for task in (self._whitelist_task, self._status_task, self._requested_push_task, *self._fleet_tasks):
             if task:
                 task.cancel()
                 try:
@@ -242,16 +500,37 @@ class AntiDdosManager:
                 timeout=timeout,
             )
             if resp.status_code == 200:
-                return bool(resp.json().get("success")), "ok"
+                data = resp.json()
+                ok = bool(data.get("success"))
+                return ok, "ok" if ok else str(data.get("message") or "node refused")
             return False, f"HTTP {resp.status_code}"
         except Exception as e:
             return False, str(e)
 
-    async def _fetch_watchdog_files(self) -> Optional[tuple[str, str]]:
-        loop = asyncio.get_event_loop()
-        now = loop.time()
-        if self._files_cache and (now - self._files_cache[0]) < FILES_CACHE_TTL:
-            return self._files_cache[1], self._files_cache[2]
+    async def _watchdog_release(self) -> Optional[WatchdogRelease]:
+        """Сторож со своего канала, прошедший проверку. None — рассылать нечего:
+        GitHub не ответил либо отдал негодный скрипт."""
+        # Под замком: рассылка на парк иначе скачивала бы и проверяла скрипт
+        # столько раз, сколько нод дошло до установки одновременно
+        async with self._release_lock:
+            now = asyncio.get_running_loop().time()
+            if self._release_cache and now < self._release_cache[0]:
+                return self._release_cache[1]
+
+            files = await self._download_watchdog()
+            if files is None:
+                self._release_cache = (now + RELEASE_RETRY_INTERVAL, None)
+                return None
+
+            script, service = files
+            problem = release_problem(script, service) or await bash_syntax_problem(script)
+            release = None if problem else WatchdogRelease(script, service, watchdog_version(script))
+            if problem:
+                logger.error(f"Watchdog from GitHub is rejected, nothing goes to the nodes: {problem}")
+            self._release_cache = (now + FILES_CACHE_TTL, release)
+            return release
+
+    async def _download_watchdog(self) -> Optional[tuple[str, str]]:
         try:
             client = get_external_client()
             configs_base = update_channel.github_configs_base()
@@ -259,45 +538,41 @@ class AntiDdosManager:
                 client.get(f"{configs_base}/ddos-watchdog.sh", timeout=20.0),
                 client.get(f"{configs_base}/ddos-watchdog.service", timeout=20.0),
             )
-            if sh_resp.status_code != 200 or svc_resp.status_code != 200:
-                return None
-            self._files_cache = (now, sh_resp.text, svc_resp.text)
-            return sh_resp.text, svc_resp.text
         except Exception as e:
             logger.error(f"Failed to fetch watchdog files: {e}")
             return None
-
-    async def _expected_watchdog_version(self) -> Optional[str]:
-        files = await self._fetch_watchdog_files()
-        if not files:
+        if sh_resp.status_code != 200 or svc_resp.status_code != 200:
             return None
-        match = re.search(r'WATCHDOG_VERSION="?([0-9][0-9.]*)"?', files[0])
-        return match.group(1) if match else None
+        return sh_resp.text, svc_resp.text
 
     async def install_to_node(self, server: Server, timeout: float = 60.0) -> tuple[bool, str]:
-        if not server_allows(server, Capability.ANTIDDOS, write=True):
-            return False, denied_message(Capability.ANTIDDOS, True)
-        files = await self._fetch_watchdog_files()
-        if not files:
-            return False, "could not fetch watchdog files from GitHub"
-        script_content, service_content = files
+        # Скрипт сторожа нода исполняет от root: кроме своего раздела ей нужен exec
+        allowed, denied, _ = server_allows_path(server, WATCHDOG_INSTALL_PATH, "POST")
+        if not allowed:
+            return False, denied_message(denied, True)
+        release = await self._watchdog_release()
+        if release is None:
+            return False, "no valid watchdog script from GitHub"
         try:
             async with async_session() as db:
                 settings = await self.get_or_create_settings(db)
                 watchdog_default = settings.watchdog_default_enabled
             client = get_node_apply_client(server)
             resp = await client.post(
-                f"{server.url}/api/antiddos/install",
+                f"{server.url}{WATCHDOG_INSTALL_PATH}",
                 headers=node_auth_headers(server),
                 json={
-                    "script_content": script_content,
-                    "service_content": service_content,
+                    "script_content": release.script,
+                    "service_content": release.service,
                     "watchdog_enabled": watchdog_default,
                 },
                 timeout=timeout,
             )
             if resp.status_code == 200:
-                return bool(resp.json().get("success")), "installed"
+                data = resp.json()
+                if data.get("success"):
+                    return True, "installed"
+                return False, str(data.get("message") or "node failed to install the watchdog")
             return False, f"HTTP {resp.status_code}"
         except Exception as e:
             return False, str(e)
@@ -406,100 +681,126 @@ class AntiDdosManager:
         return results
 
     @staticmethod
-    def _allowed_for_write(servers: list[Server]) -> list[Server]:
+    def _fleet_targets(kind: FleetActionKind, servers: list[Server]) -> list[Server]:
+        """Закрывшие раздел не считаются ни в «сколько нод», ни в «сколько
+        удалось»; установке сторожа кроме раздела нужен ещё exec."""
+        if kind is FleetActionKind.INSTALL:
+            return [s for s in servers if server_allows_path(s, WATCHDOG_INSTALL_PATH, "POST")[0]]
         return [s for s in servers if server_allows(s, Capability.ANTIDDOS, write=True)]
 
-    async def set_emergency_all(self, enabled: bool) -> dict:
-        # Закрывшие раздел не считаем ни в «сколько нод», ни в «сколько удалось»
-        servers = self._allowed_for_write(await self._active_servers())
+    async def start_fleet_action(self, kind: FleetActionKind, enabled: Optional[bool] = None) -> dict:
+        """Запустить команду на весь парк в фоне. Обход занимает до минут, и
+        запрос его не ждёт: страница следит за ходом по записи о команде.
 
-        async def _one(srv: Server):
+        Мастер-переключатель — команда WATCHDOG: он управляет только автодетектом
+        и аварийный режим, закреплённый админом, не трогает."""
+        return self._launch(kind, enabled, self._fleet_targets(kind, await self._active_servers()))
+
+    async def retry_failed(self) -> Optional[dict]:
+        """Повторить последнюю команду на нодах, где она не прошла. None —
+        повторять нечего: команды не было, она ещё идёт или прошла везде."""
+        last = self._last_action
+        if last is None or last.finished_at is None or not last.failed:
+            return None
+        failed_ids = {entry["server_id"] for entry in last.failed}
+        servers = [s for s in self._fleet_targets(last.kind, await self._active_servers()) if s.id in failed_ids]
+        return self._launch(last.kind, last.enabled, servers)
+
+    def last_action(self) -> Optional[dict]:
+        return self._last_action.to_dict() if self._last_action else None
+
+    def rollout_state(self) -> Optional[dict]:
+        return self._rollout.to_dict() if self._rollout else None
+
+    def _launch(self, kind: FleetActionKind, enabled: Optional[bool], servers: list[Server]) -> dict:
+        action = FleetAction(kind, enabled, total=len(servers))
+        self._last_action = action
+        # Ссылка держит задачу: на фоновую без ссылок вправе прийти сборщик мусора
+        task = asyncio.create_task(self.run_bg(self._run_fleet_action(action, servers)))
+        self._fleet_tasks.add(task)
+        task.add_done_callback(self._fleet_tasks.discard)
+        return action.to_dict()
+
+    async def _run_fleet_action(self, action: FleetAction, servers: list[Server]) -> None:
+        async def _one(srv: Server) -> None:
             async with self._http_sem:
-                ok, msg, status = await self.set_node_emergency(srv, enabled)
-                if ok and status:
-                    await self._store_status(srv.id, status)
-                return {"server_id": srv.id, "success": ok, "message": msg}
+                try:
+                    ok, message = await self._apply_to_node(action, srv)
+                except Exception as e:  # noqa: BLE001 — граница обхода: сбой одной ноды не обрывает остальные
+                    ok, message = False, str(e) or type(e).__name__
+            action.record(srv, ok, message)
 
-        results = await asyncio.gather(*[_one(s) for s in servers], return_exceptions=True)
-        ok_count = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
-        return {"nodes": len(servers), "ok": ok_count}
-
-    async def set_watchdog_all(self, enabled: bool) -> dict:
-        servers = self._allowed_for_write(await self._active_servers())
-
-        async def _one(srv: Server):
-            async with self._http_sem:
-                ok, _ = await self.set_node_watchdog(srv, enabled)
-                return ok
-
-        results = await asyncio.gather(*[_one(s) for s in servers], return_exceptions=True)
-        ok_count = sum(1 for r in results if r is True)
-        return {"nodes": len(servers), "ok": ok_count}
-
-    async def apply_master_state(self, enabled: bool):
-        """The master switch controls ONLY fleet-wide auto-detection (watchdog).
-        Manual emergency mode is a separate control and is never touched here, so
-        turning auto-detection off never clears an emergency an admin pinned."""
         try:
-            await self.set_watchdog_all(enabled)
-        except Exception as e:
-            logger.error(f"apply_master_state({enabled}) failed: {e}")
+            await asyncio.gather(*[_one(s) for s in servers])
+        finally:
+            action.finished_at = datetime.now(timezone.utc)
+        if action.failed:
+            first = ", ".join(f"{entry['server_name']} ({entry['message']})" for entry in action.failed[:5])
+            logger.warning(
+                f"Anti-DDoS fleet action {action.kind.value} (enabled={action.enabled}): "
+                f"{len(action.failed)} of {action.total} nodes failed, first: {first}"
+            )
 
-    async def install_all(self) -> dict:
-        servers = await self._active_servers()
-
-        async def _one(srv: Server):
-            async with self._http_sem:
-                ok, msg = await self.install_to_node(srv)
-                return {"server_id": srv.id, "success": ok, "message": msg}
-
-        results = await asyncio.gather(*[_one(s) for s in servers], return_exceptions=True)
-        ok_count = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
-        return {"nodes": len(servers), "ok": ok_count}
+    async def _apply_to_node(self, action: FleetAction, server: Server) -> tuple[bool, str]:
+        if action.kind is FleetActionKind.EMERGENCY:
+            ok, message, status = await self.set_node_emergency(server, bool(action.enabled))
+            if ok and status:
+                await self._store_status(server.id, status)
+            return ok, message
+        if action.kind is FleetActionKind.WATCHDOG:
+            return await self.set_node_watchdog(server, bool(action.enabled))
+        return await self.install_to_node(server)
 
     # ── status persistence + alerting ──────────────────────────────────────
 
-    async def _store_status(self, server_id: int, status: dict, alert: bool = False):
-        mode_on = status.get("mode") == "on"
-        source = status.get("source", "none")
-        reason = (status.get("reason") or "")[:200]
-        watchdog_on = status.get("watchdog", "on") == "on"
-        since_epoch = int(status.get("since", 0) or 0)
-        since_dt = datetime.fromtimestamp(since_epoch, tz=timezone.utc) if since_epoch else None
+    async def _store_status(
+        self, server_id: int, status: dict, alert: bool = False, known: Optional[Server] = None,
+    ):
+        """known — строка сервера, прочитанная в начале прохода опроса: по ней
+        видно, что писать нечего, без запроса к базе."""
+        reported = NodeState.reported(status)
+        now = datetime.now(timezone.utc)
+        if known is not None and NodeState.stored(known) == reported and _synced_recently(known, now):
+            return
 
         async with async_session() as db:
             srv = (await db.execute(select(Server).where(Server.id == server_id))).scalar_one_or_none()
             if srv is None:
                 return
+            if NodeState.stored(srv) == reported and _synced_recently(srv, now):
+                return
             was_on = bool(srv.antiddos_emergency_mode)
-            srv.antiddos_emergency_mode = mode_on
-            srv.antiddos_source = source
-            srv.antiddos_reason = reason
-            srv.antiddos_watchdog = watchdog_on
-            srv.antiddos_since = since_dt
-            srv.antiddos_last_sync_at = datetime.now(timezone.utc)
+            srv.antiddos_emergency_mode = reported.emergency
+            srv.antiddos_source = reported.source
+            srv.antiddos_reason = reported.reason
+            srv.antiddos_watchdog = reported.watchdog
+            srv.antiddos_since = reported.since
+            srv.antiddos_last_sync_at = now
             server_name = srv.name
             await db.commit()
 
         # alert only on an off→on transition that the node enabled itself
-        if alert and mode_on and not was_on and source == "auto":
-            await self._send_alert(server_id, server_name, reason)
+        if alert and reported.emergency and not was_on and reported.source == "auto":
+            await self._send_alert(server_id, server_name, reported.reason)
+
+    async def _notify(self, text: str) -> bool:
+        """True — сообщение ушло в Telegram сейчас; не ушедшее из-за сети уйдёт позже само."""
+        async with async_session() as db:
+            alert_settings = (await db.execute(select(AlertSettings).limit(1))).scalar_one_or_none()
+        token = getattr(alert_settings, "telegram_bot_token", None)
+        chat_id = getattr(alert_settings, "telegram_chat_id", None)
+        if not (token and chat_id):
+            return False
+        from app.services.telegram_bot import get_telegram_bot_service
+        return await get_telegram_bot_service().send_message(token, chat_id, text, retry_later=True)
 
     async def _send_alert(self, server_id: int, server_name: str, reason: str):
         try:
-            async with async_session() as db:
-                alert_settings = (await db.execute(select(AlertSettings).limit(1))).scalar_one_or_none()
-            token = getattr(alert_settings, "telegram_bot_token", None)
-            chat_id = getattr(alert_settings, "telegram_chat_id", None)
-            notified = False
-            if token and chat_id:
-                text = (
-                    f"\U0001f6e1️ <b>Anti-DDoS: аварийный режим</b>\n\n"
-                    f"Нода <b>{server_name}</b> автоматически включила защиту.\n"
-                    f"Причина: {reason or 'signal detected'}"
-                )
-                from app.services.telegram_bot import get_telegram_bot_service
-                notified = await get_telegram_bot_service().send_message(token, chat_id, text)
+            notified = await self._notify(
+                f"\U0001f6e1️ <b>Anti-DDoS: аварийный режим</b>\n\n"
+                f"Нода <b>{server_name}</b> автоматически включила защиту.\n"
+                f"Причина: {reason or 'signal detected'}"
+            )
 
             async with async_session() as db:
                 db.add(AlertHistory(
@@ -515,59 +816,133 @@ class AntiDdosManager:
         except Exception as e:
             logger.error(f"Failed to send antiddos alert: {e}")
 
-    async def _maybe_auto_install(self, server: Server, status: dict, expected_version: Optional[str]) -> dict:
+    def _rollout_of(self, version: str) -> WatchdogRollout:
+        if self._rollout is None or self._rollout.version != version:
+            self._rollout = WatchdogRollout(version)
+            # Отказ прежней версии не должен откладывать попытку новой
+            self._install_cooldown.clear()
+        return self._rollout
+
+    async def _rollout_failure(self, rollout: WatchdogRollout, server: Server, message: str) -> None:
+        logger.warning(f"Watchdog {rollout.version} on {server.name} failed: {message}")
+        if not rollout.fail(server, message):
+            return
+        failed = list(rollout.failed.values())
+        logger.error(
+            f"Watchdog {rollout.version} rollout is halted: {len(failed)} nodes failed, "
+            f"first: {failed[0]['server_name']} ({failed[0]['message']})"
+        )
+        lines = "\n".join(
+            f"• <b>{html.escape(entry['server_name'])}</b>: {html.escape(entry['message'])}" for entry in failed[:5]
+        )
+        try:
+            await self._notify(
+                f"\U0001f6e1️ <b>Anti-DDoS: обновление сторожа остановлено</b>\n\n"
+                f"Версия {html.escape(rollout.version)} не встала на {len(failed)} нодах, "
+                f"на остальные она больше не раскатывается.\n{lines}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send the watchdog rollout alert: {e}")
+
+    async def _fail_unconfirmed(self, rollout: WatchdogRollout, servers: list[Server]) -> None:
+        by_id = {server.id: server for server in servers}
+        for server_id in rollout.overdue(asyncio.get_running_loop().time()):
+            server = by_id.get(server_id)
+            if server is None:
+                rollout.awaiting.pop(server_id)  # сервер удалён или выключен — не отказ версии
+                continue
+            await self._rollout_failure(rollout, server, "no status from the node after the install")
+
+    async def _maybe_auto_install(
+        self,
+        server: Server,
+        status: dict,
+        release: Optional[WatchdogRelease],
+        whitelist: Callable[[], Awaitable[list[str]]],
+    ) -> dict:
         """Zero-touch rollout: if a node has the new agent (/api/antiddos exists,
         so status came back) but the watchdog isn't installed — or it's an older
         version — the panel installs/updates it itself. No admin action, no per-node
         clicking. A per-node cooldown keeps a failing install from retrying every poll.
+
+        Версия идёт канарейкой (см. WatchdogRollout): негодный скрипт успевает
+        попасть на горстку нод, а не на весь парк.
         """
         # Проверка до cooldown: закрытая нода иначе получала бы попытку установки
         # каждые десять минут и до конца времён
-        if not server_allows(server, Capability.ANTIDDOS, write=True):
+        if release is None or not server_allows_path(server, WATCHDOG_INSTALL_PATH, "POST")[0]:
             return status
 
+        rollout = self._rollout_of(release.version)
         installed = status.get("installed", False)
         version = status.get("version") or ""
-        needs = (not installed) or (expected_version and version and version != expected_version)
-        if not needs:
+        if installed and version == release.version:
+            if status.get("watchdog_active", True):
+                rollout.confirm(server.id)
+            elif server.id in rollout.awaiting:
+                await self._rollout_failure(rollout, server, "watchdog service stopped after the install")
             return status
+        # Сторож стоит, но версию не назвал (сбой его `status`): менять вслепую нечего
+        if installed and not version:
+            return status
+        if server.id in rollout.awaiting:
+            await self._rollout_failure(rollout, server, f"node reports version {version or 'none'} after the install")
 
-        loop = asyncio.get_event_loop()
-        now = loop.time()
-        if now - self._install_cooldown.get(server.id, 0.0) < self.INSTALL_RETRY_INTERVAL:
+        now = asyncio.get_running_loop().time()
+        last_attempt = self._install_cooldown.get(server.id)
+        if last_attempt is not None and now - last_attempt < self.INSTALL_RETRY_INTERVAL:
+            return status
+        if not rollout.may_install(server.id):
             return status
         self._install_cooldown[server.id] = now
+        rollout.started.add(server.id)
 
         ok, msg = await self.install_to_node(server)
         if not ok:
-            logger.warning(f"Auto-install of watchdog on {server.name} failed: {msg}")
+            await self._rollout_failure(rollout, server, msg)
             return status
 
-        logger.info(f"Auto-installed watchdog on {server.name}")
+        rollout.installed(server.id, asyncio.get_running_loop().time())
+        logger.info(f"Auto-installed watchdog {release.version} on {server.name}")
         # give the freshly-installed node its whitelist immediately
         try:
-            async with async_session() as db:
-                ips = await self.build_whitelist(db)
-            await self.sync_whitelist_to_node(server, ips)
+            await self.sync_whitelist_to_node(server, await whitelist())
         except Exception as e:
             logger.warning(f"Post-install whitelist push to {server.name} failed: {e}")
 
         fresh = await self.get_node_status(server)
         return fresh if fresh is not None else status
 
+    async def _load_whitelist(self) -> list[str]:
+        async with self._db_sem:
+            async with async_session() as db:
+                return await self.build_whitelist(db)
+
     async def poll_status_all(self):
         servers = await self._active_servers()
-        expected_version = await self._expected_watchdog_version()
+        release = await self._watchdog_release()
+        if release is not None:
+            await self._fail_unconfirmed(self._rollout_of(release.version), servers)
+
+        # Молчавшая на опросе метрик нода и здесь отдала бы только таймаут
+        collector = get_collector()
+        answering = [s for s in servers if collector._answered_last_poll(s.id)]
+        whitelist = _OncePerPass(self._load_whitelist)
 
         async def _one(srv: Server):
             async with self._http_sem:
                 status = await self.get_node_status(srv)
                 if status is None:
                     return  # unreachable, or old agent without /api/antiddos
-                status = await self._maybe_auto_install(srv, status, expected_version)
-                await self._store_status(srv.id, status, alert=True)
+                status = await self._maybe_auto_install(srv, status, release, whitelist.get)
+                await self._store_status(srv.id, status, alert=True, known=srv)
 
-        await asyncio.gather(*[_one(s) for s in servers], return_exceptions=True)
+        results = await asyncio.gather(*[_one(s) for s in answering], return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            logger.warning(
+                f"Anti-DDoS status poll: {len(errors)} of {len(answering)} nodes raised, first: {errors[0]!r}"
+            )
 
     # ── loops ──────────────────────────────────────────────────────────────
 

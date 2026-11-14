@@ -11,6 +11,8 @@ import os
 import re
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -156,6 +158,43 @@ class SetTests(unittest.TestCase):
         changes = dp.plan_set({}, [], "http://10.0.0.6:3128")
         self.assertEqual(set(changes.writes), {dp.MONITORING_CONF, dp.APT_OWN, dp.DOCKER_DROPIN_OWN, dp.GITCONFIG})
         self.assertFalse(changes.recreate_agent)
+
+
+class FileModeTests(unittest.IsolatedAsyncioTestCase):
+    """В адресе прокси — логин и пароль: файлы с ним читает только root."""
+
+    async def written_modes(self, changes: dp.HostChanges) -> dict[str, str]:
+        modes: dict[str, str] = {}
+
+        async def write(path: str, content: str, mode: str, secret: bool) -> bool:
+            modes[path] = mode
+            return True
+
+        manager = dp.DownloadProxyManager.__new__(dp.DownloadProxyManager)
+        manager._executor = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(success=True)))
+        with patch.object(dp, "write_host_file", write):
+            await manager._apply(changes)
+        return modes
+
+    async def test_files_with_the_proxy_address_are_root_only(self):
+        modes = await self.written_modes(dp.plan_set({}, [], DEAD))
+
+        self.assertEqual((modes[dp.MONITORING_CONF], modes[dp.APT_OWN], modes[dp.GITCONFIG]), ("600", "600", "600"))
+
+    async def test_docker_drop_in_stays_readable(self):
+        # systemd отдаёт Environment= через `systemctl show` любому пользователю, а на
+        # файл юнита без чтения для всех ругается при каждом daemon-reload
+        modes = await self.written_modes(dp.plan_set({}, [], DEAD))
+
+        self.assertEqual(modes[dp.DOCKER_DROPIN_OWN], "644")
+
+    async def test_foreign_files_cleaned_of_the_proxy_stay_readable(self):
+        # /etc/environment и чужой apt.conf читают все: права 600 сломали бы вход и apt
+        modes = await self.written_modes(dp.plan_removal(FILES, entries()))
+
+        self.assertEqual(modes[dp.ENVIRONMENT], "644")
+        self.assertEqual(modes["/etc/apt/apt.conf.d/95proxies"], "644")
+        self.assertEqual(modes[dp.CURLRC], "644")
 
 
 class UrlPatternTests(unittest.TestCase):

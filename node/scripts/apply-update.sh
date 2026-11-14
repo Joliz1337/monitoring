@@ -12,6 +12,13 @@ export NEEDRESTART_MODE=l
 export NEEDRESTART_SUSPEND=1
 
 CONTAINERS_STOPPED=0
+# 1 — рестарт начат: до исправного старта образы на диске не трогаются, прежний —
+# единственное, на что нода может вернуться
+RESTART_STARTED=0
+
+AGENT_IMAGE_REPO="ghcr.io/joliz1337/monitoring-node-api"
+# Под этим тегом прежний образ агента хранится, пока проверяется новый
+ROLLBACK_IMAGE="${AGENT_IMAGE_REPO}:rollback"
 
 # Сборке образа на ноде нужны базовый образ, слои apt и pip и кэш — около 1,5 ГБ.
 # На диске, где свободно меньше, она забила бы его до отказа
@@ -44,10 +51,22 @@ remove_stale_node_images() {
 # разом не может обновиться, уборка в конце удачного прохода не наступает
 # никогда, и диск забивается
 cleanup_update_leftovers() {
+    # Страховочный тег отката снимается первым: пока он есть, уборка ниже могла
+    # бы снять с работающего образа рабочий тег, а оставить этот
+    docker rmi "$ROLLBACK_IMAGE" >/dev/null 2>&1 || true
     docker image prune -f >/dev/null 2>&1 || true
     remove_stale_node_images || true
     docker builder prune -f --keep-storage=500MB >/dev/null 2>&1 || true
     rm -f /tmp/mon-node-img.tar.gz 2>/dev/null || true
+}
+
+# Клон, из которого запущен этот скрипт. update.sh до своей уборки не доходит:
+# он уходит сюда через exec. Чужие каталоги (агент ноды кладёт клон в свой и
+# убирает его сам) не трогаются
+remove_update_clone() {
+    case "$TMP_DIR" in
+        /tmp/node-update-*) rm -rf "$TMP_DIR" 2>/dev/null || true ;;
+    esac
 }
 
 cleanup() {
@@ -67,13 +86,15 @@ cleanup() {
                 echo -e "\033[0;31m[RECOVERY] Failed to restart containers! Manual intervention required\033[0m"
                 echo -e "\033[0;31m[RECOVERY] Run: cd /opt/monitoring-node && docker compose up -d\033[0m"
             fi
-        else
+        elif [ "$RESTART_STARTED" != "1" ]; then
             # Сбой до рестарта — на скачивании или сборке: убираем то, что они
-            # оставили. Сорвался сам рестарт — образы не трогаем: прежний ещё
-            # может понадобиться, чтобы вернуть ноду руками
+            # оставили. Сорвался сам рестарт или агент не поднялся на новом
+            # образе — образы не трогаем: прежний ещё может понадобиться, чтобы
+            # вернуть ноду руками
             cleanup_update_leftovers
         fi
     fi
+    remove_update_clone
     exit $exit_code
 }
 trap cleanup EXIT
@@ -231,6 +252,17 @@ DOCKER_PULL_RETRY_DELAY=15
 
 # Агент слушает только локальный сокет (command сервиса api в docker-compose.yml)
 AGENT_SOCKET="/run/monitoring-node/api.sock"
+AGENT_CONTAINER="monitoring-api"
+# По истечении ожидания нода откатывается на прежний образ, поэтому запас с
+# избытком: на старте агент восстанавливает правила iptables, и на загруженной
+# ноде это десятки секунд
+HEALTH_MAX_ATTEMPTS=60
+HEALTH_RETRY_DELAY=2
+# Агент, принявший соединение и замолчавший, без потолка повесил бы обновление
+HEALTH_PROBE_TIMEOUT=3
+# Откат удаляет контейнер неподнявшегося агента вместе с его логом — хвост
+# лога печатается до отката, иначе причину уже не узнать
+FAILED_AGENT_LOG_LINES=20
 
 # Arguments
 TMP_DIR="$1"
@@ -604,6 +636,47 @@ EOF
     fi
 }
 
+# ==================== Restart & Rollback ====================
+
+# up -d ждёт healthy у api (depends_on) и при медленном старте может выйти с
+# ошибкой, оставив nginx в статусе Created — тогда поднимаем контейнеры напрямую
+start_containers() {
+    spin "Starting containers" docker compose up -d && return 0
+    log_warn "compose up failed, starting containers directly..."
+    docker compose start 2>/dev/null || docker start "$AGENT_CONTAINER" monitoring-nginx
+}
+
+wait_for_agent() {
+    local attempt
+    for ((attempt = 0; attempt < HEALTH_MAX_ATTEMPTS; attempt++)); do
+        if curl -sf --max-time "$HEALTH_PROBE_TIMEOUT" --unix-socket "$AGENT_SOCKET" http://localhost/health > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep "$HEALTH_RETRY_DELAY"
+    done
+    return 1
+}
+
+# Возвращает прежний образ под тег, которого ждёт compose, и поднимает ноду на
+# нём. Файлы на диске остаются новыми: command и healthcheck из
+# docker-compose.yml задают запуск образу любой версии
+rollback_to_previous_image() {
+    local image_ref
+    if [ -z "$PREVIOUS_IMAGE_ID" ] \
+        || [ "$(docker inspect --format '{{.Image}}' "$AGENT_CONTAINER" 2>/dev/null)" = "$PREVIOUS_IMAGE_ID" ]; then
+        log_warn "No previous image to roll back to"
+        return 1
+    fi
+    image_ref=$(docker compose config --images 2>/dev/null | grep -m1 -F "${AGENT_IMAGE_REPO}:") || return 1
+    docker tag "$PREVIOUS_IMAGE_ID" "$image_ref" || return 1
+
+    docker compose down --timeout 30 || true
+    CONTAINERS_STOPPED=1
+    start_containers || return 1
+    CONTAINERS_STOPPED=0
+    wait_for_agent
+}
+
 # ==================== Main Update Logic ====================
 
 # Get new version
@@ -750,7 +823,17 @@ fi
 # Если скачать/собрать не удалось — обновление отменяется без даунтайма.
 cd "$NODE_DIR"
 stage images
+# Образ, на котором агент работает сейчас: на него нода вернётся, если новый не
+# поднимется. Пока контейнер жив, уборка ниже занятый им образ не удаляет
+PREVIOUS_IMAGE_ID=$(docker inspect --format '{{.Image}}' "$AGENT_CONTAINER" 2>/dev/null || true)
 cleanup_update_leftovers
+# Прежний образ получает собственный тег: после pull под рабочим тегом он
+# остаётся без имени, и пока новый образ проверяется, его снёс бы любой
+# посторонний docker image prune. Тег ставится после уборки: она его снимает,
+# и в конце удачного обновления прежний образ уходит вместе с ним
+if [ -n "$PREVIOUS_IMAGE_ID" ]; then
+    docker tag "$PREVIOUS_IMAGE_ID" "$ROLLBACK_IMAGE" 2>/dev/null || PREVIOUS_IMAGE_ID=""
+fi
 log_info "Free space for Docker images: $(docker_free_mb) MB"
 
 set +e
@@ -794,39 +877,34 @@ fi
 # Образы на диске — теперь короткий рестарт на новую версию
 stage restart
 log_info "Restarting containers on new version..."
+RESTART_STARTED=1
 docker compose down --timeout 30 || true
 CONTAINERS_STOPPED=1
 
-# up -d ждёт healthy у api (depends_on) и при медленном старте может выйти с
-# ошибкой, оставив nginx в статусе Created — тогда поднимаем контейнеры напрямую
-if ! spin "Starting containers" docker compose up -d; then
-    log_warn "compose up failed, starting containers directly..."
-    docker compose start 2>/dev/null || docker start monitoring-api monitoring-nginx || {
-        log_error "Failed to start containers"
-        exit 1
-    }
+AGENT_HEALTHY=0
+if start_containers; then
+    log_info "Waiting for API..."
+    if wait_for_agent; then
+        AGENT_HEALTHY=1
+    fi
 fi
 CONTAINERS_STOPPED=0
 
-# Wait for API to be healthy
-log_info "Waiting for API..."
-MAX_ATTEMPTS=30
-ATTEMPT=0
-# Агент, принявший соединение и замолчавший, без потолка повесил бы обновление
-HEALTH_PROBE_TIMEOUT=3
-
-while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    if curl -sf --max-time "$HEALTH_PROBE_TIMEOUT" --unix-socket "$AGENT_SOCKET" http://localhost/health > /dev/null 2>&1; then
-        log_success "API is healthy"
-        break
+if [ "$AGENT_HEALTHY" != "1" ]; then
+    log_warn "Agent did not become healthy on the new image, its last log lines:"
+    docker logs --tail "$FAILED_AGENT_LOG_LINES" "$AGENT_CONTAINER" 2>&1 | sed 's/^/    /'
+    log_warn "Rolling back to the previous image..."
+    if rollback_to_previous_image; then
+        ROLLBACK_VERDICT="Node rolled back to the previous image and is running on it"
+    else
+        ROLLBACK_VERDICT="Rollback failed — no working agent on the node. Previous image, if there was one, is kept as $ROLLBACK_IMAGE. Check: cd $NODE_DIR && docker compose ps && docker compose logs api"
     fi
-    ATTEMPT=$((ATTEMPT + 1))
-    sleep 2
-done
-
-if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-    log_warn "Health check timed out, but containers are running"
+    # Причина и итог — последними строками подряд: панель показывает хвост лога
+    log_error "Update failed: agent did not become healthy on the new image"
+    log_error "$ROLLBACK_VERDICT"
+    exit 1
 fi
+log_success "API is healthy"
 
 log_info "Cleaning up old Docker images..."
 cleanup_update_leftovers

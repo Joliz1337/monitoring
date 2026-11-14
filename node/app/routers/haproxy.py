@@ -4,6 +4,7 @@ import asyncio
 import logging
 from fastapi import APIRouter, HTTPException
 
+from app.capabilities import exec_denial_response, haproxy_config_runs_code
 from app.models.haproxy import (
     AllCertificatesResponse,
     CertificateDeleteResponse,
@@ -328,6 +329,8 @@ async def get_config():
 @router.post("/config/apply", response_model=ConfigApplyResponse)
 async def apply_config(request: ConfigApplyRequest):
     """Apply HAProxy config from panel (replaces file and optionally reloads)"""
+    if haproxy_config_runs_code(request.config_content) and (denied := exec_denial_response()):
+        return denied
     manager = get_haproxy_manager()
     async with _config_lock:
         success, message, reloaded = await asyncio.to_thread(

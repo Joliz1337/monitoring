@@ -1,14 +1,19 @@
 import asyncio
+import hashlib
+import html
+import json
 import logging
 import os
 import tempfile
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import docker
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
 from app.database import async_session
@@ -17,6 +22,7 @@ from app.models import (
 )
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.node_capabilities import Capability, server_allows
+from app.services.server_status import get_offline_threshold, resolve_status
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +31,20 @@ PANEL_NGINX_CONTAINER = "panel-nginx"
 LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
 LETSENCRYPT_RENEWAL = Path("/etc/letsencrypt/renewal")
 USE_FOR_PANEL_SETTING = "wildcard_use_for_panel"
+AUTO_RENEW_SETTING = "wildcard_auto_renew_enabled"
+# JSON «отпечаток → id серверов»: раскатки, о провале которых оператор уже знает
+FAILED_DEPLOYS_SETTING = "wildcard_failed_deploys"
+
+STARTUP_DELAY = 120
+RECONCILE_INTERVAL = 3600
+# Сроки сертификатов проверяются раз в сутки — на каждом 24-м проходе сверки
+RECONCILES_PER_RENEW_CHECK = 24
+DEPLOY_CONCURRENCY = 30
+
+# Лимит Telegram — 4096 символов вместе с заголовком и экранированием
+NOTIFY_TEXT_CHARS = 3500
+FAILURE_LIST_CHARS = 3000
+FAILURE_REASON_CHARS = 200
 
 NO_CERTIFICATES_MESSAGE = "No certificates selected for this server"
 CUSTOM_PATHS_SINGLE_CERT_MESSAGE = (
@@ -52,6 +72,55 @@ def uses_custom_paths(server: Server) -> bool:
         and server.wildcard_ssl_custom_fullchain_path
         and server.wildcard_ssl_custom_privkey_path
     )
+
+
+def deploy_target(server: Server, cert: WildcardCertificate) -> dict:
+    """Куда на сервере ложится сертификат — поля запроса к ноде."""
+    if uses_custom_paths(server):
+        return {
+            "custom_fullchain_path": server.wildcard_ssl_custom_fullchain_path,
+            "custom_privkey_path": server.wildcard_ssl_custom_privkey_path,
+        }
+    base_path = server.wildcard_ssl_deploy_path or DEFAULT_DEPLOY_PATH
+    target = {"deploy_path": f"{base_path.rstrip('/')}/{cert.base_domain}"}
+    if server.wildcard_ssl_fullchain_name:
+        target["fullchain_filename"] = server.wildcard_ssl_fullchain_name
+    if server.wildcard_ssl_privkey_name:
+        target["privkey_filename"] = server.wildcard_ssl_privkey_name
+    return target
+
+
+def deployment_fingerprint(server: Server, certs: list[WildcardCertificate]) -> str:
+    """Отпечаток того, что раскатка кладёт на сервер: цепочки, пути и reload-команда.
+
+    Продление сертификата и смена настроек сервера дают другой отпечаток — по
+    расхождению с сохранённым сверка понимает, что сервер надо раскатать заново.
+    """
+    state = {
+        "reload_command": server.wildcard_ssl_reload_cmd or "",
+        "certificates": [
+            {**deploy_target(server, cert), "fullchain_pem": cert.fullchain_pem}
+            for cert in sorted(certs, key=lambda c: c.id)
+        ],
+    }
+    return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
+
+
+def certificate_expired(cert: WildcardCertificate, now: datetime) -> bool:
+    expiry = cert.expiry_date
+    if not expiry:
+        return True
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return expiry <= now
+
+
+@dataclass(frozen=True)
+class ReconcileState:
+    offline_threshold: int
+    alerts: Optional[AlertSettings]
+    # id сервера → отпечаток, раскатка которого уже падала
+    failed: dict[int, str]
 
 
 async def linked_certificates(db, server_ids: list[int]) -> dict[int, list[WildcardCertificate]]:
@@ -108,7 +177,6 @@ class WildcardSSLManager:
     def __init__(self):
         self._running = False
         self._task: Optional[asyncio.Task] = None
-        self._check_interval = 86400  # 24 часа
 
     # ─── Lifecycle ───
 
@@ -130,13 +198,23 @@ class WildcardSSLManager:
         logger.info("Wildcard SSL manager stopped")
 
     async def _loop(self):
-        await asyncio.sleep(120)
+        await asyncio.sleep(STARTUP_DELAY)
+        passes = 0
         while self._running:
+            await self._run_pass(renew=passes % RECONCILES_PER_RENEW_CHECK == 0)
+            passes += 1
+            await asyncio.sleep(RECONCILE_INTERVAL)
+
+    async def _run_pass(self, renew: bool) -> None:
+        if renew:
             try:
                 await self._check_and_renew()
             except Exception as e:
                 logger.error(f"Wildcard SSL auto-renew error: {e}")
-            await asyncio.sleep(self._check_interval)
+        try:
+            await self.reconcile_deployments(retry_failed=renew)
+        except Exception as e:
+            logger.error(f"Wildcard SSL deploy reconcile error: {e}")
 
     # ─── Issue ───
 
@@ -294,21 +372,134 @@ class WildcardSSLManager:
             return targets
         return [(s, certs) for s, certs in targets if any(c.id == cert_id for c in certs)]
 
-    async def deploy_to_all(self, cert_id: int) -> list[dict]:
-        # Ноды с закрытым разделом get_deploy_targets отсекает до отправки, иначе
-        # уведомление «развёрнуто на N из M» считало бы их провалом
-        targets = await self.get_deploy_targets(cert_id=cert_id)
-        if not targets:
-            return [{"success": False, "message": "No servers with this certificate enabled"}]
+    async def reconcile_deployments(self, retry_failed: bool = False) -> None:
+        """Довезти сертификаты на включённые серверы, где лежит не то, что должно.
+
+        Сервер без связи молча ждёт следующего прохода. Упавшую раскатку повторяем
+        только с retry_failed: каждая попытка на ноде — это бэкап, запись файлов и
+        reload-команда, раз в час это уже вмешательство в работу сервера.
+        """
+        state = await self._load_reconcile_state()
+        if state is None:
+            return
+
+        now = datetime.now(timezone.utc)
+        still_failed: dict[int, str] = {}
+        queue: list[tuple[Server, list[WildcardCertificate], str]] = []
+        offline = 0
+        for server, linked in await self.get_deploy_targets():
+            certs = [c for c in linked if not certificate_expired(c, now)]
+            if not certs:
+                continue
+            fingerprint = deployment_fingerprint(server, certs)
+            if server.wildcard_ssl_deployed_fingerprint == fingerprint:
+                continue
+            if state.failed.get(server.id) == fingerprint:
+                still_failed[server.id] = fingerprint
+                if not retry_failed:
+                    continue
+            if resolve_status(server, state.offline_threshold) != "online":
+                offline += 1
+                continue
+            queue.append((server, certs, fingerprint))
 
         # Bounded fan-out: на сотнях нод не открываем разом сотни TLS-соединений.
-        sem = asyncio.Semaphore(30)
+        semaphore = asyncio.Semaphore(DEPLOY_CONCURRENCY)
 
-        async def _guarded(server: Server, linked: list[WildcardCertificate]):
-            async with sem:
-                return await self.deploy_to_node(server, linked, cert_id)
+        async def deploy(server: Server, certs: list[WildcardCertificate]) -> dict:
+            async with semaphore:
+                try:
+                    return await self.deploy_to_node(server, certs)
+                except Exception as e:  # noqa: BLE001 — одна нода не должна срывать проход по остальным
+                    return {
+                        "server_id": server.id, "server_name": server.name,
+                        "success": False, "message": str(e) or type(e).__name__,
+                    }
 
-        return await asyncio.gather(*[_guarded(s, certs) for s, certs in targets])
+        results = await asyncio.gather(*(deploy(server, certs) for server, certs, _ in queue))
+
+        new_failures: list[dict] = []
+        for (server, certs, fingerprint), result in zip(queue, results):
+            if result["success"]:
+                still_failed.pop(server.id, None)
+                continue
+            if server.id not in still_failed:
+                new_failures.append({**result, "domains": ", ".join(c.domain for c in certs)})
+            still_failed[server.id] = fingerprint
+
+        if still_failed != state.failed:
+            await self._save_failed_deploys(still_failed)
+        if queue or offline:
+            deployed = sum(1 for result in results if result["success"])
+            logger.info(
+                f"Wildcard deploy reconcile: {deployed} deployed, {len(queue) - deployed} failed, "
+                f"{offline} offline nodes waiting"
+            )
+        if new_failures:
+            logger.error(
+                f"Wildcard deploy failed on {len(new_failures)} of {len(queue)} nodes:\n"
+                + self._failure_lines(new_failures)
+            )
+            await self._notify(
+                state.alerts, self._msg_deploy_failed(state.alerts, new_failures, len(queue))
+            )
+
+    async def _load_reconcile_state(self) -> Optional[ReconcileState]:
+        """None — автопродление выключено: без него панель сама ничего не раскатывает."""
+        async with async_session() as db:
+            if await self._get_setting(db, AUTO_RENEW_SETTING) != "true":
+                return None
+            return ReconcileState(
+                offline_threshold=await get_offline_threshold(db),
+                alerts=(await db.execute(select(AlertSettings).limit(1))).scalar_one_or_none(),
+                failed=self._parse_failed_deploys(await self._get_setting(db, FAILED_DEPLOYS_SETTING)),
+            )
+
+    @staticmethod
+    def _parse_failed_deploys(raw: Optional[str]) -> dict[int, str]:
+        try:
+            stored = json.loads(raw or "{}")
+            return {
+                int(server_id): fingerprint
+                for fingerprint, server_ids in stored.items()
+                for server_id in server_ids
+            }
+        except (ValueError, AttributeError, TypeError):
+            return {}
+
+    @staticmethod
+    def _dump_failed_deploys(failed: dict[int, str]) -> str:
+        # Ключом — отпечаток: у серверов с одинаковыми настройками он общий, и значение
+        # не растёт на 64 символа с каждой нодой (его целиком отдаёт GET /api/settings)
+        by_fingerprint: dict[str, list[int]] = defaultdict(list)
+        for server_id, fingerprint in failed.items():
+            by_fingerprint[fingerprint].append(server_id)
+        return json.dumps(by_fingerprint)
+
+    async def _save_failed_deploys(self, failed: dict[int, str]) -> None:
+        value = self._dump_failed_deploys(failed)
+        async with async_session() as db:
+            row = (await db.execute(
+                select(PanelSettings).where(PanelSettings.key == FAILED_DEPLOYS_SETTING)
+            )).scalar_one_or_none()
+            if row:
+                row.value = value
+            else:
+                db.add(PanelSettings(key=FAILED_DEPLOYS_SETTING, value=value))
+            await db.commit()
+
+    @staticmethod
+    async def _remember_deployed(server_id: int, fingerprint: str) -> None:
+        try:
+            async with async_session() as db:
+                await db.execute(
+                    update(Server).where(Server.id == server_id)
+                    .values(wildcard_ssl_deployed_fingerprint=fingerprint)
+                )
+                await db.commit()
+        except (SQLAlchemyError, OSError) as e:
+            # Сертификат уже на ноде: без этой записи сверка лишь раскатает его ещё раз
+            logger.error(f"Failed to store deployed wildcard fingerprint for server {server_id}: {e}")
 
     async def deploy_to_node(
         self, server: Server, linked: list[WildcardCertificate], cert_id: Optional[int] = None
@@ -339,6 +530,10 @@ class WildcardSSLManager:
 
         if len(certs) > 1:
             message = f"Deployed {', '.join(c.domain for c in certs)}"
+        # Отпечаток описывает весь набор сервера: раскатка одного сертификата из
+        # нескольких не подтверждает, что остальные на месте
+        if len(certs) == len(linked):
+            await self._remember_deployed(server.id, deployment_fingerprint(server, linked))
         return {**result, "success": True, "message": message, "reload_result": reload_result}
 
     async def _push_certificate(
@@ -348,18 +543,8 @@ class WildcardSSLManager:
             "fullchain_pem": cert.fullchain_pem,
             "privkey_pem": cert.privkey_pem,
             "reload_command": reload_command,
+            **deploy_target(server, cert),
         }
-
-        if uses_custom_paths(server):
-            payload["custom_fullchain_path"] = server.wildcard_ssl_custom_fullchain_path
-            payload["custom_privkey_path"] = server.wildcard_ssl_custom_privkey_path
-        else:
-            base_path = server.wildcard_ssl_deploy_path or DEFAULT_DEPLOY_PATH
-            payload["deploy_path"] = f"{base_path.rstrip('/')}/{cert.base_domain}"
-            if server.wildcard_ssl_fullchain_name:
-                payload["fullchain_filename"] = server.wildcard_ssl_fullchain_name
-            if server.wildcard_ssl_privkey_name:
-                payload["privkey_filename"] = server.wildcard_ssl_privkey_name
 
         try:
             client = get_node_client(server)
@@ -510,7 +695,7 @@ class WildcardSSLManager:
 
     async def _check_and_renew(self):
         async with async_session() as db:
-            enabled = await self._get_setting(db, "wildcard_auto_renew_enabled")
+            enabled = await self._get_setting(db, AUTO_RENEW_SETTING)
             if enabled != "true":
                 return
 
@@ -530,22 +715,12 @@ class WildcardSSLManager:
                 if days_left > days_before:
                     continue
 
+                # Раскатывает продлённый сертификат сверка — она идёт следом в том же проходе
                 logger.info(f"Auto-renewing *.{cert.base_domain} ({days_left} days left)")
                 ok, msg = await self.renew_certificate(cert.id)
                 if not ok:
                     logger.error(f"Auto-renew failed for *.{cert.base_domain}: {msg}")
                     await self._notify(alerts, self._msg_renew_failed(alerts, cert.base_domain, msg))
-                    continue
-
-                results = await self.deploy_to_all(cert.id)
-                failed = [r for r in results if r.get("server_id") and not r.get("success")]
-                if failed:
-                    logger.error(
-                        f"Auto-deploy of *.{cert.base_domain} failed on {len(failed)}/{len(results)} nodes"
-                    )
-                    await self._notify(
-                        alerts, self._msg_deploy_failed(alerts, cert.base_domain, failed, len(results))
-                    )
 
     # ─── Notifications ───
 
@@ -559,21 +734,34 @@ class WildcardSSLManager:
         return f"Failed to auto-renew certificate *.{base_domain}:\n{reason}"
 
     def _msg_deploy_failed(
-        self, settings: Optional[AlertSettings], base_domain: str, failed: list[dict], total: int
+        self, settings: Optional[AlertSettings], failed: list[dict], attempted: int
     ) -> str:
-        lines = "\n".join(
-            f"• {r.get('server_name') or r.get('server_id')}: {r.get('message') or '?'}"
-            for r in failed
-        )
+        lines = self._failure_lines(failed)
         if self._alert_lang(settings) == "ru":
             return (
-                f"Сертификат *.{base_domain} продлён, но не развернулся "
-                f"на {len(failed)} из {total} нод:\n{lines}"
+                f"Сертификаты не развернулись на {len(failed)} из {attempted} нод:\n{lines}\n\n"
+                "Панель повторяет раскатку раз в сутки. Новое уведомление об этих нодах "
+                "придёт только после продления сертификата или смены настроек раскатки."
             )
         return (
-            f"Certificate *.{base_domain} renewed, but deploy failed "
-            f"on {len(failed)} of {total} nodes:\n{lines}"
+            f"Certificates failed to deploy on {len(failed)} of {attempted} nodes:\n{lines}\n\n"
+            "The panel retries the deploy once a day. These nodes will be reported again "
+            "only after a certificate renewal or a change of their deploy settings."
         )
+
+    @staticmethod
+    def _failure_lines(failed: list[dict]) -> str:
+        lines: list[str] = []
+        used = 0
+        for index, result in enumerate(failed):
+            reason = (result.get("message") or "?").strip()[:FAILURE_REASON_CHARS]
+            line = f"• {result['server_name']} ({result['domains']}): {reason}"
+            if lines and used + len(line) > FAILURE_LIST_CHARS:
+                lines.append(f"… +{len(failed) - index}")
+                break
+            lines.append(line)
+            used += len(line) + 1
+        return "\n".join(lines)
 
     def _msg_panel_apply_failed(
         self, settings: Optional[AlertSettings], base_domain: str, reason: str
@@ -585,11 +773,14 @@ class WildcardSSLManager:
     async def _notify(self, settings: Optional[AlertSettings], message: str):
         if not settings or not settings.telegram_bot_token or not settings.telegram_chat_id:
             return
-        text = f"\U0001f534 <b>Wildcard SSL</b>\n\n{message}"
+        # В тексте — вывод certbot и stderr reload-команд: сообщение с неэкранированным
+        # «<» или длиннее лимита Telegram отвергает целиком
+        body = html.escape(message[:NOTIFY_TEXT_CHARS], quote=False)
+        text = f"\U0001f534 <b>Wildcard SSL</b>\n\n{body}"
         try:
             from app.services.telegram_bot import get_telegram_bot_service
             await get_telegram_bot_service().send_message(
-                settings.telegram_bot_token, settings.telegram_chat_id, text,
+                settings.telegram_bot_token, settings.telegram_chat_id, text, retry_later=True,
             )
         except Exception as e:
             logger.error(f"Wildcard SSL notification failed: {e}")

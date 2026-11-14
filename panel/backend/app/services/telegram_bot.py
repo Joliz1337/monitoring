@@ -1,19 +1,28 @@
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramRetryAfter
+from aiogram.exceptions import (
+    ClientDecodeError,
+    TelegramAPIError,
+    TelegramEntityTooLarge,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.filters import Command
 from aiogram.types import (
     Message,
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyParameters,
 )
 from aiogram.utils.token import TokenValidationError
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +42,34 @@ FLOOD_WAIT_MARGIN = 0.5
 FLOOD_PACING_SECONDS = 3.1
 FLOOD_PACING_WINDOW = 600
 
+# Очередь повтора: сообщения с retry_later, не ушедшие из-за сети или сбоя Telegram
+OUTBOX_RETRY_INTERVAL = 60
+# Старше этого алерт уже не новость, а шум
+OUTBOX_MAX_AGE = 6 * 3600
+OUTBOX_LIMIT = 300
+# Сколько уведомлений не дождалось доставки. Языка у сервиса нет — только знаки и число
+OUTBOX_DROPPED_NOTICE = "⚠️ ✉️ ✖ {count}"
+
 
 class TelegramSendError(Exception):
-    """Сообщение не доставлено; `reason` — текст, пригодный для показа оператору."""
+    """Сообщение не доставлено; `reason` — текст, пригодный для показа оператору.
 
-    def __init__(self, reason: str):
+    `transient` — сбой сети или самого Telegram: то же сообщение может уйти позже.
+    """
+
+    def __init__(self, reason: str, transient: bool = False):
         super().__init__(reason)
         self.reason = reason
+        self.transient = transient
+
+
+@dataclass
+class _QueuedMessage:
+    text: str
+    parse_mode: str
+    reply_markup: dict | None
+    queued_at: float
+    on_delivered: Callable[[], Awaitable[None]] | None
 
 
 @dataclass
@@ -90,6 +120,10 @@ class TelegramBotService:
         self._send_locks: dict[str, asyncio.Lock] = {}
         self._last_send_at: dict[str, float] = {}
         self._chat_paces: dict[tuple[str, str], _ChatPace] = {}
+        # Очередь повтора по (токен, чат) и счётчик уведомлений, которые из неё выпали
+        self._outbox: dict[tuple[str, str], deque[_QueuedMessage]] = {}
+        self._outbox_dropped: dict[tuple[str, str], int] = {}
+        self._outbox_task: asyncio.Task | None = None
 
     def _send_lock(self, token: str) -> asyncio.Lock:
         lock = self._send_locks.get(token)
@@ -125,18 +159,22 @@ class TelegramBotService:
 
         self._register_builtin_handlers()
         self._settings_check_task = asyncio.create_task(self._settings_check_loop())
+        self._outbox_task = asyncio.create_task(self._outbox_loop())
         logger.info("TelegramBotService started")
 
     async def stop(self):
         self._running = False
 
-        if self._settings_check_task:
-            self._settings_check_task.cancel()
+        for task in (self._settings_check_task, self._outbox_task):
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await self._settings_check_task
+                await task
             except asyncio.CancelledError:
                 pass
-            self._settings_check_task = None
+        self._settings_check_task = None
+        self._outbox_task = None
 
         for token in list(self._poll_tasks):
             await self._stop_bot(token)
@@ -188,7 +226,9 @@ class TelegramBotService:
                 except TelegramRetryAfter as e:
                     pace.flood(self._clock(), e.retry_after)
                     if flood_retries == MAX_FLOOD_RETRIES:
-                        raise TelegramSendError(f"Telegram rate limit, retry after {e.retry_after}s") from e
+                        raise TelegramSendError(
+                            f"Telegram rate limit, retry after {e.retry_after}s", transient=True,
+                        ) from e
                     flood_retries += 1
                 else:
                     pace.sent_at = self._clock()
@@ -207,8 +247,18 @@ class TelegramBotService:
             except TelegramRetryAfter:
                 self._last_send_at[bot_token] = self._clock()
                 raise
+            except TelegramEntityTooLarge as e:
+                # Наследник сетевой ошибки, но повтор того же сообщения ничего не изменит
+                raise TelegramSendError(f"Telegram: {e.message}") from e
             except TelegramNetworkError as e:
-                raise TelegramSendError(f"Network error: {e.message}") from e
+                raise TelegramSendError(f"Network error: {e.message}", transient=True) from e
+            except TelegramServerError as e:
+                raise TelegramSendError(f"Telegram: {e.message}", transient=True) from e
+            except ClientDecodeError as e:
+                # Не JSON в ответе — страница ошибки шлюза перед Bot API, тот же 5xx.
+                # JSON, который не разобрал aiogram, повторять нельзя: сообщение могло уйти
+                unparsed_answer = isinstance(e.original, ValidationError)
+                raise TelegramSendError(f"Telegram: {e.message}", transient=not unparsed_answer) from e
             except TelegramAPIError as e:
                 raise TelegramSendError(f"Telegram: {e.message}") from e
             except Exception as e:
@@ -223,13 +273,145 @@ class TelegramBotService:
         text: str,
         parse_mode: str = "HTML",
         reply_markup: dict | None = None,
+        *,
+        retry_later: bool = False,
+        on_delivered: Callable[[], Awaitable[None]] | None = None,
     ) -> bool:
+        """True — сообщение доставлено сейчас.
+
+        С `retry_later` сообщение, не ушедшее из-за сети, 5xx Telegram или
+        исчерпанного флуд-лимита, остаётся в очереди повтора и уходит позже, по
+        порядку чата; тогда же вызывается `on_delivered`. Окончательный отказ
+        (токен, чат, разметка) не повторяется.
+        """
+        # Пока чат ждёт недоставленное, новое встаёт за ним: иначе «снова онлайн»
+        # пришло бы раньше своего «недоступен»
+        if retry_later and self._outbox.get((bot_token, str(chat_id))):
+            self.queue_message(bot_token, chat_id, text, parse_mode, reply_markup, on_delivered=on_delivered)
+            return False
         try:
             await self._send(bot_token, chat_id, text, parse_mode, reply_markup)
         except TelegramSendError as e:
-            logger.warning(f"Telegram send failed: {e.reason}")
+            if not (retry_later and e.transient):
+                logger.warning(f"Telegram send failed: {e.reason}")
+                return False
+            logger.warning(f"Telegram send failed, queued for retry: {e.reason}")
+            self.queue_message(bot_token, chat_id, text, parse_mode, reply_markup, on_delivered=on_delivered)
             return False
         return True
+
+    def queue_message(
+        self,
+        bot_token: str,
+        chat_id: str,
+        text: str,
+        parse_mode: str = "HTML",
+        reply_markup: dict | None = None,
+        *,
+        on_delivered: Callable[[], Awaitable[None]] | None = None,
+        age: float = 0.0,
+    ) -> None:
+        """Поставить сообщение в очередь повтора, не пробуя отправить сейчас.
+
+        `age` — сколько секунд сообщению уже есть: срок жизни в очереди считается
+        от его появления, а не от постановки.
+        """
+        if sum(len(queue) for queue in self._outbox.values()) >= OUTBOX_LIMIT:
+            oldest = min(
+                (key for key, queue in self._outbox.items() if queue),
+                key=lambda key: self._outbox[key][0].queued_at,
+            )
+            self._outbox[oldest].popleft()
+            self._count_dropped(oldest, 1)
+        self._outbox.setdefault((bot_token, str(chat_id)), deque()).append(
+            _QueuedMessage(text, parse_mode, reply_markup, self._clock() - age, on_delivered)
+        )
+
+    def _count_dropped(self, key: tuple[str, str], count: int) -> None:
+        left = self._outbox_dropped.get(key, 0) + count
+        if left > 0:
+            self._outbox_dropped[key] = left
+        else:
+            self._outbox_dropped.pop(key, None)
+
+    async def _outbox_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(OUTBOX_RETRY_INTERVAL)
+            try:
+                await self._flush_outbox()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Telegram retry queue flush failed: {type(e).__name__}: {e}")
+
+    async def _flush_outbox(self) -> None:
+        # Чаты независимы: флуд-ожидание или длинная очередь одного не держит остальные
+        chats = set(self._outbox) | set(self._outbox_dropped)
+        await asyncio.gather(*[self._flush_chat(key) for key in chats])
+
+    async def _flush_chat(self, key: tuple[str, str]) -> None:
+        """Доставить очередь чата по порядку. Временный сбой оставляет сообщение
+        и всё за ним до следующего прохода."""
+        bot_token, chat_id = key
+        queue = self._outbox.setdefault(key, deque())
+        expired_before = self._clock() - OUTBOX_MAX_AGE
+        while queue and queue[0].queued_at < expired_before:
+            queue.popleft()
+            self._count_dropped(key, 1)
+
+        delivered_late = 0
+        try:
+            dropped = self._outbox_dropped.get(key, 0)
+            if dropped:
+                await self._send_queued(bot_token, chat_id, OUTBOX_DROPPED_NOTICE.format(count=dropped))
+                self._count_dropped(key, -dropped)
+                logger.warning(f"Telegram retry queue: {dropped} message(s) to chat {chat_id} were never delivered")
+            while queue:
+                message = queue[0]
+                delivered = await self._send_queued(
+                    bot_token, chat_id, message.text, message.parse_mode, message.reply_markup,
+                )
+                # Пока шла отправка, переполнение могло вытеснить это сообщение из очереди
+                if queue and queue[0] is message:
+                    queue.popleft()
+                if not delivered:
+                    continue
+                delivered_late += 1
+                if message.on_delivered:
+                    await self._call_on_delivered(message.on_delivered)
+        except TelegramSendError:
+            return
+        finally:
+            if delivered_late:
+                logger.info(f"Telegram retry queue: {delivered_late} message(s) delivered late to chat {chat_id}")
+        self._outbox.pop(key, None)
+
+    async def _send_queued(
+        self,
+        bot_token: str,
+        chat_id: str,
+        text: str,
+        parse_mode: str = "HTML",
+        reply_markup: dict | None = None,
+    ) -> bool:
+        """False — Telegram отказал окончательно, сообщение из очереди уходит.
+        Временный сбой пробрасывается: очередь чата ждёт следующего прохода."""
+        try:
+            await self._send(bot_token, chat_id, text, parse_mode, reply_markup)
+        except TelegramSendError as e:
+            if e.transient:
+                raise
+            logger.warning(f"Telegram message dropped from the retry queue: {e.reason}")
+            return False
+        return True
+
+    @staticmethod
+    async def _call_on_delivered(on_delivered: Callable[[], Awaitable[None]]) -> None:
+        # Сбой чужого обработчика не должен останавливать доставку очереди
+        try:
+            await on_delivered()
+        except Exception as e:
+            logger.error(f"Telegram on_delivered callback failed: {type(e).__name__}: {e}")
 
     async def send_message_returning_id(
         self,

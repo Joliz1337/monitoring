@@ -1,7 +1,8 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRememberedState } from '../hooks/useRememberedState'
 import { useOpenIds } from '../hooks/useOpenIds'
 import { useProfileRollout, type RolloutProgress } from '../hooks/useProfileRollout'
+import { useStableHandler } from '../hooks/useStableHandler'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
@@ -58,6 +59,7 @@ import { formatListen, formatTarget, protocolLabel, splitTargets } from '../util
 import { dnatTcpRanges, formatServerPorts, interceptedOnServers, rangesCover, ServerPorts } from '../utils/portConflicts'
 import { uniqueCopyName } from '../utils/ruleClone'
 import { writeStorage } from '../utils/storage'
+import { reuseUnchanged } from '../utils/reuseUnchanged'
 
 type TabKey = 'rules' | 'servers' | 'log'
 type TranslateFn = (key: string, options?: Record<string, unknown>) => string
@@ -943,6 +945,79 @@ function RulesTab({
 }
 
 
+const NO_HAPROXY_PORTS: number[] = []
+
+// Строка привязанного сервера — memo с общими для всех строк обработчиками: опрос профиля
+// перерисовывает только строки, у которых что-то изменилось, а не весь список
+const LinkedServerRow = memo(function LinkedServerRow({
+  server,
+  syncing,
+  haproxyPorts,
+  profileRanges,
+  onSyncOne,
+  onUnlink,
+}: {
+  server: DnatProfileServerInfo
+  syncing: boolean
+  haproxyPorts: number[]
+  profileRanges: PortRange[]
+  onSyncOne: (serverId: number) => void
+  onUnlink: (serverId: number) => void
+}) {
+  const { t } = useTranslation()
+  const { uid } = useParams()
+  return (
+    <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
+      <div className="flex items-center gap-3 min-w-0">
+        <Server className="w-4 h-4 text-dark-400 shrink-0" />
+        <span className="text-xs text-dark-500 font-mono shrink-0 w-6 text-right">#{server.link_position}</span>
+        <div className="min-w-0">
+          <Link to={`/${uid}/server/${server.server_id}/dnat`} className="text-sm text-dark-200 hover:text-accent-300 truncate block transition-colors">
+            {server.server_name}
+          </Link>
+          <div className="text-xs text-dark-500 truncate">{server.server_url}</div>
+          {Object.keys(server.targets ?? {}).length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1">
+              {Object.entries(server.targets).map(([ruleName, ip]) => (
+                <span key={ruleName} className="px-1.5 py-0.5 rounded text-2xs font-mono bg-accent-500/10 text-accent-300 border border-accent-500/20">
+                  {ruleName} → {ip}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        {syncStatusBadge(server.sync_status, t)}
+        <HaproxyChip ports={haproxyPorts} ranges={profileRanges} />
+      </div>
+      <div className="flex items-center gap-1 shrink-0">
+        <span className="hidden sm:inline text-xs text-dark-500 mr-2">
+          {server.last_sync_at ? t('dnat_profiles.synced_at', { time: formatDateTime(server.last_sync_at) }) : t('dnat_profiles.not_synced')}
+        </span>
+        <Tooltip label={t('dnat_profiles.sync')}>
+          <button
+            onClick={() => onSyncOne(server.server_id)}
+            disabled={syncing}
+            className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors disabled:opacity-50"
+          >
+            {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+          </button>
+        </Tooltip>
+        <Tooltip label={t('dnat_profiles.unlink')}>
+          <button
+            onClick={() => {
+              if (confirm(t('dnat_profiles.unlink_confirm', { name: server.server_name }))) onUnlink(server.server_id)
+            }}
+            className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+          >
+            <Unlink className="w-4 h-4" />
+          </button>
+        </Tooltip>
+      </div>
+    </div>
+  )
+})
+
+
 function ServersTab({
   profile,
   availableServers,
@@ -961,7 +1036,8 @@ function ServersTab({
   onLink: (serverId: number) => void
 }) {
   const { t } = useTranslation()
-  const { uid } = useParams()
+  const syncOne = useStableHandler(onSyncOne)
+  const unlink = useStableHandler(onUnlink)
   const profileRanges = useMemo(() => dnatTcpRanges(profile.rules), [profile.rules])
   const haproxyChip = (serverId: number) => (
     <HaproxyChip ports={portUsage[serverId]?.haproxy_ports ?? []} ranges={profileRanges} />
@@ -1139,54 +1215,16 @@ function ServersTab({
           </div>
         ) : (
           <div className="space-y-1.5">
-            {filteredLinked.map((srv: DnatProfileServerInfo) => (
-              <div key={srv.server_id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
-                <div className="flex items-center gap-3 min-w-0">
-                  <Server className="w-4 h-4 text-dark-400 shrink-0" />
-                  <span className="text-xs text-dark-500 font-mono shrink-0 w-6 text-right">#{srv.link_position}</span>
-                  <div className="min-w-0">
-                    <Link to={`/${uid}/server/${srv.server_id}/dnat`} className="text-sm text-dark-200 hover:text-accent-300 truncate block transition-colors">
-                      {srv.server_name}
-                    </Link>
-                    <div className="text-xs text-dark-500 truncate">{srv.server_url}</div>
-                    {Object.keys(srv.targets ?? {}).length > 0 && (
-                      <div className="flex flex-wrap gap-1 mt-1">
-                        {Object.entries(srv.targets).map(([ruleName, ip]) => (
-                          <span key={ruleName} className="px-1.5 py-0.5 rounded text-2xs font-mono bg-accent-500/10 text-accent-300 border border-accent-500/20">
-                            {ruleName} → {ip}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  {syncStatusBadge(srv.sync_status, t)}
-                  {haproxyChip(srv.server_id)}
-                </div>
-                <div className="flex items-center gap-1 shrink-0">
-                  <span className="hidden sm:inline text-xs text-dark-500 mr-2">
-                    {srv.last_sync_at ? t('dnat_profiles.synced_at', { time: formatDateTime(srv.last_sync_at) }) : t('dnat_profiles.not_synced')}
-                  </span>
-                  <Tooltip label={t('dnat_profiles.sync')}>
-                    <button
-                      onClick={() => onSyncOne(srv.server_id)}
-                      disabled={syncingServerId === srv.server_id}
-                      className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors disabled:opacity-50"
-                    >
-                      {syncingServerId === srv.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                    </button>
-                  </Tooltip>
-                  <Tooltip label={t('dnat_profiles.unlink')}>
-                    <button
-                      onClick={() => {
-                        if (confirm(t('dnat_profiles.unlink_confirm', { name: srv.server_name }))) onUnlink(srv.server_id)
-                      }}
-                      className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                    >
-                      <Unlink className="w-4 h-4" />
-                    </button>
-                  </Tooltip>
-                </div>
-              </div>
+            {filteredLinked.map(srv => (
+              <LinkedServerRow
+                key={srv.server_id}
+                server={srv}
+                syncing={syncingServerId === srv.server_id}
+                haproxyPorts={portUsage[srv.server_id]?.haproxy_ports ?? NO_HAPROXY_PORTS}
+                profileRanges={profileRanges}
+                onSyncOne={syncOne}
+                onUnlink={unlink}
+              />
             ))}
           </div>
         )}
@@ -1327,7 +1365,7 @@ function ProfileDetail({
   const fetchProfile = useCallback(async () => {
     try {
       const res = await dnatProfilesApi.get(profileId)
-      setProfile(res.data)
+      setProfile(prev => reuseUnchanged(prev, res.data))
     } catch (err) {
       toast.error(extractErrorMessage(err, t('dnat_profiles.load_error')))
     } finally {
@@ -1338,7 +1376,7 @@ function ProfileDetail({
   const refreshProfileSilent = useCallback(async () => {
     try {
       const res = await dnatProfilesApi.get(profileId)
-      setProfile(res.data)
+      setProfile(prev => reuseUnchanged(prev, res.data))
     } catch { /* silent */ }
   }, [profileId])
 
@@ -1623,7 +1661,7 @@ export default function DnatProfiles() {
   const fetchProfiles = useCallback(async () => {
     try {
       const res = await dnatProfilesApi.list()
-      setProfiles(res.data)
+      setProfiles(prev => reuseUnchanged(prev, res.data))
       // На первом заходе справа сразу виден первый профиль, а не пустая заглушка
       if (!initialLoadDone.current && res.data.length > 0) {
         setOpenIds(prev => (prev.length > 0 ? prev : [res.data[0].id]))

@@ -11,6 +11,7 @@
 
 import asyncio
 import os
+import ssl
 import sys
 import unittest
 from types import SimpleNamespace
@@ -139,6 +140,65 @@ class NodeClientLifecycleTest(NodeClientTestCase):
         ]
         await http_client.close_http_clients()
         self.assertTrue(all(client.is_closed for client in clients))
+
+
+class MetricsSessionTest(NodeClientTestCase):
+    """Опрос метрик идёт мимо клиентов нод — одной сессией aiohttp на весь парк."""
+
+    def test_fleet_shares_one_session_without_a_total_connection_limit(self):
+        session = http_client.get_metrics_session()
+        self.assertIs(http_client.get_metrics_session(), session)
+        self.assertEqual(session.connector.limit, 0)
+        self.assertEqual(session.connector.limit_per_host, 2)
+
+    def test_connection_survives_until_the_next_poll_and_expires_before_the_node_closes_it(self):
+        keepalive = http_client.get_metrics_session().connector._keepalive_timeout
+        self.assertGreater(keepalive, POLL_INTERVAL_SECONDS)
+        self.assertLess(keepalive, 65)
+
+    def test_connection_gets_the_tcp_and_tls_time_of_the_node_client(self):
+        # У httpx TCP и TLS-рукопожатие ждут по connect каждый, у aiohttp срок на оба один
+        timeout = http_client.get_metrics_session().timeout
+        polling = http_client.get_node_client(node("https://10.0.0.1:9100")).timeout
+        self.assertEqual(timeout.connect, 2 * polling.connect)
+        self.assertEqual(timeout.connect, 4.0)
+
+    def test_tls_handshake_is_not_squeezed_into_the_tcp_connect_time(self):
+        # sock_connect у aiohttp ограничивает TCP вместе с рукопожатием
+        self.assertIsNone(http_client.get_metrics_session().timeout.sock_connect)
+
+    def test_node_may_stay_silent_between_chunks_as_long_as_for_the_node_client(self):
+        timeout = http_client.get_metrics_session().timeout
+        polling = http_client.get_node_client(node("https://10.0.0.1:9100")).timeout
+        self.assertEqual(timeout.sock_read, polling.read)
+        self.assertEqual(timeout.sock_read, 10.0)
+        self.assertIsNone(timeout.total)
+
+    def test_node_gets_the_tls_context_of_its_auth(self):
+        mtls = http_client.node_ssl_context(node("https://10.0.0.1:9100", mtls=True))
+        legacy = http_client.node_ssl_context(node("https://10.0.0.1:9100", mtls=False))
+        self.assertEqual(mtls.verify_mode, ssl.CERT_REQUIRED)
+        self.assertEqual(legacy.verify_mode, ssl.CERT_NONE)
+
+    async def test_shutdown_closes_the_session(self):
+        session = http_client.get_metrics_session()
+        await http_client.close_http_clients()
+        self.assertTrue(session.closed)
+        with self.assertRaises(RuntimeError):
+            http_client.get_metrics_session()
+
+    async def test_pki_reload_replaces_the_session_and_the_tls_context(self):
+        # Восстановление бэкапа: close + init с ключами из восстановленной базы
+        server = node("https://10.0.0.1:9100")
+        old_session = http_client.get_metrics_session()
+        old_context = http_client.node_ssl_context(server)
+
+        await http_client.close_http_clients()
+        await http_client.init_http_clients(make_keygen())
+
+        self.assertTrue(old_session.closed)
+        self.assertFalse(http_client.get_metrics_session().closed)
+        self.assertIsNot(http_client.node_ssl_context(server), old_context)
 
 
 if __name__ == "__main__":

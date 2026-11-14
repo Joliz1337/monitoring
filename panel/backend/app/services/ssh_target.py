@@ -7,19 +7,23 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 from urllib.parse import urlparse
 
 import asyncssh
 from python_socks import ProxyError as SocksProxyError
 from python_socks import ProxyType
 from python_socks.async_.asyncio import Proxy as SocksProxy
+from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 
+from app.database import async_session_maker
+from app.models import Server
 from app.services.http_client import parse_proxy_input, sanitize_proxy
 
-if TYPE_CHECKING:
-    from app.models import Server
+logger = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 30
 
@@ -35,12 +39,29 @@ class SSHTarget:
     # SOCKS5-прокси панель→сервер ("ip:port[@login:pass]"): сервер, до которого
     # панель достаёт только через прокси, по SSH напрямую тоже не ответит
     socks5_proxy: Optional[str] = None
+    # Запись сервера и закреплённый за ней ключ хоста (формат OpenSSH): с ключом
+    # сервер сверяется до аутентификации, без него первое подключение его запоминает
+    server_id: Optional[int] = None
+    host_key: Optional[str] = None
 
 
 class SSHTargetError(Exception):
     def __init__(self, reason: str, message: str):
         super().__init__(message)
         self.reason = reason  # no_host | not_root | no_creds
+
+
+class HostKeyChangedError(Exception):
+    """Сервер предъявил не тот ключ хоста, что закреплён за ним. Сверка идёт до
+    аутентификации, поэтому пароль и ключ панели такому серверу не уходят."""
+
+    def __init__(self, host: str):
+        super().__init__(
+            f"SSH: ключ хоста {host} не совпадает с запомненным при первом подключении — "
+            "соединение прервано до входа, пароль и ключ не отправлены. Если сервер "
+            "переустановлен, сохраните его SSH-доступ заново (с паролем или ключом): "
+            "панель примет новый ключ хоста"
+        )
 
 
 def host_from_url(url: str) -> str:
@@ -80,7 +101,19 @@ def resolve_ssh_target(
         host=host, port=port, user=user,
         password=password, private_key=private_key, passphrase=passphrase,
         socks5_proxy=server.proxy_url or None,
+        server_id=server.id, host_key=server.ssh_host_key,
     )
+
+
+def _trust_only(host_key: str) -> tuple:
+    """known_hosts для asyncssh: доверенные ключи хоста, доверенные CA, отозванные ключи."""
+    return ([asyncssh.import_public_key(host_key)], [], [])
+
+
+def presented_host_key(conn: asyncssh.SSHClientConnection) -> Optional[str]:
+    """Ключ хоста, которым сервер подтвердил это подключение, в формате OpenSSH."""
+    key = conn.get_server_host_key()
+    return key.export_public_key("openssh").decode().strip() if key else None
 
 
 def ssh_connect_kwargs(t: SSHTarget) -> dict:
@@ -88,7 +121,7 @@ def ssh_connect_kwargs(t: SSHTarget) -> dict:
         "host": t.host,
         "port": t.port,
         "username": t.user,
-        "known_hosts": None,
+        "known_hosts": _trust_only(t.host_key) if t.host_key else None,
         "connect_timeout": CONNECT_TIMEOUT,
         # Долгая заливка образа или установка по медленному/throttled-каналу:
         # keepalive держит SSH-сессию живой в паузах между шагами.
@@ -103,11 +136,64 @@ def ssh_connect_kwargs(t: SSHTarget) -> dict:
 
 
 async def open_ssh_connection(
-    connect_kwargs: dict, socks5_proxy: Optional[str],
+    connect_kwargs: dict, socks5_proxy: Optional[str], server_id: Optional[int] = None,
 ) -> asyncssh.SSHClientConnection:
     """SSH-подключение напрямую или через SOCKS5-прокси панель→сервер.
 
-    С прокси сокет открывает python-socks, asyncssh получает его через sock=.
+    Без закреплённого ключа хоста (known_hosts=None) подключение доверяет
+    предъявленному и закрепляет его: в connect_kwargs — следующие подключения
+    той же задачи сверяются уже с ним — и в записи сервера server_id.
+    """
+    pinned = connect_kwargs["known_hosts"] is not None
+    try:
+        conn = await _connect(connect_kwargs, socks5_proxy)
+    except asyncssh.HostKeyNotVerifiable as exc:
+        if not pinned:
+            raise
+        raise HostKeyChangedError(connect_kwargs["host"]) from exc
+    if pinned:
+        return conn
+    try:
+        await _pin_host_key(conn, connect_kwargs, server_id)
+    except BaseException:
+        # Задачу отменили, пока ключ писался в базу: подключение открыто, а отдать его некому
+        conn.close()
+        raise
+    return conn
+
+
+async def _pin_host_key(
+    conn: asyncssh.SSHClientConnection, connect_kwargs: dict, server_id: Optional[int],
+) -> None:
+    host_key = presented_host_key(conn)
+    if not host_key:
+        return
+    connect_kwargs["known_hosts"] = _trust_only(host_key)
+    if server_id is not None:
+        await _remember_host_key(server_id, host_key)
+
+
+async def _remember_host_key(server_id: int, host_key: str) -> None:
+    try:
+        async with async_session_maker() as db:
+            # IS NULL: параллельное первое подключение могло закрепить ключ раньше —
+            # эталоном остаётся записанный первым
+            result = await db.execute(
+                update(Server)
+                .where(Server.id == server_id, Server.ssh_host_key.is_(None))
+                .values(ssh_host_key=host_key)
+            )
+            await db.commit()
+    except (SQLAlchemyError, OSError) as exc:
+        # Само подключение состоялось; ключ закрепит следующее
+        logger.warning(f"SSH host key of server {server_id} was not saved: {exc}")
+        return
+    if result.rowcount:
+        logger.info(f"SSH host key pinned for server {server_id}")
+
+
+async def _connect(connect_kwargs: dict, socks5_proxy: Optional[str]) -> asyncssh.SSHClientConnection:
+    """С прокси сокет открывает python-socks, asyncssh получает его через sock=.
     Ошибки прокси приходят как OSError с адресом прокси без логина и пароля —
     их ловят те же обработчики, что и сетевые ошибки прямого подключения.
     """

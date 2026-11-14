@@ -39,6 +39,7 @@ class UpdateSettingsRequest(BaseModel):
     api_url: Optional[str] = Field(None, max_length=500)
     api_token: Optional[str] = Field(None, max_length=500)
     cookie_secret: Optional[str] = Field(None, max_length=500)
+    verify_tls: Optional[bool] = None
     enabled: Optional[bool] = None
     collection_interval: Optional[int] = Field(None, ge=60, le=900)
     ip_history_days: Optional[int] = Field(None, ge=1, le=90)
@@ -94,7 +95,7 @@ async def get_settings(db: AsyncSession = Depends(get_db), _: dict = Depends(ver
 
     if not s:
         return {
-            "api_url": None, "api_token": None, "cookie_secret": None,
+            "api_url": None, "api_token": None, "cookie_secret": None, "verify_tls": True,
             "enabled": False, "collection_interval": 300,
             "ip_history_days": DEFAULT_IP_HISTORY_DAYS,
             "ignored_user_ids": [],
@@ -104,6 +105,7 @@ async def get_settings(db: AsyncSession = Depends(get_db), _: dict = Depends(ver
         "api_url": s.api_url,
         "api_token": "***" if s.api_token else None,
         "cookie_secret": "***" if s.cookie_secret else None,
+        "verify_tls": s.verify_tls is not False,
         "enabled": s.enabled,
         "collection_interval": s.collection_interval,
         "ip_history_days": s.ip_history_days or DEFAULT_IP_HISTORY_DAYS,
@@ -140,7 +142,7 @@ async def update_settings(request: UpdateSettingsRequest, db: AsyncSession = Dep
         s = RemnawaveSettings()
         db.add(s)
 
-    for field_name in ("api_url", "api_token", "cookie_secret", "enabled", "collection_interval",
+    for field_name in ("api_url", "api_token", "cookie_secret", "verify_tls", "enabled", "collection_interval",
                        "ip_history_days", "anomaly_enabled", "anomaly_ip_enabled", "anomaly_hwid_enabled",
                        "anomaly_ua_enabled", "anomaly_devdata_enabled",
                        "anomaly_ip_margin", "anomaly_ip_confirm_count", "anomaly_asn_margin",
@@ -164,10 +166,15 @@ async def test_connection(db: AsyncSession = Depends(get_db), _: dict = Depends(
     if not s or not s.api_url or not s.api_token:
         return {"success": False, "error": "API URL and token not configured"}
 
-    api = get_remnawave_api(s.api_url, s.api_token, s.cookie_secret)
+    api = get_remnawave_api(s.api_url, s.api_token, s.cookie_secret, s.verify_tls)
     try:
         r = await api.check_connection()
-        return {"success": r.get("auth_valid", False), "api_reachable": r.get("api_reachable", False), "error": r.get("error")}
+        return {
+            "success": r.get("auth_valid", False),
+            "api_reachable": r.get("api_reachable", False),
+            "error": r.get("error"),
+            "error_code": r.get("error_code"),
+        }
     finally:
         await api.close()
 
@@ -254,7 +261,7 @@ async def get_nodes(db: AsyncSession = Depends(get_db), _: dict = Depends(verify
     if not s or not s.api_url or not s.api_token:
         return {"nodes": []}
 
-    api = get_remnawave_api(s.api_url, s.api_token, s.cookie_secret)
+    api = get_remnawave_api(s.api_url, s.api_token, s.cookie_secret, s.verify_tls)
     try:
         nodes = await api.get_all_nodes()
         return {
@@ -462,7 +469,7 @@ async def get_user_traffic(email: int, db: AsyncSession = Depends(get_db), _: di
     if not s or not s.api_url or not s.api_token:
         return {"bytes": None}
     cached = (await db.execute(select(RemnawaveUserCache).where(RemnawaveUserCache.email == email))).scalar_one_or_none()
-    api = get_remnawave_api(s.api_url, s.api_token, s.cookie_secret)
+    api = get_remnawave_api(s.api_url, s.api_token, s.cookie_secret, s.verify_tls)
     try:
         return {"bytes": await api.get_user_traffic_bytes(email, cached.uuid if cached else None, hours=24)}
     finally:

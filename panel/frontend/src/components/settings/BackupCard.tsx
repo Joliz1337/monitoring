@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Database, Archive, Upload, Download, Trash2, Loader2, Check, XCircle, AlertTriangle } from 'lucide-react'
+import { Database, Archive, Upload, Download, Trash2, Loader2, Check, XCircle, AlertTriangle, Lock } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { backupApi, type BackupInfo, type BackupStatus } from '../../api/client'
@@ -35,6 +35,19 @@ function detectVolumeSet(files: File[]): VolumeSet | null {
 
 const volumeLabel = (n: number) => `.${String(n).padStart(3, '0')}`
 
+const ENCRYPTED_SIGNATURE = 'MTGB1\n'
+
+// Зашифрованный бэкап узнаётся по первым байтам, как на бэкенде: файл могли переименовать.
+// FileReader, а не Blob.text(): его нет в jsdom, под которым идут тесты
+function startsEncrypted(file: File): Promise<boolean> {
+  return new Promise(resolve => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result === ENCRYPTED_SIGNATURE)
+    reader.onerror = () => resolve(false)
+    reader.readAsText(file.slice(0, ENCRYPTED_SIGNATURE.length))
+  })
+}
+
 // Одна передача за раз: заливка бэкапа на панель или скачивание файла с неё
 interface Transfer {
   kind: 'upload' | 'download'
@@ -52,12 +65,18 @@ function RestoreWarning({ text }: { text: string }) {
   )
 }
 
-export function BackupCard() {
+interface BackupCardProps {
+  // Задан ли пароль архива: им шифруются новые бэкапы. null — ещё неизвестно
+  archivePasswordSet: boolean | null
+}
+
+export function BackupCard({ archivePasswordSet }: BackupCardProps) {
   const { t } = useTranslation()
   const [backups, setBackups] = useState<BackupInfo[]>([])
   const [status, setStatus] = useState<BackupStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [confirmRestore, setConfirmRestore] = useState<File[] | null>(null)
+  const [encryptedUpload, setEncryptedUpload] = useState(false)
   const [restorePassword, setRestorePassword] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [transfer, setTransfer] = useState<Transfer | null>(null)
@@ -179,16 +198,22 @@ export function BackupCard() {
     }
   }
 
+  const chooseFiles = async (files: File[]) => {
+    if (!files.length) return
+    // Набор томов виден по именам; одиночный файл — только по содержимому
+    setEncryptedUpload(files.length === 1 && await startsEncrypted(files[0]))
+    setConfirmRestore(files)
+  }
+
   const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || [])
-    if (files.length) setConfirmRestore(files)
     if (fileInputRef.current) fileInputRef.current.value = ''
+    chooseFiles(files)
   }
 
   const handleDrop = (e: DragEvent) => {
     e.preventDefault()
-    const files = Array.from(e.dataTransfer.files || [])
-    if (files.length) setConfirmRestore(files)
+    chooseFiles(Array.from(e.dataTransfer.files || []))
   }
 
   const closeRestore = () => {
@@ -206,7 +231,10 @@ export function BackupCard() {
 
   const volumeSet = confirmRestore ? detectVolumeSet(confirmRestore) : null
   const multiplePlainFiles = confirmRestore !== null && !volumeSet && confirmRestore.length > 1
-  const restoreBlocked = multiplePlainFiles || (volumeSet !== null && (volumeSet.missing.length > 0 || !restorePassword))
+  const needsPassword = volumeSet !== null || encryptedUpload
+  // Пустое поле бэкенд заполняет сохранённым паролем архива; если его нет — расшифровывать нечем
+  const passwordMissing = needsPassword && !restorePassword && archivePasswordSet !== true
+  const restoreBlocked = multiplePlainFiles || (volumeSet !== null && volumeSet.missing.length > 0) || passwordMissing
 
   const createButton = (
     <button onClick={handleCreate} disabled={busy} className="btn btn-primary text-sm">
@@ -263,6 +291,19 @@ export function BackupCard() {
           )}
         </div>
 
+        {archivePasswordSet === false && (
+          <div className="flex items-start gap-3 p-3 rounded-xl bg-warning/10 border border-warning/20">
+            <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
+            <span className="text-sm text-warning">{t('settings.backup_plain_warning')}</span>
+          </div>
+        )}
+        {archivePasswordSet === true && (
+          <p className="text-xs text-dark-500 flex items-start gap-1.5">
+            <Lock className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            {t('settings.backup_encrypted_note')}
+          </p>
+        )}
+
         <AnimatePresence>
           {status?.state === 'idle' && status.error && (
             <motion.div
@@ -298,6 +339,9 @@ export function BackupCard() {
                         <span>{formatBytes(b.size)}</span>
                         <span>{new Date(b.created_at).toLocaleString()}</span>
                         {b.version && <span className="text-dark-500">v{b.version}</span>}
+                        {b.encrypted
+                          ? <span className="flex items-center gap-1 text-success"><Lock className="w-3 h-3" />{t('settings.backup_encrypted')}</span>
+                          : <span className="text-warning">{t('settings.backup_not_encrypted')}</span>}
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5">
@@ -390,7 +434,7 @@ export function BackupCard() {
                   <RestoreWarning text={t('settings.backup_restore_missing', { list: volumeSet.missing.map(volumeLabel).join(', ') })} />
                 )}
                 {multiplePlainFiles && <RestoreWarning text={t('settings.backup_restore_multi_plain')} />}
-                {volumeSet && (
+                {needsPassword && (
                   <div className="mb-4">
                     <SecretInput
                       autoFocus
@@ -399,7 +443,11 @@ export function BackupCard() {
                       placeholder={t('settings.backup_restore_password')}
                       className="input w-full"
                     />
-                    <p className="text-xs text-dark-500 mt-1.5">{t('settings.backup_restore_password_hint')}</p>
+                    <p className="text-xs text-dark-500 mt-1.5">
+                      {archivePasswordSet
+                        ? t('settings.backup_restore_password_saved_hint')
+                        : t('settings.backup_restore_password_hint')}
+                    </p>
                   </div>
                 )}
                 <div className="flex gap-3">

@@ -8,6 +8,7 @@ from app.database import get_db
 from app.auth import (
     ensure_not_banned,
     login,
+    logout,
     register_auth_failure,
     verify_auth,
 )
@@ -59,8 +60,8 @@ async def auth_login(
 
 
 @router.post("/logout")
-async def auth_logout(response: Response):
-    response.delete_cookie("auth_token")
+async def auth_logout(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+    await logout(request, response, db)
     return {"success": True}
 
 

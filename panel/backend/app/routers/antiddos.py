@@ -6,10 +6,9 @@ global fan-out ("enable on all nodes") and the watchdog installer. The whitelist
 lives on the IP Blocklist page: anti-DDoS has none of its own.
 """
 
-import asyncio
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import get_db
 from app.models import AntiDdosSettings, Server
-from app.services.antiddos_manager import get_antiddos_manager
+from app.services.antiddos_manager import FleetActionKind, get_antiddos_manager
 
 router = APIRouter(prefix="/antiddos", tags=["antiddos"])
 
@@ -67,14 +66,15 @@ async def update_settings(
 
     # Master switch flip → stand the whole fleet up or down in the background
     if settings.enabled != was_enabled:
-        asyncio.create_task(manager.apply_master_state(settings.enabled))
+        await manager.start_fleet_action(FleetActionKind.WATCHDOG, settings.enabled)
 
     return _settings_to_dict(settings)
 
 
 @router.get("/status")
 async def get_status(db: AsyncSession = Depends(get_db), _: dict = Depends(verify_auth)):
-    """Aggregated per-node emergency state from the DB (updated by the poll loop)."""
+    """Aggregated per-node emergency state from the DB (updated by the poll loop),
+    the last fleet-wide action and the watchdog rollout."""
     servers = (await db.execute(select(Server).where(Server.is_active == True))).scalars().all()  # noqa: E712
     nodes = []
     active = 0
@@ -91,23 +91,37 @@ async def get_status(db: AsyncSession = Depends(get_db), _: dict = Depends(verif
             "since": srv.antiddos_since.isoformat() if srv.antiddos_since else None,
             "last_sync_at": srv.antiddos_last_sync_at.isoformat() if srv.antiddos_last_sync_at else None,
         })
-    return {"nodes": nodes, "active_count": active, "total": len(nodes)}
+    manager = get_antiddos_manager()
+    return {
+        "nodes": nodes,
+        "active_count": active,
+        "total": len(nodes),
+        "last_action": manager.last_action(),
+        "rollout": manager.rollout_state(),
+    }
 
 
 # Fleet-wide fan-outs can take tens of seconds (dozens of nodes, per-node
 # timeouts, some unreachable). Running them inside the request meant nginx/the
 # browser cut the connection (499) mid-rollout, leaving the fleet half-applied.
-# Fire them in the background and return immediately; the status poll reflects
-# progress within a cycle.
+# They run in the background; the answer carries the record of the action, and
+# GET /status returns it as `last_action` with per-node failures as it goes.
 @router.post("/emergency-all")
 async def emergency_all(payload: EmergencyAllRequest, _: dict = Depends(verify_auth)):
-    mgr = get_antiddos_manager()
-    asyncio.create_task(mgr.run_bg(mgr.set_emergency_all(payload.enabled)))
-    return {"success": True, "started": True}
+    action = await get_antiddos_manager().start_fleet_action(FleetActionKind.EMERGENCY, payload.enabled)
+    return {"success": True, "started": True, "action": action}
 
 
 @router.post("/install-all")
 async def install_all(_: dict = Depends(verify_auth)):
-    mgr = get_antiddos_manager()
-    asyncio.create_task(mgr.run_bg(mgr.install_all()))
-    return {"success": True, "started": True}
+    action = await get_antiddos_manager().start_fleet_action(FleetActionKind.INSTALL)
+    return {"success": True, "started": True, "action": action}
+
+
+@router.post("/retry-failed")
+async def retry_failed(_: dict = Depends(verify_auth)):
+    """Repeat the last fleet-wide action on the nodes where it failed."""
+    action = await get_antiddos_manager().retry_failed()
+    if action is None:
+        raise HTTPException(status_code=409, detail="No finished fleet action with failed nodes")
+    return {"success": True, "started": True, "action": action}

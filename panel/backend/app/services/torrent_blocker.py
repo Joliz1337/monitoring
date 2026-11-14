@@ -104,7 +104,7 @@ class TorrentBlockerService:
             rw = result.scalar_one_or_none()
             if not rw or not rw.api_url or not rw.api_token:
                 return None
-            return RemnawaveAPI(rw.api_url, rw.api_token, rw.cookie_secret)
+            return RemnawaveAPI(rw.api_url, rw.api_token, rw.cookie_secret, rw.verify_tls)
 
     async def _fetch_all_reports(self, api: RemnawaveAPI) -> list[dict]:
         all_records: list[dict] = []

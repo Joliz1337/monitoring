@@ -13,18 +13,20 @@ import os
 import socket
 import platform
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import partial
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Iterator, Optional
 
 import psutil
 
 from app.config import get_settings
 from app.services.adaptive_cache import AdaptiveTtlCache
 from app.services.ephemeral_ports import (
+    STATE_LISTEN,
     EphemeralPortsAggregator,
     read_kernel_settings,
-    scan_listening_ports,
 )
 from app.services.loss_probe import LossProbe, get_loss_probe, readable_sources
 from app.services.nat_addresses import NatAddressProbe, get_nat_address_probe
@@ -41,6 +43,26 @@ from app.services.rate_sampler import (
 logger = logging.getLogger(__name__)
 
 NO_RATE = (0.0, 0.0)
+
+# Секции ответа /api/metrics считаются в своём пуле, по потоку на секцию. В общем
+# пуле asyncio.to_thread (5 потоков на 1 vCPU) они стояли в очереди за долгими
+# операциями хоста, nginx ноды отвечал 504, и панель видела живую ноду выключенной
+METRICS_SECTION_THREADS = 8
+
+TCP_COUNTERS = (
+    'total', 'established', 'listen', 'time_wait', 'close_wait', 'syn_sent', 'syn_recv', 'fin_wait', 'other',
+)
+# Столбец st из /proc/net/tcp → счётчик; close, last_ack и closing идут в other
+TCP_STATE_COUNTERS = {
+    '01': 'established',
+    '02': 'syn_sent',
+    '03': 'syn_recv',
+    '04': 'fin_wait',
+    '05': 'fin_wait',
+    '06': 'time_wait',
+    '08': 'close_wait',
+    '0A': 'listen',
+}
 
 
 def _is_accountable_ipv4(address: str) -> bool:
@@ -76,6 +98,9 @@ class MetricsCollector:
         # Таблица сокетов кэшируется отдельно от неё: на ноде с сотнями тысяч
         # сокетов разбор стоит доли секунды, и его срок жизни растёт с его ценой
         self._socket_table = AdaptiveTtlCache(self._read_host_connections, clock=clock)
+        self._section_pool = ThreadPoolExecutor(
+            max_workers=METRICS_SECTION_THREADS, thread_name_prefix="metrics",
+        )
         # boot_id не меняется в пределах жизни хоста — читаем лениво один раз
         self._boot_id: Optional[str] = None
         # Раскладка памяти по сокетам меняется только сменой железа — с ребутом
@@ -466,100 +491,58 @@ class MetricsCollector:
     
     def _read_host_connections(self) -> dict:
         """Read TCP/UDP connection stats from host's /proc/net/*"""
-        # TCP states mapping (hex -> name)
-        tcp_states = {
-            '01': 'established',
-            '02': 'syn_sent',
-            '03': 'syn_recv',
-            '04': 'fin_wait1',
-            '05': 'fin_wait2',
-            '06': 'time_wait',
-            '07': 'close',
-            '08': 'close_wait',
-            '09': 'last_ack',
-            '0A': 'listen',
-            '0B': 'closing',
-        }
-
-        tcp_stats = {
-            'total': 0,
-            'established': 0,
-            'listen': 0,
-            'time_wait': 0,
-            'close_wait': 0,
-            'syn_sent': 0,
-            'syn_recv': 0,
-            'fin_wait': 0,
-            'other': 0,
-        }
+        tcp_stats = dict.fromkeys(TCP_COUNTERS, 0)
         udp_stats = {'total': 0}
 
-        # Оба файла целиком — по ним идут и счётчики состояний, и учёт эфемерных
-        # портов; читать их дважды на ноде с сотней тысяч сокетов незачем
-        tcp_dumps = []
-        for tcp_file in ['/proc/net/tcp', '/proc/net/tcp6']:
-            host_path = Path(self.settings.host_proc) / tcp_file.removeprefix('/proc/')
+        # Слушающие порты копятся по ходу того же прохода: ядро печатает слушающие
+        # сокеты раньше остальных, а агрегатор отсеивает по ним входящие
+        # соединения. Отдельный проход за ними — это файл целиком в памяти
+        listening: set[str] = set()
+        aggregator = self._ephemeral_aggregator(listening)
+        tables_read = 0
+        for name in ('tcp', 'tcp6'):
             try:
-                if host_path.exists():
-                    tcp_dumps.append(host_path.read_text())
-            except OSError as e:
-                logger.warning(f"Failed to read {host_path}, TCP connection counters are incomplete: {e}")
-
-        aggregator = self._ephemeral_aggregator(tcp_dumps)
-        for content in tcp_dumps:
-            for line in content.strip().split('\n')[1:]:  # Skip header
-                parts = line.split()
-                if len(parts) >= 4:
+                for line in self._socket_table_rows(name):
+                    parts = line.split(None, 4)
+                    if len(parts) < 4:
+                        continue
                     state = parts[3].upper()
                     tcp_stats['total'] += 1
-                    state_name = tcp_states.get(state, 'other')
-                    if state_name == 'established':
-                        tcp_stats['established'] += 1
-                    elif state_name == 'listen':
-                        tcp_stats['listen'] += 1
-                    elif state_name == 'time_wait':
-                        tcp_stats['time_wait'] += 1
-                    elif state_name == 'close_wait':
-                        tcp_stats['close_wait'] += 1
-                    elif state_name == 'syn_sent':
-                        tcp_stats['syn_sent'] += 1
-                    elif state_name == 'syn_recv':
-                        tcp_stats['syn_recv'] += 1
-                    elif state_name in ('fin_wait1', 'fin_wait2'):
-                        tcp_stats['fin_wait'] += 1
-                    else:
-                        tcp_stats['other'] += 1
-                    if aggregator is not None:
+                    tcp_stats[TCP_STATE_COUNTERS.get(state, 'other')] += 1
+                    if state == STATE_LISTEN:
+                        listening.add(parts[1].rpartition(':')[2])
+                    elif aggregator is not None:
                         aggregator.add(parts[1], parts[2], state)
-
-        # Read UDP (IPv4 + IPv6)
-        for udp_file in ['/proc/net/udp', '/proc/net/udp6']:
-            host_path = Path(self.settings.host_proc) / udp_file.removeprefix('/proc/')
-            try:
-                if host_path.exists():
-                    content = host_path.read_text()
-                    lines = content.strip().split('\n')[1:]  # Skip header
-                    udp_stats['total'] += len(lines)
+                tables_read += 1
+            except FileNotFoundError:
+                continue
             except OSError as e:
-                logger.warning(f"Failed to read {host_path}, UDP connection counters are incomplete: {e}")
+                logger.warning(f"Failed to read /proc/net/{name}, TCP connection counters are incomplete: {e}")
+
+        for name in ('udp', 'udp6'):
+            try:
+                udp_stats['total'] += sum(1 for _ in self._socket_table_rows(name))
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                logger.warning(f"Failed to read /proc/net/{name}, UDP connection counters are incomplete: {e}")
 
         return {
             'tcp': tcp_stats,
             'udp': udp_stats,
-            'ephemeral_ports': self._summarize_ephemeral(aggregator),
+            'ephemeral_ports': self._summarize_ephemeral(aggregator) if tables_read else None,
         }
 
-    def _ephemeral_aggregator(self, tcp_dumps: list) -> Optional[EphemeralPortsAggregator]:
-        """Слушающие порты нужны до разбора сокетов: по ним отсеиваются входящие
-        соединения, у которых локальный порт — не выданный ядром эфемерный."""
-        if not tcp_dumps:
-            return None
+    def _socket_table_rows(self, name: str) -> Iterator[str]:
+        """Строки /proc/net/<name> хоста без заголовка, по одной: на ноде с
+        миллионом сокетов файл целиком — сотни мегабайт памяти на каждый разбор."""
+        with open(Path(self.settings.host_proc) / 'net' / name) as table:
+            next(table, None)
+            yield from table
+
+    def _ephemeral_aggregator(self, listening: set[str]) -> Optional[EphemeralPortsAggregator]:
         try:
-            settings = read_kernel_settings(Path(self.settings.host_proc))
-            listening = set()
-            for content in tcp_dumps:
-                listening |= scan_listening_ports(content)
-            return EphemeralPortsAggregator(settings, listening)
+            return EphemeralPortsAggregator(read_kernel_settings(Path(self.settings.host_proc)), listening)
         except Exception as e:
             logger.error(f"Ephemeral port accounting unavailable: {e}")
             return None
@@ -836,15 +819,16 @@ class MetricsCollector:
         # Один сэмпл на весь ответ: маркер live_rates и сами скорости — из одного окна
         rates = self._rate_sampler.snapshot()
         window = self.window_stats(window_sec)
+        in_section_pool = partial(asyncio.get_running_loop().run_in_executor, self._section_pool)
         cpu, memory, disk, network, processes, system, certs, antiddos = await asyncio.gather(
-            asyncio.to_thread(self.get_cpu_info, rates),
-            asyncio.to_thread(self.get_memory_info),
-            asyncio.to_thread(self.get_disk_info, rates),
-            asyncio.to_thread(self.get_network_info, rates),
-            asyncio.to_thread(self.get_processes_info),
-            asyncio.to_thread(self.get_system_info),
-            asyncio.to_thread(self.get_certificates_info),
-            asyncio.to_thread(self.get_antiddos_info),
+            in_section_pool(self.get_cpu_info, rates),
+            in_section_pool(self.get_memory_info),
+            in_section_pool(self.get_disk_info, rates),
+            in_section_pool(self.get_network_info, rates),
+            in_section_pool(self.get_processes_info),
+            in_section_pool(self.get_system_info),
+            in_section_pool(self.get_certificates_info),
+            in_section_pool(self.get_antiddos_info),
         )
         return {
             "timestamp": datetime.now().isoformat(),

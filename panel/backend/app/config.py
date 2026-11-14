@@ -2,10 +2,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
 
+DEFAULT_PANEL_PASSWORD = "changeme"
+DEFAULT_JWT_SECRET = "jwt-secret-key-change-me"
+JWT_SECRET_MIN_LENGTH = 32
+
+
+class InsecureSettingsError(RuntimeError):
+    def __init__(self, variables: list[str]):
+        self.variables = variables
+        super().__init__(f"{', '.join(variables)} must be set in the panel .env")
+
+
 class Settings(BaseSettings):
     panel_uid: str = "changeme"
-    panel_password: str = "changeme"
-    jwt_secret: str = "jwt-secret-key-change-me"
+    panel_password: str = DEFAULT_PANEL_PASSWORD
+    jwt_secret: str = DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440
     
@@ -26,6 +37,15 @@ class Settings(BaseSettings):
     
     ext_key: str = ""
     panel_enc_key: str = ""
+
+    def unset_secrets(self) -> list[str]:
+        """Переменные окружения, оставленные пустыми или со значением из кода:
+        с таким паролем в панель войдёт кто угодно, с таким секретом — подпишет себе сессию."""
+        secrets = (
+            ("PANEL_PASSWORD", self.panel_password, DEFAULT_PANEL_PASSWORD),
+            ("JWT_SECRET", self.jwt_secret, DEFAULT_JWT_SECRET),
+        )
+        return [name for name, value, default in secrets if not value.strip() or value == default]
 
     @property
     def database_url(self) -> str:

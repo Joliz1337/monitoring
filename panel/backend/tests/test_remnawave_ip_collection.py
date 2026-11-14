@@ -39,7 +39,8 @@ TARGET_FLEET = 2000
 POLLING_SECONDS = 144.4
 INGEST_SECONDS = 6.5
 SETTINGS = SimpleNamespace(
-    api_url="https://remnawave.example", api_token="token", cookie_secret=None, anomaly_enabled=False,
+    api_url="https://remnawave.example", api_token="token", cookie_secret=None, verify_tls=True,
+    anomaly_enabled=False,
 )
 
 ONLINE_ON_FIRST_NODE = 7

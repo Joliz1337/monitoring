@@ -4,7 +4,7 @@ Runnable with plain stdlib:  python -m unittest discover -s panel/backend/tests
 
 Правка правила через форму меняет только блок этого правила: ручные правки
 global/defaults, чужие секции и остальные правила остаются как были, а свои
-строки внутри правила (например `no option tcp-smart-connect` поверх defaults)
+строки внутри правила (например `timeout server 2h` поверх defaults)
 переезжают в пересобранный блок.
 """
 
@@ -109,7 +109,7 @@ class PristineConfigTests(unittest.TestCase):
 class ManualEditsTests(unittest.TestCase):
     def setUp(self):
         self.config = gen.generate_full_config(RULES, NO_OPTIONS).replace(
-            "    option tcp-smart-connect\n", "    no option tcp-smart-connect\n    timeout tunnel 4h\n")
+            "    timeout tunnel 1h\n", "    timeout tunnel 4h\n    option tcp-smart-connect\n")
         self.config = self.config.replace(
             "# === RULES END ===",
             "# === RULES END ===\n\nlisten stats\n    bind *:8404\n    mode http\n    stats enable",
@@ -124,7 +124,7 @@ class ManualEditsTests(unittest.TestCase):
             gen.apply_options(self.config, NO_OPTIONS, SNI_ON),
         ]
         for result in results:
-            self.assertIn("    no option tcp-smart-connect\n    timeout tunnel 4h\n", result)
+            self.assertIn("    timeout tunnel 4h\n    option tcp-smart-connect\n", result)
             self.assertIn("listen stats\n    bind *:8404\n    mode http\n    stats enable", result)
 
     def test_new_rule_goes_before_end_marker(self):

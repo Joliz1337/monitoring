@@ -88,6 +88,10 @@ VERSION_FILE = Path("/app/VERSION")
 UPDATER_CONTAINER_NAME = "panel-updater"
 UPDATER_IMAGE = "docker:cli"
 UPDATER_CLONE_DIR = "/tmp/monitoring-fresh"
+# apply-update.sh качает и собирает образы до остановки панели, поэтому этот
+# процесс ждёт апдейтер всю загрузку: пять попыток pull по 4 минуты и две
+# попытки локальной сборки по 10 минут
+UPDATER_WAIT_TIMEOUT = 3600
 
 
 # URL строится на каждый запрос: базовая ветка зависит от выбранного канала
@@ -454,8 +458,7 @@ async def run_panel_update_in_container(target_ref: str | None = None):
         
         logger.info(f"Panel updater started: {container.id[:12]}")
         
-        # Wait for completion (10 min timeout)
-        result = await asyncio.to_thread(container.wait, timeout=600)
+        result = await asyncio.to_thread(container.wait, timeout=UPDATER_WAIT_TIMEOUT)
 
         exit_code = result.get("StatusCode", -1)
         logs = (await asyncio.to_thread(container.logs)).decode("utf-8", errors="replace")
@@ -477,7 +480,7 @@ async def run_panel_update_in_container(target_ref: str | None = None):
             
     except asyncio.TimeoutError:
         _update_status["last_result"] = "failed"
-        _update_status["last_error"] = "Update timed out (10 minutes)"
+        _update_status["last_error"] = f"Update timed out ({UPDATER_WAIT_TIMEOUT // 60} minutes)"
         logger.error("Panel update timed out")
     except ImageNotFound as e:
         _update_status["last_result"] = "failed"

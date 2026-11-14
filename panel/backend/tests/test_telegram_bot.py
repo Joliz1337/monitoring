@@ -9,8 +9,20 @@ from unittest.mock import AsyncMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter, TelegramUnauthorizedError  # noqa: E402
+from aiogram.exceptions import (  # noqa: E402
+    ClientDecodeError,
+    RestartingTelegram,
+    TelegramBadRequest,
+    TelegramEntityTooLarge,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+    TelegramUnauthorizedError,
+)
 from aiogram.methods import SendMessage  # noqa: E402
+from aiogram.types import Chat  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
 
 from app.services import telegram_bot  # noqa: E402
 from app.services.telegram_bot import TelegramBotService  # noqa: E402
@@ -287,6 +299,316 @@ class TelegramFloodControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(delivered))
         self.assertEqual(len(bot.accepted_at), burst)
         self.assertEqual(bot.refusals, 1)
+
+
+class UnreliableBot:
+    """Бот за сетью, которая то есть, то нет; отдельные сообщения Telegram отвергает сам."""
+
+    def __init__(self) -> None:
+        self.reachable = True
+        self.refusals: dict[str, Exception] = {}
+        self.attempts: list[str] = []
+        self.delivered: list[tuple[str, str]] = []
+
+    async def send_message(self, *, chat_id: str, text: str, **_options) -> SimpleNamespace:
+        self.attempts.append(text)
+        if not self.reachable:
+            raise _api_error(TelegramNetworkError, "Request timeout error")
+        if text in self.refusals:
+            raise self.refusals[text]
+        self.delivered.append((str(chat_id), text))
+        return SimpleNamespace(message_id=len(self.delivered))
+
+    def texts(self) -> list[str]:
+        return [text for _chat, text in self.delivered]
+
+
+def _dropped(count: int) -> str:
+    return telegram_bot.OUTBOX_DROPPED_NOTICE.format(count=count)
+
+
+class TelegramRetryLaterTests(unittest.IsolatedAsyncioTestCase):
+    """Telegram недоступен в момент отправки — сообщение раньше терялось. С retry_later
+    оно ждёт в очереди повтора и уходит, когда Telegram снова отвечает."""
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.bot = UnreliableBot()
+        self.service = TelegramBotService(clock=self.clock.time, sleep=self.clock.sleep)
+        self.service._get_or_create_bot = AsyncMock(return_value=self.bot)
+
+    async def send(self, text: str, chat_id: str = CHAT_ID, **options) -> bool:
+        return await self.service.send_message(WELL_FORMED_TOKEN, chat_id, text, retry_later=True, **options)
+
+    async def next_pass(self) -> None:
+        await self.service._flush_outbox()
+
+    async def test_message_that_met_a_network_failure_arrives_with_the_next_pass(self):
+        self.bot.reachable = False
+        delivered_now = await self.send("alert")
+        self.bot.reachable = True
+
+        await self.next_pass()
+
+        self.assertFalse(delivered_now)
+        self.assertEqual(self.bot.delivered, [(CHAT_ID, "alert")])
+
+    async def test_delivered_message_is_not_sent_again(self):
+        self.assertTrue(await self.send("alert"))
+
+        await self.next_pass()
+
+        self.assertEqual(self.bot.texts(), ["alert"])
+
+    async def test_without_retry_later_the_message_is_lost_as_before(self):
+        self.bot.reachable = False
+        await self.service.send_message(WELL_FORMED_TOKEN, CHAT_ID, "alert")
+        self.bot.reachable = True
+
+        await self.next_pass()
+
+        self.assertEqual(self.bot.delivered, [])
+
+    async def test_caller_learns_about_the_late_delivery(self):
+        on_delivered = AsyncMock()
+        self.bot.reachable = False
+        await self.send("alert", on_delivered=on_delivered)
+        on_delivered.assert_not_awaited()
+        self.bot.reachable = True
+
+        await self.next_pass()
+        await self.next_pass()
+
+        on_delivered.assert_awaited_once_with()
+
+    async def test_message_delivered_at_once_does_not_call_on_delivered(self):
+        on_delivered = AsyncMock()
+
+        await self.send("alert", on_delivered=on_delivered)
+        await self.next_pass()
+
+        on_delivered.assert_not_awaited()
+
+    async def test_telegram_outage_is_retried(self):
+        outages = {
+            "5xx": _api_error(TelegramServerError, "Internal Server Error"),
+            "restart": _api_error(RestartingTelegram, "Bad Gateway: restart"),
+            "gateway error page instead of json": ClientDecodeError(
+                "Failed to decode object", ValueError("not json"), "<html>502 Bad Gateway</html>",
+            ),
+        }
+        for name, outage in outages.items():
+            with self.subTest(name):
+                self.bot.refusals[name] = outage
+                self.assertFalse(await self.send(name))
+                del self.bot.refusals[name]
+
+                await self.next_pass()
+
+                self.assertIn(name, self.bot.texts())
+
+    async def test_exhausted_flood_limit_is_retried(self):
+        bot = RecordingBot(self.clock, [_flood() for _ in range(1 + telegram_bot.MAX_FLOOD_RETRIES)])
+        self.service._get_or_create_bot = AsyncMock(return_value=bot)
+
+        delivered_now = await self.send("alert")
+        await self.next_pass()
+
+        self.assertFalse(delivered_now)
+        self.assertEqual([text for _chat, text, _at in bot.delivered], ["alert"])
+
+    async def test_final_refusal_is_not_retried(self):
+        refusals = {
+            "bad token": _api_error(TelegramUnauthorizedError, "Unauthorized"),
+            "chat not found": _api_error(TelegramBadRequest, "Bad Request: chat not found"),
+            "broken markup": _api_error(TelegramBadRequest, "Bad Request: can't parse entities"),
+            "bot was kicked": _api_error(TelegramForbiddenError, "Forbidden: bot was kicked from the group chat"),
+            "too large": _api_error(TelegramEntityTooLarge, "Request Entity Too Large"),
+        }
+        self.bot.refusals.update(refusals)
+        for text in refusals:
+            self.assertFalse(await self.send(text))
+        self.bot.refusals.clear()
+
+        await self.next_pass()
+
+        self.assertEqual(self.bot.delivered, [])
+        self.assertEqual(self.bot.attempts, list(refusals))
+
+    async def test_answer_that_aiogram_could_not_parse_is_not_retried(self):
+        # Telegram ответил JSON-ом, то есть сообщение, скорее всего, принял: повтор дал бы дубль
+        with self.assertRaises(ValidationError) as unparsed:
+            Chat.model_validate({"id": "not a number"})
+        self.bot.refusals["alert"] = ClientDecodeError(
+            "Failed to deserialize object", unparsed.exception, {"ok": True},
+        )
+
+        self.assertFalse(await self.send("alert"))
+
+        self.assertEqual(self.service._outbox, {})
+
+    async def test_malformed_token_is_not_retried(self):
+        service = TelegramBotService(clock=self.clock.time, sleep=self.clock.sleep)
+
+        self.assertFalse(await service.send_message(MALFORMED_TOKEN, CHAT_ID, "alert", retry_later=True))
+
+        self.assertEqual(service._outbox, {})
+
+    async def test_new_message_waits_behind_the_undelivered_one(self):
+        self.bot.reachable = False
+        await self.send("offline")
+        self.bot.reachable = True
+
+        delivered_now = await self.send("back online")
+        self.assertFalse(delivered_now)
+        self.assertEqual(self.bot.delivered, [])
+        await self.next_pass()
+
+        self.assertEqual(self.bot.texts(), ["offline", "back online"])
+
+    async def test_undelivered_message_does_not_hold_back_another_chat(self):
+        self.bot.reachable = False
+        await self.send("to the first chat")
+        self.bot.reachable = True
+
+        delivered_now = await self.send("to another chat", chat_id=OTHER_CHAT_ID)
+
+        self.assertTrue(delivered_now)
+        self.assertEqual(self.bot.delivered, [(OTHER_CHAT_ID, "to another chat")])
+
+    async def test_unreachable_telegram_costs_one_attempt_per_pass(self):
+        self.bot.reachable = False
+        for number in range(5):
+            await self.send(f"alert {number}")
+        self.assertEqual(self.bot.attempts, ["alert 0"])
+
+        await self.next_pass()
+        await self.next_pass()
+        self.assertEqual(self.bot.attempts, ["alert 0"] * 3)
+        self.bot.reachable = True
+        await self.next_pass()
+
+        self.assertEqual(self.bot.texts(), [f"alert {number}" for number in range(5)])
+
+    async def test_message_older_than_six_hours_is_dropped_and_the_chat_is_told_how_many(self):
+        self.bot.reachable = False
+        await self.send("stale 1")
+        await self.send("stale 2")
+        self.clock.now += telegram_bot.OUTBOX_MAX_AGE + 1
+        await self.send("fresh")
+        self.bot.reachable = True
+
+        await self.next_pass()
+        await self.next_pass()
+
+        self.assertEqual(self.bot.texts(), [_dropped(2), "fresh"])
+
+    async def test_dropped_message_never_calls_on_delivered(self):
+        on_delivered = AsyncMock()
+        self.bot.reachable = False
+        await self.send("stale", on_delivered=on_delivered)
+        self.clock.now += telegram_bot.OUTBOX_MAX_AGE + 1
+        self.bot.reachable = True
+
+        await self.next_pass()
+
+        on_delivered.assert_not_awaited()
+        self.assertEqual(self.bot.texts(), [_dropped(1)])
+
+    async def test_drop_notice_survives_until_telegram_is_reachable(self):
+        self.bot.reachable = False
+        await self.send("stale")
+        self.clock.now += telegram_bot.OUTBOX_MAX_AGE + 1
+
+        await self.next_pass()
+        self.bot.reachable = True
+        await self.next_pass()
+
+        self.assertEqual(self.bot.texts(), [_dropped(1)])
+
+    async def test_overflow_drops_the_oldest_and_the_chat_is_told_how_many(self):
+        extra = 5
+        self.bot.reachable = False
+        for number in range(telegram_bot.OUTBOX_LIMIT + extra):
+            await self.send(f"alert {number}")
+        self.bot.reachable = True
+
+        await self.next_pass()
+
+        kept = [f"alert {number}" for number in range(extra, telegram_bot.OUTBOX_LIMIT + extra)]
+        self.assertEqual(self.bot.texts(), [_dropped(extra), *kept])
+
+    async def test_message_put_straight_into_the_queue_is_delivered_by_the_next_pass(self):
+        on_delivered = AsyncMock()
+
+        self.service.queue_message(WELL_FORMED_TOKEN, CHAT_ID, "from history", on_delivered=on_delivered)
+        self.assertEqual(self.bot.attempts, [])
+        await self.next_pass()
+
+        self.assertEqual(self.bot.texts(), ["from history"])
+        on_delivered.assert_awaited_once_with()
+
+    async def test_age_of_a_queued_message_counts_towards_its_six_hours(self):
+        almost_expired = telegram_bot.OUTBOX_MAX_AGE - 60
+        self.service.queue_message(WELL_FORMED_TOKEN, CHAT_ID, "raised long ago", age=almost_expired)
+        self.service.queue_message(WELL_FORMED_TOKEN, CHAT_ID, "raised just now")
+        self.clock.now += 120
+
+        await self.next_pass()
+
+        self.assertEqual(self.bot.texts(), [_dropped(1), "raised just now"])
+
+    async def test_final_refusal_of_a_queued_message_does_not_block_the_ones_behind_it(self):
+        refused, accepted = AsyncMock(), AsyncMock()
+        self.bot.reachable = False
+        await self.send("<b>broken", on_delivered=refused)
+        await self.send("fine", on_delivered=accepted)
+        self.bot.reachable = True
+        self.bot.refusals["<b>broken"] = _api_error(TelegramBadRequest, "Bad Request: can't parse entities")
+
+        await self.next_pass()
+        await self.next_pass()
+
+        self.assertEqual(self.bot.texts(), ["fine"])
+        refused.assert_not_awaited()
+        accepted.assert_awaited_once_with()
+
+    async def test_failing_on_delivered_does_not_stop_the_queue(self):
+        self.bot.reachable = False
+        await self.send("first", on_delivered=AsyncMock(side_effect=RuntimeError("database is down")))
+        await self.send("second")
+        self.bot.reachable = True
+
+        with self.assertLogs(telegram_bot.logger, level="ERROR"):
+            await self.next_pass()
+
+        self.assertEqual(self.bot.texts(), ["first", "second"])
+
+
+class TelegramRetryTaskTests(unittest.IsolatedAsyncioTestCase):
+    async def test_started_service_retries_in_the_background_until_stopped(self):
+        bot = UnreliableBot()
+        service = TelegramBotService()
+        service._get_or_create_bot = AsyncMock(return_value=bot)
+        original_interval = telegram_bot.OUTBOX_RETRY_INTERVAL
+        telegram_bot.OUTBOX_RETRY_INTERVAL = 0.01
+        self.addCleanup(setattr, telegram_bot, "OUTBOX_RETRY_INTERVAL", original_interval)
+
+        await service.start()
+        self.addAsyncCleanup(service.stop)
+        service.queue_message(WELL_FORMED_TOKEN, CHAT_ID, "alert")
+        for _ in range(200):
+            if bot.delivered:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(bot.texts(), ["alert"])
+
+        await service.stop()
+        service.queue_message(WELL_FORMED_TOKEN, CHAT_ID, "after stop")
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(bot.texts(), ["alert"])
+        self.assertIsNone(service._outbox_task)
 
 
 if __name__ == "__main__":

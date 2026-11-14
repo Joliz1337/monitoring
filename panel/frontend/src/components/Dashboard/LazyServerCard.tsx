@@ -1,6 +1,11 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { CardScale, DetailLevel } from '../../stores/settingsStore'
 import ServerCard, { GRID_CARD_HEIGHT_ESTIMATE, areServerCardPropsEqual, type ServerCardProps } from './ServerCard'
+
+// Больше стольких серверов карточки монтируются только рядом с экраном: каждая — это
+// useSortable, тултипы и десятки DOM-узлов, и пара тысяч разом вешают вкладку на секунды.
+// До порога страницы работают как раньше, без наблюдателей
+export const LAZY_CARDS_MIN_SERVERS = 300
 
 // Карточка монтируется, когда её слот ближе этого запаса к экрану: при обычной
 // прокрутке она готова раньше, чем доедет до видимой области
@@ -15,7 +20,7 @@ const nearListeners = new WeakMap<Element, NearListener>()
 let nearObserver: IntersectionObserver | null = null
 
 // Один observer на все слоты. Новая подписка всегда начинается с уведомления о текущем
-// положении слота — на этом держится повторная подписка в LazyCardSlot
+// положении слота — на этом держится повторная подписка в LazySlot
 function observeNear(slot: Element, listener: NearListener) {
   nearObserver ??= new IntersectionObserver(
     entries => entries.forEach(entry => nearListeners.get(entry.target)?.(entry.isIntersecting)),
@@ -47,9 +52,7 @@ function median(values: number[]) {
 }
 
 /** Высота заглушек для текущего вида карточек: сначала прикидка, затем замер первых карточек */
-export function useCardPlaceholder(compact: boolean, detailLevel: DetailLevel, cardScale: CardScale): CardPlaceholder {
-  const layoutKey = compact ? 'compact' : `${detailLevel}:${cardScale}`
-  const fallbackHeight = compact ? COMPACT_CARD_HEIGHT : GRID_CARD_HEIGHT_ESTIMATE
+export function useSlotPlaceholder(layoutKey: string, fallbackHeight: number): CardPlaceholder {
   const [samples, setSamples] = useState<{ layoutKey: string; heights: number[] } | null>(null)
 
   return useMemo(() => {
@@ -69,15 +72,29 @@ export function useCardPlaceholder(compact: boolean, detailLevel: DetailLevel, c
   }, [layoutKey, samples, fallbackHeight])
 }
 
-interface LazyServerCardProps extends Omit<ServerCardProps, 'index' | 'lazy'> {
+/** Заглушки дашборда: высота карточки зависит от выбранного вида */
+export function useCardPlaceholder(compact: boolean, detailLevel: DetailLevel, cardScale: CardScale): CardPlaceholder {
+  return useSlotPlaceholder(
+    compact ? 'compact' : `${detailLevel}:${cardScale}`,
+    compact ? COMPACT_CARD_HEIGHT : GRID_CARD_HEIGHT_ESTIMATE,
+  )
+}
+
+interface LazySlotProps {
   placeholder: CardPlaceholder
   /** Идёт drag: смонтированные карточки остаются в DOM, dnd-kit держит их замеры */
   holdMounted: boolean
   /** Эту карточку сейчас перетаскивают */
   dragged: boolean
+  className?: string
+  children: ReactNode
 }
 
-function LazyCardSlot({ placeholder, holdMounted, dragged, ...cardProps }: LazyServerCardProps) {
+/**
+ * Место карточки в длинном списке: сама карточка монтируется только рядом с экраном,
+ * в остальное время её место держит пустая заглушка той же высоты
+ */
+export function LazySlot({ placeholder, holdMounted, dragged, className = '', children }: LazySlotProps) {
   const { layoutKey, onMeasure } = placeholder
   const slotRef = useRef<HTMLDivElement>(null)
   // Перенос в другую папку посреди drag создаёт карточке новый слот. Она монтируется
@@ -116,18 +133,25 @@ function LazyCardSlot({ placeholder, holdMounted, dragged, ...cardProps }: LazyS
   return (
     <div
       ref={slotRef}
-      className="grid grid-cols-1"
+      className={`grid grid-cols-1 ${className}`}
       style={mounted ? undefined : { height: ownHeight ?? placeholder.height }}
     >
-      {mounted && <ServerCard {...cardProps} lazy />}
+      {mounted && children}
     </div>
   )
 }
 
-/**
- * Карточка сервера для больших флотов: настоящая — только рядом с экраном,
- * в остальное время её место держит пустая заглушка той же высоты
- */
+type LazyServerCardProps = Omit<ServerCardProps, 'index' | 'lazy'> & Omit<LazySlotProps, 'className' | 'children'>
+
+function LazyCardSlot({ placeholder, holdMounted, dragged, ...cardProps }: LazyServerCardProps) {
+  return (
+    <LazySlot placeholder={placeholder} holdMounted={holdMounted} dragged={dragged}>
+      <ServerCard {...cardProps} lazy />
+    </LazySlot>
+  )
+}
+
+/** Карточка дашборда для больших флотов: настоящая — только рядом с экраном */
 const LazyServerCard = memo(LazyCardSlot, (prev, next) =>
   prev.placeholder === next.placeholder
   && prev.holdMounted === next.holdMounted

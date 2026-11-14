@@ -1367,6 +1367,14 @@ export interface SyncStatus {
   error?: string | null
 }
 
+export type BlocklistRuleCounts = Record<BlocklistDirection, number>
+
+/** Счётчики правил для карточек серверов; сервера без собственных правил в servers нет */
+export interface BlocklistServersSummary {
+  global: BlocklistRuleCounts
+  servers: Record<number, BlocklistRuleCounts>
+}
+
 /** Список IP/CIDR по URL (Cloudflare, Yandex Cloud…) — часть белого списка входящих */
 export interface AllowlistSource {
   id: number
@@ -1389,6 +1397,7 @@ export const blocklistApi = {
     api.post<{ success: boolean; deleted: number; not_found: number }>('/blocklist/global/bulk-delete', { rule_ids }),
 
   // Server rules
+  getServersSummary: () => api.get<BlocklistServersSummary>('/blocklist/servers/summary'),
   getServer: (serverId: number, direction: BlocklistDirection = 'in') => 
     api.get<{ server_id: number; count: number; global_count: number; direction: string; rules: BlocklistRule[] }>(
       `/blocklist/server/${serverId}`, { params: { direction } }
@@ -1790,10 +1799,45 @@ export interface NodeAntiDdosState {
   last_sync_at: string | null
 }
 
+export interface AntiDdosFailedNode {
+  server_id: number
+  server_name: string
+  message: string
+}
+
+// Команда на весь парк: идёт в фоне, пока finished_at пуст
+export interface AntiDdosFleetAction {
+  action: 'emergency' | 'watchdog' | 'install'
+  enabled: boolean | null
+  started_at: string
+  finished_at: string | null
+  total: number
+  ok: number
+  failed_count: number
+  failed: AntiDdosFailedNode[]   // не больше 200 первых
+}
+
+export interface AntiDdosRollout {
+  version: string
+  confirmed: number
+  pending: number
+  failed: number
+  halted: boolean
+  failed_nodes: AntiDdosFailedNode[]
+}
+
 export interface AntiDdosStatus {
   nodes: NodeAntiDdosState[]
   active_count: number
   total: number
+  last_action: AntiDdosFleetAction | null
+  rollout: AntiDdosRollout | null
+}
+
+interface AntiDdosActionStarted {
+  success: boolean
+  started: boolean
+  action: AntiDdosFleetAction
 }
 
 export const antiDdosApi = {
@@ -1802,7 +1846,8 @@ export const antiDdosApi = {
     api.put<AntiDdosSettings>('/antiddos/settings', data),
   getStatus: () => api.get<AntiDdosStatus>('/antiddos/status'),
   emergencyAll: (enabled: boolean) =>
-    api.post<{ success: boolean; nodes: number; ok: number }>('/antiddos/emergency-all', { enabled }),
+    api.post<AntiDdosActionStarted>('/antiddos/emergency-all', { enabled }),
+  retryFailed: () => api.post<AntiDdosActionStarted>('/antiddos/retry-failed'),
 
   // per-node (proxy)
   setNodeEmergency: (serverId: number, enabled: boolean) =>
@@ -1816,6 +1861,7 @@ export interface RemnawaveSettings {
   api_url: string | null
   api_token: string | null
   cookie_secret: string | null
+  verify_tls: boolean
   enabled: boolean
   collection_interval: number
   ip_history_days: number
@@ -2055,7 +2101,9 @@ export const remnawaveApi = {
   updateSettings: (data: Partial<RemnawaveSettings>) =>
     api.put<{ success: boolean; message: string }>('/remnawave/settings', data),
   testConnection: () =>
-    api.post<{ success: boolean; api_reachable: boolean; error: string | null }>('/remnawave/settings/test'),
+    api.post<{ success: boolean; api_reachable: boolean; error: string | null; error_code?: string | null }>(
+      '/remnawave/settings/test',
+    ),
 
   getIgnoredUsers: () => api.get<IgnoredUsersResponse>('/remnawave/ignored-users'),
   addIgnoredUser: (userId: number) =>
@@ -2105,6 +2153,7 @@ export const remnawaveApi = {
 // Server Alerts
 export interface AlertSettingsData {
   enabled: boolean
+  // В ответе — маска '***', если токен сохранён, иначе ''. В PUT: новый токен, '' стирает
   telegram_bot_token: string
   telegram_chat_id: string
   language: string
@@ -2424,9 +2473,8 @@ export const alertsApi = {
   getSettings: () => api.get<AlertSettingsData>('/alerts/settings'),
   updateSettings: (data: Partial<AlertSettingsData>) =>
     api.put<AlertSettingsData>('/alerts/settings', data),
-  testTelegram: (botToken: string, chatId: string) =>
+  testTelegram: (chatId: string) =>
     api.post<{ success: boolean; message?: string; error?: string }>('/alerts/test-telegram', {
-      bot_token: botToken,
       chat_id: chatId,
     }),
   getStatus: () => api.get<AlertStatus>('/alerts/status'),
@@ -2528,6 +2576,7 @@ export const billingApi = {
 // Backup & Restore
 export interface BackupInfo {
   filename: string
+  encrypted: boolean
   size: number
   created_at: string
   version: string | null

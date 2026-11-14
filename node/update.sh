@@ -93,7 +93,9 @@ load_proxy() {
 # ==================== Configuration ====================
 
 NODE_DIR="/opt/monitoring-node"
-TMP_DIR="/tmp/node-update-$$"
+# Каталог клона создаёт main() через mktemp: код из него исполняется от root, а
+# предсказуемое имя в /tmp мог бы заранее занять другой пользователь сервера
+TMP_DIR=""
 TARGET_REF="${1:-main}"
 REPO_URL="https://github.com/Joliz1337/monitoring.git"
 
@@ -197,8 +199,6 @@ clone_repo() {
     local target_dir="$1"
     local branch="$2"
 
-    rm -rf "$target_dir" 2>/dev/null || true
-
     if spin_retry "$TIMEOUT_GIT_CLONE" "$MAX_RETRIES" "$RETRY_DELAY" "Downloading from GitHub" \
         git clone --depth 1 --branch "$branch" "$REPO_URL" "$target_dir"; then
         return 0
@@ -271,7 +271,14 @@ main() {
     log_info "Current version: $CURRENT_VERSION"
     
     backup_config
-    
+
+    # Клон кладётся прямо в созданный каталог: права 0700 остаются, а удаляет
+    # его в конце обновления apply-update.sh — этот скрипт уходит в него через exec
+    TMP_DIR=$(mktemp -d /tmp/node-update-XXXXXX) || {
+        log_error "Cannot create a temporary directory in /tmp"
+        exit 1
+    }
+
     if ! clone_repo "$TMP_DIR" "$TARGET_REF"; then
         log_error "Failed to download repository"
         exit 1

@@ -14,17 +14,30 @@ export interface ServerWithMetrics extends Server {
   metrics?: ServerCardMetrics | null
   traffic?: ServerTraffic | null
   status: 'online' | 'offline' | 'loading' | 'error'
-  lastUpdated?: Date
   last_seen?: string | null
   last_error?: string | null
   error_code?: number | null
 }
 
+// Срез списка собирает бэкенд и молча пропускает поля, которых нода не прислала, а
+// viewMetrics читает окно без проверок. Сервер с неполным окном остаётся с секундными
+// значениями — иначе исключение на нём одном срывало бы обновление всего списка
+function hasCompleteWindow(metrics: ServerCardMetrics): boolean {
+  const window = metrics.window
+  if (!window) return true
+  return Boolean(metrics.network)
+    && Array.isArray(window.per_cpu_avg)
+    && [window.cpu_avg, window.net_rx_avg, window.net_tx_avg].every(Number.isFinite)
+}
+
 interface ServersState {
   servers: ServerWithMetrics[]
   isLoading: boolean
+  /** Ошибка последнего запроса списка; держится до следующего успешного ответа */
   error: string | null
-  
+  /** Когда метрики в `servers` последний раз пришли с панели */
+  metricsUpdatedAt: Date | null
+
   fetchServers: () => Promise<void>
   fetchServersWithMetrics: () => Promise<void>
   addServer: (data: { name: string; url: string; proxy_url?: string | null; folder?: string | null }) => Promise<{ success: boolean; error?: string }>
@@ -42,10 +55,13 @@ export const useServersStore = create<ServersState>((set, get) => ({
   servers: [],
   isLoading: false,
   error: null,
-  
+  metricsUpdatedAt: null,
+
+  // Ошибку снимает только успешный ответ: сброс в начале запроса гасил бы плашку
+  // «нет связи» на время каждого опроса
   fetchServers: async () => {
     const { servers: existingServers } = get()
-    set({ isLoading: true, error: null })
+    set({ isLoading: true })
     try {
       const { data } = await serversApi.list()
       const serversWithStatus = data.servers.map(s => {
@@ -56,7 +72,6 @@ export const useServersStore = create<ServersState>((set, get) => ({
             metrics: existing.metrics,
             traffic: existing.traffic,
             status: existing.status,
-            lastUpdated: existing.lastUpdated,
             last_seen: existing.last_seen,
             last_error: existing.last_error,
             error_code: existing.error_code,
@@ -67,15 +82,15 @@ export const useServersStore = create<ServersState>((set, get) => ({
           status: 'loading' as const,
         }
       })
-      set({ servers: serversWithStatus, isLoading: false })
+      set({ servers: serversWithStatus, isLoading: false, error: null })
     } catch (error: unknown) {
       const err = error as { message?: string }
       set({ error: err.message || 'Failed to fetch servers', isLoading: false })
     }
   },
-  
+
   fetchServersWithMetrics: async () => {
-    set({ isLoading: true, error: null })
+    set({ isLoading: true })
     try {
       const { data } = await serversApi.list(true)
       // Режим живых показателей применяется здесь, а не в карточках: дашборд,
@@ -83,12 +98,11 @@ export const useServersStore = create<ServersState>((set, get) => ({
       const liveValues = useSettingsStore.getState().liveValues
       const serversWithStatus = data.servers.map(s => ({
         ...s,
-        metrics: s.metrics ? viewMetrics(s.metrics, liveValues) : s.metrics,
+        metrics: s.metrics && hasCompleteWindow(s.metrics) ? viewMetrics(s.metrics, liveValues) : s.metrics,
         traffic: (s as { traffic?: ServerTraffic }).traffic || null,
         status: (s.status || (s.last_error ? 'offline' : (s.metrics ? 'online' : 'loading'))) as 'online' | 'offline' | 'loading' | 'error',
-        lastUpdated: new Date(),
       }))
-      set({ servers: serversWithStatus, isLoading: false })
+      set({ servers: serversWithStatus, isLoading: false, error: null, metricsUpdatedAt: new Date() })
     } catch (error: unknown) {
       const err = error as { message?: string }
       set({ error: err.message || 'Failed to fetch servers', isLoading: false })

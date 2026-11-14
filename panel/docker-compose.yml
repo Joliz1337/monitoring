@@ -37,9 +37,12 @@ services:
       - autovacuum_analyze_scale_factor=0.02
       - -c
       - autovacuum_vacuum_cost_limit=1000
-    # Параллельные запросы берут рабочую память из /dev/shm, а Docker по умолчанию
-    # даёт контейнеру только 64 МБ — этого не хватает при поднятом work_mem
-    shm_size: 256mb
+    # Параллельные запросы и параллельный VACUUM берут рабочую память из /dev/shm,
+    # а Docker по умолчанию даёт контейнеру только 64 МБ. Размер считает
+    # scripts/pg-tune.sh от maintenance_work_mem и work_mem из .env: постоянные
+    # 256 МБ на хосте от 5 ГБ RAM меньше maintenance_work_mem, и ручной VACUUM
+    # падал с «could not resize shared memory segment»
+    shm_size: ${POSTGRES_SHM_SIZE:-256mb}
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-panel}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panel_secret}
@@ -71,6 +74,9 @@ services:
       # и кладёт результат в /etc/nginx/nginx.conf при каждом старте контейнера —
       # конфиг всегда свежий после обновления, ручная регенерация не нужна
       - ./nginx/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+      # Настройки этой установки (адрес посетителя за Cloudflare): шаблон подключает
+      # отсюда *.conf, обновление каталог не трогает
+      - ./nginx/extra:/etc/nginx/extra:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
     environment:
       - DOMAIN=${DOMAIN}
@@ -118,6 +124,9 @@ services:
         - CACHE_BUST=${CACHE_BUST:-}
     container_name: panel-backend
     restart: unless-stopped
+    # При остановке бэкенд дописывает в базу накопленный учёт трафика всех нод;
+    # в 10 секунд по умолчанию на большом парке он не укладывается, и хвост терялся
+    stop_grace_period: 60s
     # Root access for docker.sock and Let's Encrypt certificate reading (0600 perms)
     user: root
     environment:

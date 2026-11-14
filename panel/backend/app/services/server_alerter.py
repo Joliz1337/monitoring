@@ -4,12 +4,13 @@ import json
 import logging
 import time
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from urllib.parse import urlparse
 from typing import Optional
 
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, update
 
 from app.database import async_session
 from app.models import Server, AlertSettings, AlertHistory, PacketLossEpisode, PacketLossRelayIncident
@@ -32,6 +33,7 @@ from app.services import panel_host_alerts
 from app.services.panel_host_alerts import PanelHostWatch, PanelReading, PanelResource
 from app.services.panel_host_metrics import load_recent_host_load, read_host_disk
 from app.services.socks_probe import ProxyFault, find_proxy_fault
+from app.services.telegram_bot import OUTBOX_MAX_AGE
 from app.services.threshold_watch import ThresholdEvent, ThresholdPolicy, ThresholdWatch
 from app.services.traffic_ingest import get_traffic_ingest
 
@@ -41,8 +43,28 @@ API_PROBE_TIMEOUT = 5.0
 # Рукопожатие SOCKS5 таймаутами httpx не покрыто: без потолка зависший прокси
 # подвесил бы пробу, а с ней и проверку всех серверов
 API_PROBE_HARD_TIMEOUT = 10.0
+# Проб разом — десятая часть пропавших нод, в этих пределах: при 2000 нодах
+# полсотни растягивали первую же проверку на 20 минут
 OFFLINE_PROBE_CONCURRENCY = 50
+OFFLINE_PROBE_MAX_CONCURRENCY = 200
 PROXY_CHECK_TIMEOUT = 5.0
+
+# Пропало разом столько нод (и не меньше такой доли парка) — прежде чем пробовать
+# каждую, панель проверяет, есть ли связь у неё самой
+MASS_OFFLINE_MIN_CANDIDATES = 20
+MASS_OFFLINE_SHARE = 0.3
+# Три независимых сети: недоступность всех разом — это обрыв у панели, а не у них
+CONNECTIVITY_ENDPOINTS = (("1.1.1.1", 443), ("8.8.8.8", 443), ("9.9.9.9", 443))
+CONNECTIVITY_TIMEOUT = 3.0
+PANEL_ISOLATED = "panel_isolated"
+PANEL_RECONNECTED = "panel_reconnected"
+
+# В details строки истории, чьё сообщение Telegram не ушло сразу: тексты этого
+# сообщения (в первой строке события) и id этой строки — в остальных его строках.
+# По ним недоставленное отправляется заново после рестарта: в `message` лежит
+# текст без заголовка, а у сводки он и вовсе другой
+TELEGRAM_TEXTS_KEY = "telegram_texts"
+TELEGRAM_TEXTS_ROW_KEY = "telegram_texts_row"
 
 PROXY_FAULT_REASONS = {
     "ru": {
@@ -76,6 +98,8 @@ PAIRED_ALERT_OPENER = {
     "recovery": "offline",
     "steal_high": "steal_high",
     "steal_recovered": "steal_high",
+    PANEL_ISOLATED: PANEL_ISOLATED,
+    PANEL_RECONNECTED: PANEL_ISOLATED,
     **panel_host_alerts.PAIRED_ALERT_OPENER,
 }
 
@@ -148,6 +172,9 @@ class ServerAlertState:
 
     def __init__(self):
         self.was_offline: bool = False
+        # Нода лежит, а алерт об этом придержан кулдауном: уйдёт, как только тот истечёт
+        self.offline_unannounced: bool = False
+        self.offline_icmp_reachable: bool | None = None
         self.samples: int = 0
 
         self.ema_cpu: float = 0.0
@@ -197,6 +224,22 @@ class DueAlert:
     details: dict
 
 
+@dataclass
+class TelegramDelivery:
+    """Сообщения Telegram одного события и строки истории, которые ждут их доставки.
+
+    Не ушедшее сразу сервис Telegram доставляет позже сам; `notified` строки
+    получают, только когда дошло всё.
+    """
+
+    undelivered: list[str]
+    row_ids: list[int] = field(default_factory=list)
+
+    @property
+    def done(self) -> bool:
+        return not self.undelivered
+
+
 class ServerAlerter:
     """Background service that monitors server health and sends Telegram alerts."""
 
@@ -213,6 +256,11 @@ class ServerAlerter:
         self._loss_persisted: Optional[dict] = None
         self._panel = PanelHostWatch()
         self._due: deque[DueAlert] = deque()
+        # Ответы проверки прокси на один обход: за одним прокси стоят десятки нод
+        self._proxy_faults: dict[str, ProxyFault | None] = {}
+        self._panel_isolated = False
+        # Когда ушёл алерт о потере связи панелью; None — открытого эпизода нет
+        self._isolation_alerted_at: Optional[float] = None
 
     async def start(self):
         if self._running:
@@ -298,7 +346,9 @@ class ServerAlerter:
             for (server_id, opener), (_, alert_type) in last_paired_event.items():
                 if alert_type != opener:
                     continue
-                if server_id is None:
+                if opener == PANEL_ISOLATED:
+                    self._isolation_alerted_at = self._panel.last_alert[opener]
+                elif server_id is None:
                     self._panel.restore_alerted(opener)
                 elif opener == "offline":
                     self._states[server_id].was_offline = True
@@ -310,6 +360,58 @@ class ServerAlerter:
         except Exception as e:
             logger.warning(f"Alert state restore failed: {e}")
 
+    async def _requeue_undelivered(self) -> None:
+        """Вернуть в очередь Telegram алерты, не доставленные до рестарта панели.
+
+        Очередь повтора живёт в памяти сервиса Telegram, а строки истории
+        с пометкой о недоставленном сообщении — в базе."""
+        try:
+            settings = await self._load_settings()
+            if not (settings and settings.enabled and settings.telegram_bot_token and settings.telegram_chat_id):
+                return
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            async with async_session() as db:
+                rows = (await db.execute(
+                    select(AlertHistory.id, AlertHistory.details, AlertHistory.created_at)
+                    .where(
+                        AlertHistory.notified.is_(False),
+                        AlertHistory.created_at >= now_utc - timedelta(seconds=OUTBOX_MAX_AGE),
+                    )
+                    .order_by(AlertHistory.id)
+                )).all()
+
+            pending: dict[int, tuple[TelegramDelivery, float]] = {}
+            for row_id, raw_details, created_at in rows:
+                details = self._parse_details(raw_details)
+                texts = details.get(TELEGRAM_TEXTS_KEY)
+                if texts:
+                    age = (now_utc - created_at.replace(tzinfo=None)).total_seconds()
+                    pending[row_id] = (TelegramDelivery(list(texts), [row_id]), age)
+                elif details.get(TELEGRAM_TEXTS_ROW_KEY) in pending:
+                    pending[details[TELEGRAM_TEXTS_ROW_KEY]][0].row_ids.append(row_id)
+            if not pending:
+                return
+
+            from app.services.telegram_bot import get_telegram_bot_service
+            service = get_telegram_bot_service()
+            for delivery, age in pending.values():
+                for text in delivery.undelivered:
+                    service.queue_message(
+                        settings.telegram_bot_token, settings.telegram_chat_id, text,
+                        on_delivered=partial(self._mark_delivered, delivery, text), age=age,
+                    )
+            logger.info(f"Undelivered alerts queued for Telegram again: {len(pending)}")
+        except Exception as e:
+            logger.warning(f"Undelivered alerts requeue failed: {e}")
+
+    @staticmethod
+    def _parse_details(raw: str | None) -> dict:
+        try:
+            details = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return details if isinstance(details, dict) else {}
+
     async def _loop(self):
         self._time_since_check = 0
         self._last_cleanup: float = 0
@@ -317,6 +419,7 @@ class ServerAlerter:
 
         await self._restore_state_from_history()
         await self._restore_loss_episodes()
+        await self._requeue_undelivered()
 
         while self._running:
             try:
@@ -380,6 +483,7 @@ class ServerAlerter:
     async def _check_all(self, settings: AlertSettings):
         now = time.time()
         self._last_check = datetime.now(timezone.utc).replace(tzinfo=None)
+        self._proxy_faults = {}
 
         await self._check_panel_host(settings, now)
 
@@ -452,16 +556,106 @@ class ServerAlerter:
             and not self._server_is_online(srv, settings)
             and not (srv.id in self._states and self._states[srv.id].was_offline)
         ]
-        if not candidates:
+        await self._watch_panel_connectivity(settings, len(candidates), len(servers))
+        if not candidates or self._panel_isolated:
             return {}
 
-        semaphore = asyncio.Semaphore(OFFLINE_PROBE_CONCURRENCY)
+        semaphore = asyncio.Semaphore(
+            min(OFFLINE_PROBE_MAX_CONCURRENCY, max(OFFLINE_PROBE_CONCURRENCY, len(candidates) // 10))
+        )
 
         async def probe(srv: Server) -> tuple[int, tuple[bool, bool | None]]:
             async with semaphore:
                 return srv.id, await self._active_probe_sequence(srv)
 
         return dict(await asyncio.gather(*[probe(srv) for srv in candidates]))
+
+    # ------------------------------------------------------------------
+    # Связь самой панели
+    # ------------------------------------------------------------------
+    async def _watch_panel_connectivity(self, settings: AlertSettings, silent: int, active: int) -> None:
+        """Массовая пропажа нод — возможно, обрыв у самой панели, а не у них.
+
+        Без связи наружу панель не видит ни одной ноды, и пробы объявили бы
+        мёртвым весь парк. Пока связи нет, недоступность серверов не проверяется
+        (`_panel_isolated`), а оператор получает один алерт о самой панели.
+        """
+        mass_offline = silent >= max(MASS_OFFLINE_MIN_CANDIDATES, MASS_OFFLINE_SHARE * active)
+        if not (mass_offline or self._panel_isolated or self._isolation_alerted_at is not None):
+            return
+
+        isolated = not await self._panel_reaches_outside()
+        if isolated and not self._panel_isolated:
+            logger.warning(
+                f"Panel has no outbound connectivity ({silent} of {active} servers silent, "
+                f"no check address reachable): offline checks are paused"
+            )
+        elif self._panel_isolated and not isolated:
+            logger.info("Panel outbound connectivity is back: offline checks resumed")
+        self._panel_isolated = isolated
+
+        now = time.time()
+        if isolated and self._isolation_alerted_at is None:
+            last = self._panel.last_alert.get(PANEL_ISOLATED)
+            if last is not None and now - last < (settings.alert_cooldown or 1800):
+                return
+            self._panel.last_alert[PANEL_ISOLATED] = now
+            self._isolation_alerted_at = now
+            await self._alert_panel(
+                settings, PANEL_ISOLATED, "critical",
+                self._msg_panel_isolated(settings, silent, active),
+                {"silent": silent, "active": active},
+            )
+        elif not isolated and self._isolation_alerted_at is not None:
+            minutes = max(1, round((now - self._isolation_alerted_at) / 60))
+            self._isolation_alerted_at = None
+            await self._alert_panel(
+                settings, PANEL_RECONNECTED, "info",
+                self._msg_panel_reconnected(settings, minutes),
+                {"isolated_minutes": minutes},
+            )
+
+    async def _alert_panel(
+        self, settings: AlertSettings, alert_type: str, severity: str, message: str, details: dict,
+    ) -> None:
+        lang = panel_host_alerts.language(self._lang(settings))
+        delivery = await self._notify(settings, severity, message, panel_host_alerts.HEADER[lang])
+        await self._save_history(
+            None, panel_host_alerts.SERVER_NAME[lang], alert_type, severity, message, details, delivery,
+        )
+
+    async def _panel_reaches_outside(self) -> bool:
+        return any(await asyncio.gather(*[
+            self._tcp_connects(host, port) for host, port in CONNECTIVITY_ENDPOINTS
+        ]))
+
+    @staticmethod
+    async def _tcp_connects(host: str, port: int) -> bool:
+        try:
+            _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), CONNECTIVITY_TIMEOUT)
+        except (OSError, TimeoutError):
+            return False
+        writer.close()
+        return True
+
+    def _msg_panel_isolated(self, settings: AlertSettings, silent: int, active: int) -> str:
+        endpoints = ", ".join(f"{host}:{port}" for host, port in CONNECTIVITY_ENDPOINTS)
+        if self._lang(settings) == "ru":
+            return (
+                f"Панель потеряла связь с внешним миром: молчат {silent} из {active} серверов, "
+                f"и ни один из адресов проверки ({endpoints}) не отвечает. "
+                f"Пока связи нет, серверы недоступными не объявляются"
+            )
+        return (
+            f"The panel has lost outbound connectivity: {silent} of {active} servers are silent "
+            f"and none of the check addresses ({endpoints}) responds. "
+            f"Servers are not reported offline until connectivity returns"
+        )
+
+    def _msg_panel_reconnected(self, settings: AlertSettings, minutes: int) -> str:
+        if self._lang(settings) == "ru":
+            return f"Связь панели с внешним миром восстановлена, её не было {self._fmt_minutes(minutes, True)}"
+        return f"Panel outbound connectivity is restored after {self._fmt_minutes(minutes, False)}"
 
     async def _check_server(
         self,
@@ -675,22 +869,42 @@ class ServerAlerter:
     def _lang(settings: AlertSettings) -> str:
         return (settings.language or "en").lower()
 
-    def _msg_offline_full(self, srv: Server, settings: AlertSettings) -> str:
-        if self._lang(settings) == "ru":
-            return f"Сервер {srv.name} недоступен (API и ICMP не отвечают)"
-        return f"Server {srv.name} is offline (API and ICMP unreachable)"
+    @staticmethod
+    def _fmt_minutes(minutes: int, ru: bool) -> str:
+        hours, rest = divmod(minutes, 60)
+        if not hours:
+            return f"{minutes} мин" if ru else f"{minutes} min"
+        return f"{hours} ч {rest} мин" if ru else f"{hours} h {rest} min"
 
-    def _msg_offline_api_only(self, srv: Server, settings: AlertSettings) -> str:
-        if self._lang(settings) == "ru":
-            return f"Сервер {srv.name} недоступен (API не отвечает, ICMP доступен)"
-        return f"Server {srv.name} is offline (API unreachable, ICMP reachable)"
+    def _offline_state(self, settings: AlertSettings, down_minutes: int) -> str:
+        """«Недоступен» — для алерта вовремя; придержанный кулдауном говорит ещё и сколько нода уже лежит."""
+        ru = self._lang(settings) == "ru"
+        if not down_minutes:
+            return "недоступен" if ru else "is offline"
+        duration = self._fmt_minutes(down_minutes, ru)
+        return f"недоступен уже {duration}" if ru else f"has been offline for {duration}"
 
-    def _msg_offline_proxy(self, srv: Server, settings: AlertSettings, fault: ProxyFault) -> str:
+    def _msg_offline_full(self, srv: Server, settings: AlertSettings, down_minutes: int = 0) -> str:
+        state = self._offline_state(settings, down_minutes)
+        if self._lang(settings) == "ru":
+            return f"Сервер {srv.name} {state} (API и ICMP не отвечают)"
+        return f"Server {srv.name} {state} (API and ICMP unreachable)"
+
+    def _msg_offline_api_only(self, srv: Server, settings: AlertSettings, down_minutes: int = 0) -> str:
+        state = self._offline_state(settings, down_minutes)
+        if self._lang(settings) == "ru":
+            return f"Сервер {srv.name} {state} (API не отвечает, ICMP доступен)"
+        return f"Server {srv.name} {state} (API unreachable, ICMP reachable)"
+
+    def _msg_offline_proxy(
+        self, srv: Server, settings: AlertSettings, fault: ProxyFault, down_minutes: int = 0,
+    ) -> str:
         lang = "ru" if self._lang(settings) == "ru" else "en"
         reason = PROXY_FAULT_REASONS[lang][fault].format(proxy=sanitize_proxy(srv.proxy_url))
+        state = self._offline_state(settings, down_minutes)
         if lang == "ru":
-            return f"Сервер {srv.name} недоступен из-за прокси: {reason}"
-        return f"Server {srv.name} is offline because of its proxy: {reason}"
+            return f"Сервер {srv.name} {state} из-за прокси: {reason}"
+        return f"Server {srv.name} {state} because of its proxy: {reason}"
 
     def _msg_recovery(self, srv: Server, settings: AlertSettings) -> str:
         if self._lang(settings) == "ru":
@@ -901,36 +1115,14 @@ class ServerAlerter:
     async def _send_loss_digest(self, settings: AlertSettings, events: list[AlertEvent],
                                 owners: dict[str, str], policy: LossPolicy):
         lang = self._lang(settings)
-        notified = False
-        if settings.telegram_bot_token and settings.telegram_chat_id:
-            from app.services.telegram_bot import get_telegram_bot_service
-            service = get_telegram_bot_service()
-            sent = [
-                await service.send_message(settings.telegram_bot_token, settings.telegram_chat_id, text)
-                for text in format_digest(events, owners, policy, lang)
-            ]
-            notified = all(sent)
-
-        entries = [
-            AlertHistory(
-                server_id=record.server_id,
-                server_name=record.server_name,
-                alert_type="packet_loss_recovery" if record.recovered else "packet_loss",
-                severity="info" if record.recovered else "warning",
-                message=record.message,
-                details=json.dumps(record.details, ensure_ascii=False),
-                notified=notified,
+        delivery = await self._send_telegram(settings, format_digest(events, owners, policy, lang))
+        for record in history_records(events, owners, lang):
+            await self._save_history(
+                record.server_id, record.server_name,
+                "packet_loss_recovery" if record.recovered else "packet_loss",
+                "info" if record.recovered else "warning",
+                record.message, record.details, delivery,
             )
-            for record in history_records(events, owners, lang)
-        ]
-        if not entries:
-            return
-        try:
-            async with async_session() as db:
-                db.add_all(entries)
-                await db.commit()
-        except Exception as e:
-            logger.error(f"Failed to save packet loss history: {e}")
 
     async def _restore_loss_episodes(self):
         try:
@@ -1015,11 +1207,9 @@ class ServerAlerter:
             minutes = self._panel.high_minutes(reading.resource, now)
             message = panel_host_alerts.format_message(reading, event, threshold, minutes, lang)
             severity = panel_host_alerts.SEVERITY[event]
-            notified = await self._notify(settings, severity, message, panel_host_alerts.HEADER[lang])
-            await self._save_history(
-                None, panel_host_alerts.SERVER_NAME[lang],
-                panel_host_alerts.alert_type(reading.resource, event), severity, message,
-                panel_host_alerts.history_details(reading, threshold), notified,
+            await self._alert_panel(
+                settings, panel_host_alerts.alert_type(reading.resource, event), severity, message,
+                panel_host_alerts.history_details(reading, threshold),
             )
 
     async def _panel_host_readings(self) -> list[PanelReading]:
@@ -1130,37 +1320,7 @@ class ServerAlerter:
     ):
         cooldown = settings.alert_cooldown or 1800
 
-        if not is_online:
-            if not state.was_offline:
-                if probe is None:
-                    logger.info(f"Server {srv.name} appears offline, starting active probe")
-                    probe = await self._active_probe_sequence(srv)
-                is_dead, icmp_reachable = probe
-
-                if not is_dead:
-                    logger.info(f"Server {srv.name} responded during probe, not offline")
-                    return
-
-                state.was_offline = True
-
-                if self._cooldown_ok(state, "offline", now, cooldown):
-                    state.last_alert["offline"] = now
-                    details = {"icmp_reachable": icmp_reachable}
-
-                    proxy_fault = None
-                    if srv.proxy_url:
-                        proxy_fault = await find_proxy_fault(srv.proxy_url, PROXY_CHECK_TIMEOUT)
-
-                    if proxy_fault:
-                        message = self._msg_offline_proxy(srv, settings, proxy_fault)
-                        details["proxy_fault"] = proxy_fault.value
-                    elif icmp_reachable:
-                        message = self._msg_offline_api_only(srv, settings)
-                    else:
-                        message = self._msg_offline_full(srv, settings)
-
-                    await self._send_and_save(srv, settings, "offline", "critical", message, details)
-        else:
+        if is_online:
             if state.was_offline and settings.offline_recovery_notify:
                 if self._cooldown_ok(state, "recovery", now, cooldown):
                     state.last_alert["recovery"] = now
@@ -1170,7 +1330,53 @@ class ServerAlerter:
                         {},
                     )
             state.was_offline = False
+            state.offline_unannounced = False
             state.alert_start.pop("offline", None)
+            return
+
+        if self._panel_isolated:
+            return
+
+        just_went_down = not state.was_offline
+        if just_went_down:
+            if probe is None:
+                logger.info(f"Server {srv.name} appears offline, starting active probe")
+                probe = await self._active_probe_sequence(srv)
+            is_dead, icmp_reachable = probe
+
+            if not is_dead:
+                logger.info(f"Server {srv.name} responded during probe, not offline")
+                return
+
+            state.was_offline = True
+            state.offline_unannounced = True
+            state.offline_icmp_reachable = icmp_reachable
+
+        # Кулдаун глушит повторное падение, но не всю аварию: лежащая дольше него
+        # нода обязана дать алерт, иначе о ней не узнают вовсе
+        if not state.offline_unannounced or not self._cooldown_ok(state, "offline", now, cooldown):
+            return
+        state.offline_unannounced = False
+        state.last_alert["offline"] = now
+
+        down_minutes = 0 if just_went_down else self._silent_minutes(srv)
+        details = {"icmp_reachable": state.offline_icmp_reachable}
+        proxy_fault = await self._proxy_fault(srv.proxy_url) if srv.proxy_url else None
+
+        if proxy_fault:
+            message = self._msg_offline_proxy(srv, settings, proxy_fault, down_minutes)
+            details["proxy_fault"] = proxy_fault.value
+        elif state.offline_icmp_reachable:
+            message = self._msg_offline_api_only(srv, settings, down_minutes)
+        else:
+            message = self._msg_offline_full(srv, settings, down_minutes)
+
+        await self._send_and_save(srv, settings, "offline", "critical", message, details)
+
+    async def _proxy_fault(self, proxy_url: str) -> ProxyFault | None:
+        if proxy_url not in self._proxy_faults:
+            self._proxy_faults[proxy_url] = await find_proxy_fault(proxy_url, PROXY_CHECK_TIMEOUT)
+        return self._proxy_faults[proxy_url]
 
     # ------------------------------------------------------------------
     # Resource check (CPU / RAM) with critical threshold + spike
@@ -1366,18 +1572,25 @@ class ServerAlerter:
     # Metric extraction from cached JSON
     # ------------------------------------------------------------------
     @staticmethod
+    def _silent_seconds(srv: Server) -> float:
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        return (now_utc - srv.last_seen.replace(tzinfo=None)).total_seconds()
+
+    @staticmethod
+    def _silent_minutes(srv: Server) -> int:
+        """0 — панель эту ноду ещё ни разу не видела, срок назвать не из чего."""
+        if not srv.last_seen:
+            return 0
+        return max(1, round(ServerAlerter._silent_seconds(srv) / 60))
+
+    @staticmethod
     def _server_is_online(srv: Server, settings: AlertSettings) -> bool:
         if not srv.last_seen:
             return False
         try:
-            last_seen = srv.last_seen
-            if last_seen.tzinfo is not None:
-                last_seen = last_seen.replace(tzinfo=None)
-            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
             interval = settings.check_interval or 60
             threshold = max(1, settings.offline_fail_threshold or 3)
-            max_gap = timedelta(seconds=interval * threshold + 30)
-            return (now_utc - last_seen) < max_gap
+            return ServerAlerter._silent_seconds(srv) < interval * threshold + 30
         except Exception:
             return False
 
@@ -1508,7 +1721,7 @@ class ServerAlerter:
         names_by_type: dict[str, list[str]] = {}
         for alert in self._due:
             names_by_type.setdefault(alert.alert_type, []).append(alert.server_name)
-        digest_notified: dict[str, bool] = {}
+        digests: dict[str, Optional[TelegramDelivery]] = {}
 
         # Алерт покидает очередь до своей отправки: сбой на нём не теряет
         # остальные — они уйдут следующим обходом
@@ -1517,30 +1730,60 @@ class ServerAlerter:
             header = self._msg_header(alert.settings)
             names = names_by_type[alert.alert_type]
             if len(names) <= ALERT_DIGEST_THRESHOLD:
-                notified = await self._notify(alert.settings, alert.severity, alert.message, header)
+                delivery = await self._notify(alert.settings, alert.severity, alert.message, header)
             else:
-                if alert.alert_type not in digest_notified:
+                if alert.alert_type not in digests:
                     digest = self._msg_digest(alert.settings, alert.alert_type, names)
-                    digest_notified[alert.alert_type] = await self._notify(
+                    digests[alert.alert_type] = await self._notify(
                         alert.settings, alert.severity, digest, header,
                     )
-                notified = digest_notified[alert.alert_type]
+                delivery = digests[alert.alert_type]
             await self._save_history(
                 alert.server_id, alert.server_name, alert.alert_type,
-                alert.severity, alert.message, alert.details, notified,
+                alert.severity, alert.message, alert.details, delivery,
             )
 
     @staticmethod
-    async def _notify(settings: AlertSettings, severity: str, message: str, header: str) -> bool:
-        if not (settings.telegram_bot_token and settings.telegram_chat_id):
-            return False
+    async def _notify(
+        settings: AlertSettings, severity: str, message: str, header: str,
+    ) -> Optional[TelegramDelivery]:
         severity_map = {"critical": "\U0001f534", "warning": "\U0001f7e1", "info": "\U0001f7e2"}
         emoji = severity_map.get(severity, "\u2139\ufe0f")
-        text = f"{emoji} <b>{header}</b>\n\n{message}"
+        return await ServerAlerter._send_telegram(settings, [f"{emoji} <b>{header}</b>\n\n{message}"])
+
+    @staticmethod
+    async def _send_telegram(settings: AlertSettings, texts: list[str]) -> Optional[TelegramDelivery]:
+        """Отправить сообщения одного события; None — Telegram не настроен.
+
+        Что не ушло из-за сети или сбоя Telegram, сервис доставит позже сам —
+        строки истории события узнают об этом через `_mark_delivered`."""
+        if not (settings.telegram_bot_token and settings.telegram_chat_id):
+            return None
         from app.services.telegram_bot import get_telegram_bot_service
-        return await get_telegram_bot_service().send_message(
-            settings.telegram_bot_token, settings.telegram_chat_id, text,
-        )
+        service = get_telegram_bot_service()
+        delivery = TelegramDelivery(list(texts))
+        for text in texts:
+            delivered = await service.send_message(
+                settings.telegram_bot_token, settings.telegram_chat_id, text,
+                retry_later=True, on_delivered=partial(ServerAlerter._mark_delivered, delivery, text),
+            )
+            if delivered:
+                delivery.undelivered.remove(text)
+        return delivery
+
+    @staticmethod
+    async def _mark_delivered(delivery: TelegramDelivery, text: str) -> None:
+        delivery.undelivered.remove(text)
+        if delivery.done:
+            await ServerAlerter._set_notified(delivery.row_ids)
+
+    @staticmethod
+    async def _set_notified(row_ids: list[int]) -> None:
+        if not row_ids:
+            return
+        async with async_session() as db:
+            await db.execute(update(AlertHistory).where(AlertHistory.id.in_(row_ids)).values(notified=True))
+            await db.commit()
 
     @staticmethod
     async def _save_history(
@@ -1550,20 +1793,32 @@ class ServerAlerter:
         severity: str,
         message: str,
         details: dict,
-        notified: bool,
+        delivery: Optional[TelegramDelivery],
     ):
+        waits_for_telegram = delivery is not None and not delivery.done
+        if waits_for_telegram and delivery.row_ids:
+            details = {**details, TELEGRAM_TEXTS_ROW_KEY: delivery.row_ids[0]}
+        elif waits_for_telegram:
+            details = {**details, TELEGRAM_TEXTS_KEY: list(delivery.undelivered)}
+        row = AlertHistory(
+            server_id=server_id,
+            server_name=server_name,
+            alert_type=alert_type,
+            severity=severity,
+            message=message,
+            details=json.dumps(details, ensure_ascii=False),
+            notified=delivery is not None and delivery.done,
+        )
         try:
             async with async_session() as db:
-                db.add(AlertHistory(
-                    server_id=server_id,
-                    server_name=server_name,
-                    alert_type=alert_type,
-                    severity=severity,
-                    message=message,
-                    details=json.dumps(details, ensure_ascii=False),
-                    notified=notified,
-                ))
+                db.add(row)
                 await db.commit()
+            if not waits_for_telegram:
+                return
+            delivery.row_ids.append(row.id)
+            # Сообщение могло дойти, пока строка писалась в базу
+            if delivery.done:
+                await ServerAlerter._set_notified([row.id])
         except Exception as e:
             logger.error(f"Failed to save alert history: {e}")
 

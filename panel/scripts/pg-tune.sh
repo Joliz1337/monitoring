@@ -41,6 +41,41 @@ pg_tune_notify() {
     fi
 }
 
+PG_TUNE_SHM_MIN_MB=256
+PG_TUNE_SHM_MAINTENANCE_RESERVE_MB=64
+PG_TUNE_SHM_WORK_MEM_FACTOR=8
+
+# Значение настройки памяти из .env в мегабайтах: 256MB, 2GB, 65536kB, число без
+# единицы postgres читает как килобайты. Пусто — ключа нет или единица не разобрана
+pg_tune_env_mb() {
+    local env_file=$1 key=$2 value number
+    value=$(sed -n "s/^${key}=//p" "$env_file" 2>/dev/null | tail -1)
+    number=${value%%[!0-9]*}
+    [ -n "$number" ] || return 0
+    case "${value#"$number"}" in
+        MB)    echo "$number" ;;
+        GB)    echo $((number * 1024)) ;;
+        kB|'') echo $((number / 1024)) ;;
+    esac
+}
+
+# Размер /dev/shm контейнера postgres: туда ложится память параллельного VACUUM
+# (до maintenance_work_mem) и параллельных запросов (кратно work_mem). Считается
+# от значений, действующих в .env, а не от свежего расчёта: оператор мог задать
+# их сам, а RAM хоста — измениться после того, как они были записаны
+pg_tune_shm_mb() {
+    local env_file=$1 maint_mb work_mb shm_mb=$PG_TUNE_SHM_MIN_MB
+    maint_mb=$(pg_tune_env_mb "$env_file" POSTGRES_MAINTENANCE_WORK_MEM)
+    work_mb=$(pg_tune_env_mb "$env_file" POSTGRES_WORK_MEM)
+    if [ -n "$maint_mb" ] && [ $((maint_mb + PG_TUNE_SHM_MAINTENANCE_RESERVE_MB)) -gt "$shm_mb" ]; then
+        shm_mb=$((maint_mb + PG_TUNE_SHM_MAINTENANCE_RESERVE_MB))
+    fi
+    if [ -n "$work_mb" ] && [ $((work_mb * PG_TUNE_SHM_WORK_MEM_FACTOR)) -gt "$shm_mb" ]; then
+        shm_mb=$((work_mb * PG_TUNE_SHM_WORK_MEM_FACTOR))
+    fi
+    printf '%s' "$shm_mb"
+}
+
 # Дописывает в .env только отсутствующие ключи: значения, выставленные оператором
 # вручную, остаются как есть.
 tune_postgres_env() {
@@ -52,7 +87,7 @@ tune_postgres_env() {
     [ "$ram_mb" -gt 0 ] || return 0
 
     local keys="POSTGRES_SHARED_BUFFERS POSTGRES_EFFECTIVE_CACHE_SIZE POSTGRES_WORK_MEM
-                POSTGRES_MAINTENANCE_WORK_MEM POSTGRES_MAX_WAL_SIZE"
+                POSTGRES_MAINTENANCE_WORK_MEM POSTGRES_MAX_WAL_SIZE POSTGRES_SHM_SIZE"
     local missing=0 key
     for key in $keys; do
         if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
@@ -79,6 +114,7 @@ tune_postgres_env() {
     pg_tune_add_env_key "$env_file" POSTGRES_WORK_MEM "${work_mb}MB"
     pg_tune_add_env_key "$env_file" POSTGRES_MAINTENANCE_WORK_MEM "${maint_mb}MB"
     pg_tune_add_env_key "$env_file" POSTGRES_MAX_WAL_SIZE "${wal_mb}MB"
+    pg_tune_add_env_key "$env_file" POSTGRES_SHM_SIZE "$(pg_tune_shm_mb "$env_file")mb"
 
     pg_tune_notify "PostgreSQL tuning added to .env (host RAM: ${ram_mb} MB)"
 }

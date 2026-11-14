@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, type ChangeEvent } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -20,6 +20,7 @@ const PANEL_ALERT_TYPES = [
   'panel_cpu_high', 'panel_cpu_recovered',
   'panel_ram_high', 'panel_ram_recovered',
   'panel_disk_high', 'panel_disk_recovered',
+  'panel_isolated', 'panel_reconnected',
 ] as const
 
 const BACKEND_QUARANTINE_ALERT_TYPES = [
@@ -106,7 +107,7 @@ export default function Alerts() {
     setTesting(true)
     setTestResult(null)
     try {
-      const res = await alertsApi.testTelegram(settings.telegram_bot_token, settings.telegram_chat_id)
+      const res = await alertsApi.testTelegram(settings.telegram_chat_id)
       setTestResult({ success: res.data.success, message: res.data.error || res.data.message || '' })
     } catch (e: any) {
       setTestResult({ success: false, message: e?.response?.data?.detail || t('alerts.test_request_failed') })
@@ -228,11 +229,12 @@ export default function Alerts() {
               checked={settings.enabled}
               onChange={v => save({ enabled: v })}
             />
-            <InputRow
+            <SecretRow
               label={t('alerts.bot_token')}
-              value={settings.telegram_bot_token}
-              placeholder="123456:ABC-DEF..."
-              secret
+              saved={!!settings.telegram_bot_token}
+              placeholder={settings.telegram_bot_token ? t('alerts.bot_token_saved') : '123456:ABC-DEF...'}
+              clearLabel={t('alerts.bot_token_clear')}
+              clearConfirm={t('alerts.bot_token_clear_confirm')}
               onSave={v => save({ telegram_bot_token: v })}
             />
             <InputRow
@@ -1024,29 +1026,73 @@ function TriggerIgnoreList({ ids, allServers, onSave, t }: {
   )
 }
 
-function InputRow({ label, value, placeholder, secret, onSave }: {
+const ROW_INPUT_CLASS = `w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
+                placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition`
+
+function InputRow({ label, value, placeholder, onSave }: {
   label: string
   value: string
   placeholder?: string
-  secret?: boolean
   onSave: (v: string) => void
 }) {
   const [local, setLocal] = useState(value)
   useEffect(() => setLocal(value), [value])
 
-  const inputProps = {
-    value: local,
-    placeholder,
-    onChange: (e: ChangeEvent<HTMLInputElement>) => setLocal(e.target.value),
-    onBlur: () => { if (local !== value) onSave(local) },
-    className: `w-full bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-200
-                placeholder-dark-600 focus:border-accent-500/50 focus:outline-none transition`,
+  return (
+    <div className="space-y-1">
+      <label className="text-sm text-dark-300">{label}</label>
+      <input
+        type="text"
+        value={local}
+        placeholder={placeholder}
+        onChange={e => setLocal(e.target.value)}
+        onBlur={() => { if (local !== value) onSave(local) }}
+        className={ROW_INPUT_CLASS}
+      />
+    </div>
+  )
+}
+
+// Сохранённый секрет панель не отдаёт, поэтому поле всегда пустое: непустой ввод
+// заменяет секрет, крестик его стирает
+function SecretRow({ label, saved, placeholder, clearLabel, clearConfirm, onSave }: {
+  label: string
+  saved: boolean
+  placeholder: string
+  clearLabel: string
+  clearConfirm: string
+  onSave: (v: string) => void
+}) {
+  const [draft, setDraft] = useState('')
+
+  const replace = () => {
+    if (!draft) return
+    onSave(draft)
+    setDraft('')
   }
 
   return (
     <div className="space-y-1">
       <label className="text-sm text-dark-300">{label}</label>
-      {secret ? <SecretInput {...inputProps} /> : <input type="text" {...inputProps} />}
+      <div className="flex items-center gap-2">
+        <SecretInput
+          value={draft}
+          placeholder={placeholder}
+          onChange={e => setDraft(e.target.value)}
+          onBlur={replace}
+          className={ROW_INPUT_CLASS}
+        />
+        {saved && (
+          <Tooltip label={clearLabel}>
+            <button
+              onClick={() => { if (confirm(clearConfirm)) onSave('') }}
+              className="text-dark-500 hover:text-red-400 transition"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </Tooltip>
+        )}
+      </div>
     </div>
   )
 }

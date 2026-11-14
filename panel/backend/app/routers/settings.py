@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 
-from app.database import get_db
+from app.database import SECRET_SETTING_KEYS, get_db
 from app.models import PanelSettings
 from app.auth import verify_auth
 from app.services import update_channel
@@ -99,7 +99,11 @@ async def get_all_settings(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    result = await db.execute(select(PanelSettings))
+    # Секретные ключи (токен Cloudflare) живут в той же таблице, но наружу
+    # отдаются только своими эндпоинтами и в маске
+    result = await db.execute(
+        select(PanelSettings).where(PanelSettings.key.notin_(SECRET_SETTING_KEYS))
+    )
     db_settings = {s.key: s.value for s in result.scalars().all()}
     
     settings = {**DEFAULT_SETTINGS, **db_settings}
@@ -113,6 +117,9 @@ async def update_setting(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
+    if key in SECRET_SETTING_KEYS:
+        raise HTTPException(status_code=400, detail="This setting is changed through its own endpoint")
+
     if key == "update_branch" and data.value not in update_channel.ALLOWED_BRANCHES:
         raise HTTPException(status_code=400, detail="Invalid update branch")
 

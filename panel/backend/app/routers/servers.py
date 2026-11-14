@@ -640,6 +640,10 @@ async def migrate_all_servers(
     """Параллельно мигрировать все per-server ноды и собрать список legacy."""
     result = await db.execute(select(Server))
     servers = result.scalars().all()
+    # Обход большого парка идёт десятки минут, а транзакцию, простоявшую открытой
+    # дольше лимита, PostgreSQL обрывает: флаги нод, уже получивших сертификат,
+    # не сохранились бы. Чтение закрывается здесь, запись — отдельной транзакцией
+    await db.commit()
     keygen = request.app.state.pki
 
     # Ноды на осознанном персональном сертификате (dedicated_cert) не трогаем —
@@ -658,13 +662,18 @@ async def migrate_all_servers(
         async with sem:
             try:
                 await push_shared_cert_to_node(s, keygen)
-                s.uses_shared_cert = True
                 auto_migrated.append({"id": s.id, "name": s.name})
             except Exception as exc:
                 failed.append({"id": s.id, "name": s.name, "error": str(exc)})
 
     if auto_targets:
         await asyncio.gather(*(_one(s) for s in auto_targets))
+    if auto_migrated:
+        await db.execute(
+            update(Server)
+            .where(Server.id.in_([server["id"] for server in auto_migrated]))
+            .values(uses_shared_cert=True)
+        )
         await db.commit()
 
     return {
@@ -700,6 +709,11 @@ async def update_server(
 
     for key, value in update_data.items():
         setattr(server, key, value)
+
+    # Без своего ssh_host по SSH ходят на адрес из URL: новый адрес — другая машина,
+    # закреплённый ключ хоста прежней ей не эталон
+    if not server.ssh_host and urlparse(server.url).hostname != urlparse(old_url).hostname:
+        server.ssh_host_key = None
 
     await db.commit()
     _invalidate_list_cache()

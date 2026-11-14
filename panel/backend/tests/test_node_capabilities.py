@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import unittest
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -28,6 +29,7 @@ try:
         ALWAYS_ALLOWED,
         DENIAL_ERROR,
         DOMAIN_PREFIXES,
+        EXEC_REQUIRED_WRITES,
         READ_ONLY_WRITES,
         Capability,
         allowed_capabilities,
@@ -39,6 +41,7 @@ try:
         normalize_map,
         parse,
         resolve_route,
+        server_allows_path,
     )
 except ImportError as e:  # рантайм панели не установлен
     raise unittest.SkipTest(f"node_capabilities requires the panel runtime: {e}")
@@ -135,6 +138,45 @@ class ResolveRouteTest(unittest.TestCase):
         self.assertEqual(resolve_route("/api/whatever-new"), (None, False))
 
 
+class ExecRequiredTest(unittest.TestCase):
+    """Скрипты, которые нода исполняет от root, без exec на неё не уходят."""
+
+    @staticmethod
+    def server(raw):
+        return SimpleNamespace(node_capabilities=raw)
+
+    def test_own_domain_alone_is_not_enough(self):
+        without_exec = self.server(caps_json(antiddos=ACCESS_WRITE, system=ACCESS_WRITE))
+        for path in EXEC_REQUIRED_WRITES:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    server_allows_path(without_exec, path, "POST"),
+                    (False, Capability.EXEC, True),
+                )
+
+    def test_exec_grant_opens_them(self):
+        with_exec = self.server(caps_json(antiddos=ACCESS_WRITE, system=ACCESS_WRITE, exec=ACCESS_WRITE))
+        for path in EXEC_REQUIRED_WRITES:
+            with self.subTest(path=path):
+                self.assertTrue(server_allows_path(with_exec, path, "POST")[0])
+
+    def test_closed_own_domain_is_reported_first(self):
+        only_exec = self.server(caps_json(exec=ACCESS_WRITE))
+        self.assertEqual(
+            server_allows_path(only_exec, "/api/antiddos/install", "POST"),
+            (False, Capability.ANTIDDOS, True),
+        )
+
+    def test_unrestricted_node_is_untouched(self):
+        for path in EXEC_REQUIRED_WRITES:
+            with self.subTest(path=path):
+                self.assertTrue(server_allows_path(self.server(None), path, "POST")[0])
+
+    def test_neighbour_routes_do_not_need_exec(self):
+        without_exec = self.server(caps_json(antiddos=ACCESS_WRITE))
+        self.assertTrue(server_allows_path(without_exec, "/api/antiddos/enable", "POST")[0])
+
+
 class DenialLearningTest(unittest.TestCase):
     def test_denial_body_yields_canonical_map(self):
         body = {
@@ -198,6 +240,7 @@ class MirrorTest(unittest.TestCase):
     def test_exempt_and_read_only_sets_match(self):
         self.assertEqual(self.node.ALWAYS_ALLOWED, ALWAYS_ALLOWED)
         self.assertEqual(self.node.READ_ONLY_WRITES, READ_ONLY_WRITES)
+        self.assertEqual(self.node.EXEC_REQUIRED_WRITES, EXEC_REQUIRED_WRITES)
 
     def test_access_values_match(self):
         self.assertEqual(self.node.Access.NONE.value, ACCESS_NONE)
@@ -286,6 +329,7 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/backend_edit_jobs.py",  # /api/metrics после раскатки — список потерь
         "services/deploy_job_manager.py",  # установка новой ноды
         "services/http_client.py",     # сами клиенты
+        "services/metrics_request.py",  # /api/metrics — опрос коллектора метрик
         "services/migration.py",       # /api/system/replace-node-cert
         "services/server_alerter.py",  # проба /api/metrics
     }

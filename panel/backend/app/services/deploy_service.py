@@ -27,7 +27,13 @@ import asyncssh
 
 from app.services.http_client import sanitize_proxy
 from app.services.install_tunnel import InstallTunnel, TunnelForwardingDenied, open_install_tunnel
-from app.services.ssh_target import SSHTarget, open_ssh_connection, ssh_connect_kwargs
+from app.services.ssh_target import (
+    HostKeyChangedError,
+    SSHTarget,
+    open_ssh_connection,
+    presented_host_key,
+    ssh_connect_kwargs,
+)
 from app.services import update_channel
 
 REMOTE_SCRIPT = "/tmp/mon-install.sh"
@@ -249,8 +255,9 @@ def _build_command(params: DeployParams, tunnel_proxy: str | None) -> str:
 
 
 def _connect_kwargs(params: DeployParams) -> dict:
-    """Параметры asyncssh.connect. known_hosts=None — целевые серверы заранее
-    неизвестны панели, ключ хоста не проверяем (оператор вводит доверенные креды)."""
+    """Параметры asyncssh.connect. known_hosts=None — сервер панели ещё не знаком:
+    первое подключение доверяет предъявленному ключу хоста и закрепляет его
+    (open_ssh_connection), смена пароля и повтор установки сверяются уже с ним."""
     kwargs: dict = {
         "host": params.host,
         "port": params.ssh_port,
@@ -296,7 +303,9 @@ async def install_via_panel(target: SSHTarget, command_for: CommandForProxy) -> 
         yield {"type": "error", "message": f"Некорректный SSH-ключ: {exc}"}
         return
 
-    async for event in _stream_ssh_install(connect_kwargs, target.socks5_proxy, True, command_for):
+    async for event in _stream_ssh_install(
+        connect_kwargs, target.socks5_proxy, True, command_for, server_id=target.server_id,
+    ):
         if event["type"] == "_result":
             yield {"type": "done", "exit_code": event["exit_code"]}
         else:
@@ -309,9 +318,10 @@ async def _stream_ssh_install(
     via_panel: bool,
     command_for: CommandForProxy,
     sudo_password: str | None = None,
+    server_id: int | None = None,
 ) -> AsyncIterator[dict]:
     """Один прогон установки по SSH. Стримит лог построчно, в конце отдаёт служебное
-    событие {"type": "_result", "exit_code", "expired"}. Фатальные сбои
+    событие {"type": "_result", "exit_code", "expired", "host_key"}. Фатальные сбои
     соединения отдаются как {"type": "error"} без `_result`.
 
     `_result` отдаётся уже после закрытия SSH-сессии — вместе с ней закрывается
@@ -321,7 +331,7 @@ async def _stream_ssh_install(
     result: dict | None = None
 
     try:
-        async with await open_ssh_connection(connect_kwargs, socks5_proxy) as conn:
+        async with await open_ssh_connection(connect_kwargs, socks5_proxy, server_id) as conn:
             via_proxy =f" через SOCKS5 {sanitize_proxy(socks5_proxy)}" if socks5_proxy else ""
             yield {
                 "type": "log",
@@ -379,12 +389,16 @@ async def _stream_ssh_install(
                     "type": "_result",
                     "exit_code": exit_code if exit_code is not None else 1,
                     "expired": expired,
+                    "host_key": presented_host_key(conn),
                 }
     except TunnelForwardingDenied:
         yield {"type": "error", "message": TUNNEL_DENIED_MESSAGE}
         return
     except asyncssh.PermissionDenied:
         yield {"type": "error", "message": "SSH: неверный логин, пароль или ключ"}
+        return
+    except HostKeyChangedError as exc:
+        yield {"type": "error", "message": str(exc)}
         return
     except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
         yield {"type": "error", "message": f"Ошибка SSH-подключения: {exc}"}
@@ -474,6 +488,8 @@ async def _change_expired_password(
             }
     except asyncssh.PermissionDenied:
         yield {"type": "pwchange", "ok": False, "message": "неверный текущий пароль"}
+    except HostKeyChangedError as exc:
+        yield {"type": "pwchange", "ok": False, "message": str(exc)}
     except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
         yield {"type": "pwchange", "ok": False, "message": f"ошибка смены пароля: {exc}"}
 
@@ -551,12 +567,13 @@ async def deploy_node(params: DeployParams) -> AsyncIterator[dict]:
                 yield {"type": "log", "line": "[panel] Пароль root изменён на заданный"}
 
             params.ssh_password = new_password
-            connect_kwargs = _connect_kwargs(params)
+            # Меняется только пароль: закреплённый первым подключением ключ хоста остаётся в силе
+            connect_kwargs["password"] = new_password
             password_changed = True
             continue  # повторяем установку с новым паролем
 
         if password_expired and not can_recover_password:
             yield {"type": "log", "line": "[panel] Пароль просрочен — авто-смена доступна только при входе по паролю"}
 
-        yield {"type": "done", "exit_code": result.get("exit_code", 1)}
+        yield {"type": "done", "exit_code": result.get("exit_code", 1), "host_key": result.get("host_key")}
         return

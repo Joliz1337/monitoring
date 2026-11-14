@@ -1,9 +1,10 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, BigInteger, Index, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.orm import deferred
+from sqlalchemy.orm import deferred, validates
 from sqlalchemy.sql import func
-from app.database import Base
-from app.crypto import EncryptedString
+from sqlalchemy.types import TypeDecorator
+from app.database import Base, SECRET_SETTING_KEYS
+from app.crypto import EncryptedString, decrypt_secret, encrypt_secret
 
 SERVER_NOTE_MAX_LENGTH = 40
 
@@ -116,6 +117,8 @@ class Server(Base):
     ssh_password = Column(EncryptedString, nullable=True)
     ssh_private_key = Column(EncryptedString, nullable=True)
     ssh_passphrase = Column(EncryptedString, nullable=True)
+    # Ключ хоста, принятый при первом SSH-подключении; смена ключа = отказ, а не молчаливое доверие
+    ssh_host_key = Column(Text, nullable=True)
 
     # Кэш фактического порта sshd с ноды (из /api/ssh/status и применений SSH-конфига).
     # Не путать с ssh_port выше — это порт из кредов доставки образа.
@@ -130,6 +133,10 @@ class Server(Base):
     wildcard_ssl_custom_path_enabled = Column(Boolean, default=False, server_default="false")
     wildcard_ssl_custom_fullchain_path = Column(String(500), nullable=True)
     wildcard_ssl_custom_privkey_path = Column(String(500), nullable=True)
+    # sha256 всего, что раскатка последний раз положила на сервер: цепочки сертификатов,
+    # пути, имена файлов и reload-команда (services/wildcard_ssl.deployment_fingerprint).
+    # Расходится с текущим — сверка раскатывает сервер заново
+    wildcard_ssl_deployed_fingerprint = Column(String(64), nullable=True)
 
     # HAProxy config profile binding
     active_haproxy_profile_id = Column(Integer, ForeignKey("haproxy_config_profiles.id", ondelete="SET NULL"), nullable=True)
@@ -410,12 +417,42 @@ class AggregatedMetrics(Base):
     )
 
 
+class _SecretSettingValue(str):
+    """Значение секретного ключа panel_settings: по этой метке колонка шифрует его при записи."""
+
+
+class SettingValue(TypeDecorator):
+    """Значение настройки: у секретных ключей в БД шифротекст, у остальных — как есть.
+
+    Колонка не видит ключ строки. Читая, она расшифровывает всё с префиксом
+    enc:v1:, а шифрует только значения, помеченные валидатором PanelSettings."""
+
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if isinstance(value, _SecretSettingValue):
+            return encrypt_secret(value)
+        return value
+
+    def process_result_value(self, value, dialect):
+        return decrypt_secret(value)
+
+
 class PanelSettings(Base):
     __tablename__ = "panel_settings"
-    
+
     id = Column(Integer, primary_key=True)
     key = Column(String(100), unique=True, nullable=False)
-    value = Column(Text)
+    value = Column(SettingValue)
+
+    # key берётся из уже загруженного состояния: обращение к атрибуту сброшенной
+    # строки запросило бы базу из синхронного кода. В конструкторе key идёт раньше value
+    @validates("value")
+    def _mark_secret_value(self, _attr: str, value: str | None) -> str | None:
+        if value and self.__dict__.get("key") in SECRET_SETTING_KEYS:
+            return _SecretSettingValue(value)
+        return value
 
 
 class FailedLogin(Base):
@@ -475,8 +512,10 @@ class RemnawaveSettings(Base):
 
     id = Column(Integer, primary_key=True)
     api_url = Column(String(500), nullable=True)
-    api_token = Column(String(500), nullable=True)
-    cookie_secret = Column(String(500), nullable=True)
+    api_token = Column(EncryptedString, nullable=True)
+    cookie_secret = Column(EncryptedString, nullable=True)
+    # Проверять TLS-сертификат Remnawave API; выключается только для самоподписанного
+    verify_tls = Column(Boolean, default=True, server_default="true", nullable=False)
     enabled = Column(Boolean, default=False)
     collection_interval = Column(Integer, default=300)
     ignored_user_ids = Column(Text, nullable=True)  # JSON array of user IDs
@@ -497,7 +536,7 @@ class RemnawaveSettings(Base):
     anomaly_devdata_smart_traffic_gb = Column(Float, default=20.0)  # меньше этого за сутки — не уведомлять о невалидных данных
     anomaly_ua_patterns = Column(Text, nullable=True)        # реестр известных UA; NULL = встроенный
     anomaly_use_custom_bot = Column(Boolean, default=False)
-    anomaly_tg_bot_token = Column(String(200), nullable=True)
+    anomaly_tg_bot_token = Column(EncryptedString, nullable=True)
     anomaly_tg_chat_id = Column(String(100), nullable=True)
     anomaly_ignore_ip = Column(Text, nullable=True)      # JSON array of user IDs to ignore IP checks
     anomaly_ignore_hwid = Column(Text, nullable=True)     # JSON array of user IDs to ignore HWID checks
@@ -674,7 +713,7 @@ class TorrentBlockerSettings(Base):
     # ждёт webhook_delay_seconds (грейс-период для пользователя), затем банит IP.
     webhook_enabled = Column(Boolean, default=False)
     webhook_url = Column(Text, nullable=True)
-    webhook_secret = Column(Text, nullable=True)
+    webhook_secret = Column(EncryptedString, nullable=True)
     webhook_delay_seconds = Column(Integer, default=60)
 
     last_poll_at = Column(DateTime(timezone=True), nullable=True)
@@ -749,7 +788,7 @@ class AlertSettings(Base):
     id = Column(Integer, primary_key=True)
     enabled = Column(Boolean, default=False)
     
-    telegram_bot_token = Column(String(200), nullable=True)
+    telegram_bot_token = Column(EncryptedString, nullable=True)
     telegram_chat_id = Column(String(100), nullable=True)
     language = Column(String(5), default="en")
     
@@ -1228,7 +1267,7 @@ class WildcardCertificate(Base):
     domain = Column(String(253), nullable=False)
     base_domain = Column(String(253), nullable=False)
     fullchain_pem = Column(Text, nullable=False)
-    privkey_pem = Column(Text, nullable=False)
+    privkey_pem = Column(EncryptedString, nullable=False)
     expiry_date = Column(DateTime(timezone=True), nullable=True)
     issued_at = Column(DateTime(timezone=True), server_default=func.now())
     last_renewed = Column(DateTime(timezone=True), nullable=True)

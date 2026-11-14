@@ -64,7 +64,13 @@ class BulkDeliverRequest(SSHCreds):
 
 
 def _store_creds(server: Server, req: SSHAccessRequest) -> None:
-    """Write-only: обновляем только переданные поля; пустая строка — очистить."""
+    """Write-only: обновляем только переданные поля; пустая строка — очистить.
+
+    Новый адрес, порт, пользователь или заново введённый пароль/ключ — доступ
+    сохраняют заново, в том числе после переустановки сервера: закреплённый ключ
+    хоста сбрасывается, и следующее подключение запомнит тот, что предъявит сервер.
+    """
+    address_before = (server.ssh_host, server.ssh_port, server.ssh_user)
     if req.ssh_host is not None:
         server.ssh_host = req.ssh_host.strip() or None
     if req.ssh_port is not None:
@@ -77,6 +83,12 @@ def _store_creds(server: Server, req: SSHAccessRequest) -> None:
         server.ssh_private_key = req.ssh_private_key or None
     if req.ssh_passphrase is not None:
         server.ssh_passphrase = req.ssh_passphrase or None
+
+    secret_sent = any(
+        value is not None for value in (req.ssh_password, req.ssh_private_key, req.ssh_passphrase)
+    )
+    if secret_sent or (server.ssh_host, server.ssh_port, server.ssh_user) != address_before:
+        server.ssh_host_key = None
 
 
 async def _get_server(server_id: int, db: AsyncSession) -> Server:
@@ -169,6 +181,8 @@ async def deliver_image_bulk(
             continue
         if uses_fallback and req.save_creds:
             _store_creds(server, fallback)
+            # Сохранение доступа сбросило закреплённый ключ хоста — цель без него
+            target = resolve_ssh_target(server)
         targets.append((server, target))
 
     if req.save_creds:

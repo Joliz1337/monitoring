@@ -264,7 +264,7 @@ MSG_EN[warp_install_failed]="Failed to install cloudflare-warp. Check Cloudflare
 MSG_EN[warp_svc_limit]="warp-svc memory limit and auto-restart configured"
 MSG_EN[haproxy_branch_selected]="Newest HAProxy LTS branch built for this release"
 MSG_EN[haproxy_key_failed]="Could not verify the HAProxy repository key — repository not added"
-MSG_EN[haproxy_release_unknown]="Could not detect the OS release (no VERSION_CODENAME in /etc/os-release)"
+MSG_EN[os_release_unknown]="Could not detect the OS release (no VERSION_CODENAME in /etc/os-release)"
 MSG_EN[haproxy_repo_unreachable]="The HAProxy repository did not answer from this server"
 MSG_EN[haproxy_no_build]="No official HAProxy LTS build for this OS release"
 MSG_EN[haproxy_fallback_system]="Installing the system HAProxy package"
@@ -309,6 +309,7 @@ MSG_EN[remnawave_template_applied]="Masking template applied"
 MSG_EN[remnawave_template_error]="Failed to download/apply template"
 MSG_EN[remnawave_docker_installing]="Installing Docker..."
 MSG_EN[remnawave_docker_error]="Failed to install Docker"
+MSG_EN[docker_key_failed]="Could not verify the Docker repository key — repository not added"
 MSG_EN[remnawave_starting]="Starting Remnawave containers..."
 MSG_EN[rescue_detected]="Hetzner Rescue System detected"
 MSG_EN[rescue_intro]="No OS is installed yet. A clean Ubuntu 24.04 will be installed to disk."
@@ -448,7 +449,7 @@ MSG_RU[warp_install_failed]="Не удалось установить cloudflare
 MSG_RU[warp_svc_limit]="Ограничение памяти warp-svc и авторестарт настроены"
 MSG_RU[haproxy_branch_selected]="Новейшая LTS-ветка HAProxy, собранная под этот релиз"
 MSG_RU[haproxy_key_failed]="Не удалось проверить ключ репозитория HAProxy — репозиторий не подключён"
-MSG_RU[haproxy_release_unknown]="Не удалось определить релиз системы (нет VERSION_CODENAME в /etc/os-release)"
+MSG_RU[os_release_unknown]="Не удалось определить релиз системы (нет VERSION_CODENAME в /etc/os-release)"
 MSG_RU[haproxy_repo_unreachable]="Репозиторий HAProxy не ответил с этого сервера"
 MSG_RU[haproxy_no_build]="Под этот релиз системы нет официальной LTS-сборки HAProxy"
 MSG_RU[haproxy_fallback_system]="Ставлю системный пакет HAProxy"
@@ -493,6 +494,7 @@ MSG_RU[remnawave_template_applied]="Маскировочный шаблон пр
 MSG_RU[remnawave_template_error]="Не удалось загрузить/применить шаблон"
 MSG_RU[remnawave_docker_installing]="Установка Docker..."
 MSG_RU[remnawave_docker_error]="Не удалось установить Docker"
+MSG_RU[docker_key_failed]="Не удалось проверить ключ репозитория Docker — репозиторий не подключён"
 MSG_RU[remnawave_starting]="Запуск контейнеров Remnawave..."
 MSG_RU[rescue_detected]="Обнаружена Hetzner Rescue System"
 MSG_RU[rescue_intro]="ОС ещё не установлена. На диск будет установлена чистая Ubuntu 24.04."
@@ -821,6 +823,28 @@ apt_install_safe() {
         -o Dpkg::Options::="--force-confold" \
         -o Dpkg::Options::="--force-confdef" \
         $packages
+}
+
+# Ключ стороннего репозитория закреплён отпечатком: в доверенные apt уходит только
+# он, даже если по дороге ключ подменили или подложили лишний. На место файл
+# ключа встаёт только после сверки
+install_pinned_apt_key() {
+    local url="$1" fpr="$2" keyring="$3" gnupg_home
+    command -v gpg &>/dev/null || apt_install_safe gnupg || return 1
+
+    gnupg_home=$(mktemp -d)
+    local rc=1
+    if curl -fsSL --max-time "$TIMEOUT_CURL" "$url" -o "$gnupg_home/key" \
+        && GNUPGHOME="$gnupg_home" gpg --batch --quiet --import "$gnupg_home/key" 2>/dev/null \
+        && GNUPGHOME="$gnupg_home" gpg --batch --with-colons --list-keys 2>/dev/null \
+            | awk -F: '$1 == "fpr" {print $10}' | grep -qx "$fpr" \
+        && GNUPGHOME="$gnupg_home" gpg --batch --export "$fpr" > "$gnupg_home/keyring.gpg" \
+        && [ -s "$gnupg_home/keyring.gpg" ] \
+        && install -D -m 0644 "$gnupg_home/keyring.gpg" "$keyring"; then
+        rc=0
+    fi
+    rm -rf "$gnupg_home"
+    return $rc
 }
 
 # ==================== Core Functions ====================
@@ -1589,10 +1613,15 @@ configure_apt_proxy() {
     [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || { rm -f /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null; return 0; }
 
     mkdir -p /etc/apt/apt.conf.d 2>/dev/null || true
+    # В адресе прокси бывают логин и пароль, а apt.conf.d по умолчанию читают
+    # все: файл заводится закрытым ещё до записи. Drop-in Docker ниже остаётся
+    # 644 — его Environment= systemd и так отдаёт любому через systemctl show
+    install -m 600 /dev/null /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null || true
     cat > /etc/apt/apt.conf.d/99monitoring-proxy << PROXYEOF
 Acquire::http::Proxy "$PROXY_URL";
 Acquire::https::Proxy "$PROXY_URL";
 PROXYEOF
+    chmod 600 /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null || true
 }
 
 configure_docker_proxy() {
@@ -2010,29 +2039,16 @@ haproxy_probe_branch() {
     return 2
 }
 
-# Ключ сборщика закреплён отпечатком: в доверенные apt уходит только он,
-# даже если по дороге ключ подменили или подложили лишний
 haproxy_install_key() {
-    local os_id="$1" url fpr gnupg_home
+    local os_id="$1" url fpr
     case "$os_id" in
         ubuntu) url="https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${HAPROXY_PPA_KEY_FPR}"; fpr="$HAPROXY_PPA_KEY_FPR" ;;
         debian) url="https://haproxy.debian.net/haproxy-archive-keyring.gpg"; fpr="$HAPROXY_HDN_KEY_FPR" ;;
         *) return 1 ;;
     esac
-    command -v gpg &>/dev/null || apt_install_safe gnupg || return 1
-
-    gnupg_home=$(mktemp -d)
-    local rc=1
-    if curl -fsSL --max-time "$TIMEOUT_CURL" "$url" -o "$gnupg_home/key" \
-        && GNUPGHOME="$gnupg_home" gpg --batch --quiet --import "$gnupg_home/key" 2>/dev/null \
-        && GNUPGHOME="$gnupg_home" gpg --batch --with-colons --list-keys 2>/dev/null \
-            | awk -F: '$1 == "fpr" {print $10}' | grep -qx "$fpr"; then
-        mkdir -p "$(dirname "$HAPROXY_KEYRING")"
-        GNUPGHOME="$gnupg_home" gpg --batch --export "$fpr" > "$HAPROXY_KEYRING" && rc=0
-    fi
-    rm -rf "$gnupg_home"
-    [ $rc -eq 0 ] || log_warn "$(msg haproxy_key_failed): $url"
-    return $rc
+    install_pinned_apt_key "$url" "$fpr" "$HAPROXY_KEYRING" && return 0
+    log_warn "$(msg haproxy_key_failed): $url"
+    return 1
 }
 
 # Подключает репозиторий новейшей LTS-ветки под этот релиз и кладёт её в
@@ -2043,7 +2059,7 @@ haproxy_setup_repo() {
     os_id=$(. /etc/os-release 2>/dev/null && echo "${ID:-}")
     codename=$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-}")
     if [ -z "$codename" ]; then
-        log_warn "$(msg haproxy_release_unknown)"
+        log_warn "$(msg os_release_unknown)"
         return 1
     fi
 
@@ -2366,6 +2382,14 @@ remove_node() {
 
 # ==================== Remnawave Installation ====================
 
+DOCKER_APT_KEY_FPR="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+DOCKER_APT_KEYRING="/etc/apt/keyrings/docker.gpg"
+DOCKER_APT_SOURCES="/etc/apt/sources.list.d/docker.list"
+
+# Docker ставится из его apt-репозитория с ключом, закреплённым отпечатком:
+# скрипт get.docker.com исполнялся бы от root как пришёл, без какой-либо сверки.
+# Файрвол установщик не включает и SSH не трогает: при SSH на нестандартном
+# порту включённый здесь UFW отрезал бы оператора от сервера
 install_docker_if_needed() {
     if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         return 0
@@ -2373,26 +2397,33 @@ install_docker_if_needed() {
 
     log_info "$(msg remnawave_docker_installing)"
 
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y >/dev/null 2>&1 || {
-        log_error "Failed to update package list"
+    local os_id codename
+    os_id=$(. /etc/os-release 2>/dev/null && echo "${ID:-}")
+    codename=$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-}")
+    if [ -z "$codename" ]; then
+        log_error "$(msg os_release_unknown)"
         return 1
-    }
+    fi
 
-    apt-get install -y ca-certificates curl wget unzip ufw >/dev/null 2>&1 || {
+    apt_update_safe || log_warn "apt update had issues"
+    apt_install_safe ca-certificates curl wget unzip ufw || {
         log_error "Failed to install base packages"
         return 1
     }
 
-    if ! curl -fsSL https://get.docker.com -o /tmp/get-docker.sh; then
+    install_pinned_apt_key "https://download.docker.com/linux/${os_id}/gpg" \
+        "$DOCKER_APT_KEY_FPR" "$DOCKER_APT_KEYRING" || {
+        log_error "$(msg docker_key_failed)"
+        return 1
+    }
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=${DOCKER_APT_KEYRING}] https://download.docker.com/linux/${os_id} ${codename} stable" \
+        > "$DOCKER_APT_SOURCES"
+
+    apt_update_safe || log_warn "apt update had issues"
+    apt_install_safe docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || {
         log_error "$(msg remnawave_docker_error)"
         return 1
-    fi
-    if ! sh /tmp/get-docker.sh >/dev/null 2>&1; then
-        log_error "$(msg remnawave_docker_error)"
-        return 1
-    fi
-    rm -f /tmp/get-docker.sh
+    }
 
     systemctl start docker >/dev/null 2>&1 || true
     systemctl enable docker >/dev/null 2>&1 || true
@@ -2402,9 +2433,7 @@ install_docker_if_needed() {
         return 1
     fi
 
-    ufw allow 22/tcp >/dev/null 2>&1 || true
     ufw allow 443/tcp >/dev/null 2>&1 || true
-    ufw --force enable >/dev/null 2>&1 || true
 
     log_success "Docker installed"
 }

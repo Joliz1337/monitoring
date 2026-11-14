@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, useCallback, useRef, forwardRef, type ForwardedRef, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, useCallback, useRef, forwardRef, memo, type ForwardedRef, type ReactNode } from 'react'
 import { useOpenIds } from '../hooks/useOpenIds'
 import { useProfileRollout } from '../hooks/useProfileRollout'
+import { useStableHandler } from '../hooks/useStableHandler'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -12,6 +13,7 @@ import { formatBitsPerSec } from '../utils/format'
 import { uniqueCopyName } from '../utils/ruleClone'
 import { copyToClipboard } from '../utils/clipboard'
 import { formatServerLines } from '../utils/haproxyServerLines'
+import { reuseUnchanged } from '../utils/reuseUnchanged'
 import {
   haproxyProfilesApi,
   proxyApi,
@@ -1130,6 +1132,123 @@ const SortableProfileItem = forwardRef(function SortableProfileItem(
 })
 
 
+// ==================== Linked server row ====================
+
+const NO_DNAT_RANGES: PortRange[] = []
+
+const loadColor = (percent: number) => percent < 50 ? 'text-green-400' : percent < 80 ? 'text-yellow-400' : 'text-red-400'
+const formatSpeed = (bitsPerSec: number | null | undefined) => bitsPerSec == null ? '-' : formatBitsPerSec(bitsPerSec)
+
+// Строка привязанного сервера — memo с общими для всех строк обработчиками: опрос статусов
+// перерисовывает только строки, у которых что-то изменилось, а не весь список
+const LinkedServerRow = memo(function LinkedServerRow({
+  profileId, server: s, expanded, syncing, starting, dnatRanges, rulePorts,
+  onToggleExpanded, onStart, onSync, onUnlink, onAddressesSaved,
+}: {
+  profileId: number
+  server: HAProxyServerStatus
+  expanded: boolean
+  syncing: boolean
+  starting: boolean
+  dnatRanges: PortRange[]
+  rulePorts: number[]
+  onToggleExpanded: (serverId: number) => void
+  onStart: (serverId: number) => void
+  onSync: (serverId: number) => void
+  onUnlink: (serverId: number) => void
+  onAddressesSaved: () => void
+}) {
+  const { t } = useTranslation()
+  const m = s.metrics
+  const laPercent = m?.la1 != null && m?.cores ? (m.la1 / m.cores * 100) : null
+  const hasAddresses = s.listen_ips.length > 0 || s.source_ips.length > 0
+
+  // Кнопки строки (запуск, синхронизация, отвязка) делают своё и строку не раскрывают
+  const handleRowClick = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('button')) return
+    onToggleExpanded(s.server_id)
+  }
+
+  return (
+    <div>
+      <div onClick={handleRowClick}
+        className={`flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50 hover:border-dark-700 cursor-pointer transition-colors ${s.online ? '' : 'opacity-60'}`}>
+        <div className="flex items-center gap-2.5 min-w-0">
+          <Tooltip label={t('haproxy_configs.addresses_toggle')}>
+            <button onClick={() => onToggleExpanded(s.server_id)}
+              className="-ml-1 p-1 rounded text-dark-500 hover:text-dark-200 transition-colors">
+              {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+            </button>
+          </Tooltip>
+          {/* Сигнализатор сервера: живой / мёртвый */}
+          <Tooltip label={s.online ? t('haproxy_configs.server_online') : t('haproxy_configs.server_offline')}>
+            <span className="relative flex w-2.5 h-2.5 shrink-0">
+              {s.online && <span className="absolute inline-flex w-full h-full rounded-full bg-green-400/60 animate-ping" />}
+              <span className={`relative inline-flex w-2.5 h-2.5 rounded-full ${s.online ? 'bg-green-400' : 'bg-red-500'}`} />
+            </span>
+          </Tooltip>
+          <span className="text-sm text-dark-200 truncate">{s.server_name}</span>
+          {/* Состояние службы HAProxy на ноде */}
+          {s.online && s.haproxy_running != null && (
+            <Tooltip label={s.haproxy_running ? t('haproxy_configs.haproxy_running') : t('haproxy_configs.haproxy_stopped')}>
+              <Activity className={`w-3.5 h-3.5 shrink-0 ${s.haproxy_running ? 'text-green-400/70' : 'text-red-400/70'}`} />
+            </Tooltip>
+          )}
+          <SyncStatusBadge status={s.sync_status} online={s.online} />
+          <DnatChip ranges={dnatRanges} rulePorts={rulePorts} />
+          {hasAddresses && (
+            <span className="hidden md:inline text-xs font-mono text-dark-400 truncate">
+              {s.listen_ips.length > 0 && `${t('haproxy_configs.addresses_in')} ${s.listen_ips.join(', ')}`}
+              {s.listen_ips.length > 0 && s.source_ips.length > 0 && ' · '}
+              {s.source_ips.length > 0 && `${t('haproxy_configs.addresses_out')} ${s.source_ips.join(', ')}`}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
+          {m && (
+            <div className="hidden sm:flex items-center gap-3 text-xs font-mono">
+              {m.cpu != null && <span><span className="text-dark-500 mr-1">CPU</span><span className={loadColor(m.cpu)}>{m.cpu.toFixed(0)}%</span></span>}
+              {m.ram != null && <span><span className="text-dark-500 mr-1">RAM</span><span className={loadColor(m.ram)}>{m.ram.toFixed(0)}%</span></span>}
+              {laPercent != null && <span><span className="text-dark-500 mr-1">LA</span><span className={loadColor(laPercent)}>{m.la1!.toFixed(2)}</span></span>}
+              {(m.net_rx != null || m.net_tx != null) && <span><span className="text-dark-500 mr-1">NET</span><span className="text-dark-200">↓{formatSpeed(m.net_rx)} ↑{formatSpeed(m.net_tx)}</span></span>}
+            </div>
+          )}
+          <div className="flex items-center gap-1">
+            {s.online && s.haproxy_running === false && (
+              <Tooltip label={t('haproxy_configs.start_haproxy')}>
+                <button onClick={() => onStart(s.server_id)} disabled={starting}
+                  className="p-1.5 rounded-lg text-dark-400 hover:text-green-400 hover:bg-green-500/10 transition-colors disabled:opacity-50">
+                  {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                </button>
+              </Tooltip>
+            )}
+            <Tooltip label={t('haproxy_configs.sync_server')}>
+              <button onClick={() => onSync(s.server_id)} disabled={syncing}
+                className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors">
+                {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+              </button>
+            </Tooltip>
+            <Tooltip label={t('haproxy_configs.unlink_server')}>
+              <button onClick={() => onUnlink(s.server_id)}
+                className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors">
+                <Unlink className="w-4 h-4" />
+              </button>
+            </Tooltip>
+          </div>
+        </div>
+      </div>
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+            <ServerAddressesEditor profileId={profileId} server={s} onSaved={onAddressesSaved} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+})
+
+
 // ==================== Profile Detail Panel (with rules GUI) ====================
 
 function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId: number; portUsage: PortUsageMap; onRefreshList: () => void }) {
@@ -1165,7 +1284,7 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
   const fetchServersStatus = useCallback(async () => {
     try {
       const res = await haproxyProfilesApi.getServersStatus(profileId)
-      setServersStatus(res.data)
+      setServersStatus(prev => reuseUnchanged(prev, res.data))
 
       // Обновить карточку профиля при изменении статусов синхронизации
       const syncKey = res.data.map((s: HAProxyServerStatus) => `${s.server_id}:${s.sync_status}`).join(',')
@@ -1426,20 +1545,14 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
     } catch { toast.error(t('haproxy_configs.link_error')) }
   }
 
-  const toggleServerExpanded = (serverId: number) => {
+  const toggleServerExpanded = useCallback((serverId: number) => {
     setExpandedServers(prev => {
       const next = new Set(prev)
       if (next.has(serverId)) next.delete(serverId)
       else next.add(serverId)
       return next
     })
-  }
-
-  // Кнопки строки (запуск, синхронизация, отвязка) делают своё и строку не раскрывают
-  const handleServerRowClick = (e: React.MouseEvent, serverId: number) => {
-    if ((e.target as HTMLElement).closest('button')) return
-    toggleServerExpanded(serverId)
-  }
+  }, [])
 
   const handleAddressesSaved = () => { fetchServersStatus(); onRefreshList() }
 
@@ -1459,8 +1572,13 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
   }
   const toggleLog = () => { if (!showLog) fetchLog(); setShowLog(!showLog) }
 
+  const startFromRow = useStableHandler(handleStartHaproxy)
+  const syncFromRow = useStableHandler(handleSyncOne)
+  const unlinkFromRow = useStableHandler(handleUnlinkServer)
+  const addressesSavedFromRow = useStableHandler(handleAddressesSaved)
+
   const unlinkedServers = availableServers.filter(s => s.active_profile_id !== profileId)
-  const rulePorts = rules.map(r => r.listen_port)
+  const rulePorts = useMemo(() => rules.map(r => r.listen_port), [rules])
   const dnatServers = useMemo<ServerRanges[]>(
     () => serversStatus
       .map(s => ({ name: s.server_name, ranges: portUsage[s.server_id]?.dnat_ranges ?? [] }))
@@ -1788,96 +1906,23 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
             <div className="text-center text-dark-500 text-sm py-6 bg-dark-900/30 rounded-lg border border-dark-800/50">{t('haproxy_configs.no_servers')}</div>
           ) : (
             <div className="space-y-1.5">
-              {serversStatus.map(s => {
-                const m = s.metrics
-                const fmtSpeed = (v: number | null | undefined) => {
-                  if (v == null) return '-'
-                  return formatBitsPerSec(v)
-                }
-                const laPercent = m?.la1 != null && m?.cores ? (m.la1 / m.cores * 100) : null
-                const expanded = expandedServers.has(s.server_id)
-                const hasAddresses = s.listen_ips.length > 0 || s.source_ips.length > 0
-                return (
-                  <div key={s.server_id}>
-                    <div onClick={e => handleServerRowClick(e, s.server_id)}
-                      className={`flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50 hover:border-dark-700 cursor-pointer transition-colors ${s.online ? '' : 'opacity-60'}`}>
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <Tooltip label={t('haproxy_configs.addresses_toggle')}>
-                          <button onClick={() => toggleServerExpanded(s.server_id)}
-                            className="-ml-1 p-1 rounded text-dark-500 hover:text-dark-200 transition-colors">
-                            {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                          </button>
-                        </Tooltip>
-                        {/* Сигнализатор сервера: живой / мёртвый */}
-                        <Tooltip label={s.online ? t('haproxy_configs.server_online') : t('haproxy_configs.server_offline')}>
-                          <span className="relative flex w-2.5 h-2.5 shrink-0">
-                            {s.online && <span className="absolute inline-flex w-full h-full rounded-full bg-green-400/60 animate-ping" />}
-                            <span className={`relative inline-flex w-2.5 h-2.5 rounded-full ${s.online ? 'bg-green-400' : 'bg-red-500'}`} />
-                          </span>
-                        </Tooltip>
-                        <span className="text-sm text-dark-200 truncate">{s.server_name}</span>
-                        {/* Состояние службы HAProxy на ноде */}
-                        {s.online && s.haproxy_running != null && (
-                          <Tooltip label={s.haproxy_running ? t('haproxy_configs.haproxy_running') : t('haproxy_configs.haproxy_stopped')}>
-                            <Activity className={`w-3.5 h-3.5 shrink-0 ${s.haproxy_running ? 'text-green-400/70' : 'text-red-400/70'}`} />
-                          </Tooltip>
-                        )}
-                        <SyncStatusBadge status={s.sync_status} online={s.online} />
-                        {dnatChip(s.server_id)}
-                        {hasAddresses && (
-                          <span className="hidden md:inline text-xs font-mono text-dark-400 truncate">
-                            {s.listen_ips.length > 0 && `${t('haproxy_configs.addresses_in')} ${s.listen_ips.join(', ')}`}
-                            {s.listen_ips.length > 0 && s.source_ips.length > 0 && ' · '}
-                            {s.source_ips.length > 0 && `${t('haproxy_configs.addresses_out')} ${s.source_ips.join(', ')}`}
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-3 shrink-0">
-                        {m && (() => {
-                          const pctColor = (v: number) => v < 50 ? 'text-green-400' : v < 80 ? 'text-yellow-400' : 'text-red-400'
-                          return (
-                            <div className="hidden sm:flex items-center gap-3 text-xs font-mono">
-                              {m.cpu != null && <span><span className="text-dark-500 mr-1">CPU</span><span className={pctColor(m.cpu)}>{m.cpu.toFixed(0)}%</span></span>}
-                              {m.ram != null && <span><span className="text-dark-500 mr-1">RAM</span><span className={pctColor(m.ram)}>{m.ram.toFixed(0)}%</span></span>}
-                              {laPercent != null && <span><span className="text-dark-500 mr-1">LA</span><span className={pctColor(laPercent)}>{m.la1!.toFixed(2)}</span></span>}
-                              {(m.net_rx != null || m.net_tx != null) && <span><span className="text-dark-500 mr-1">NET</span><span className="text-dark-200">↓{fmtSpeed(m.net_rx)} ↑{fmtSpeed(m.net_tx)}</span></span>}
-                            </div>
-                          )
-                        })()}
-                        <div className="flex items-center gap-1">
-                          {s.online && s.haproxy_running === false && (
-                            <Tooltip label={t('haproxy_configs.start_haproxy')}>
-                              <button onClick={() => handleStartHaproxy(s.server_id)} disabled={startingServerId === s.server_id}
-                                className="p-1.5 rounded-lg text-dark-400 hover:text-green-400 hover:bg-green-500/10 transition-colors disabled:opacity-50">
-                                {startingServerId === s.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                              </button>
-                            </Tooltip>
-                          )}
-                          <Tooltip label={t('haproxy_configs.sync_server')}>
-                            <button onClick={() => handleSyncOne(s.server_id)} disabled={syncingServerId === s.server_id}
-                              className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors">
-                              {syncingServerId === s.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                            </button>
-                          </Tooltip>
-                          <Tooltip label={t('haproxy_configs.unlink_server')}>
-                            <button onClick={() => handleUnlinkServer(s.server_id)}
-                              className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors">
-                              <Unlink className="w-4 h-4" />
-                            </button>
-                          </Tooltip>
-                        </div>
-                      </div>
-                    </div>
-                    <AnimatePresence initial={false}>
-                      {expanded && (
-                        <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
-                          <ServerAddressesEditor profileId={profileId} server={s} onSaved={handleAddressesSaved} />
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </div>
-                )
-              })}
+              {serversStatus.map(s => (
+                <LinkedServerRow
+                  key={s.server_id}
+                  profileId={profileId}
+                  server={s}
+                  expanded={expandedServers.has(s.server_id)}
+                  syncing={syncingServerId === s.server_id}
+                  starting={startingServerId === s.server_id}
+                  dnatRanges={portUsage[s.server_id]?.dnat_ranges ?? NO_DNAT_RANGES}
+                  rulePorts={rulePorts}
+                  onToggleExpanded={toggleServerExpanded}
+                  onStart={startFromRow}
+                  onSync={syncFromRow}
+                  onUnlink={unlinkFromRow}
+                  onAddressesSaved={addressesSavedFromRow}
+                />
+              ))}
             </div>
           )}
         </div>
@@ -2000,7 +2045,7 @@ export default function HAProxyConfigs() {
     const generation = listGeneration.current
     try {
       const res = await haproxyProfilesApi.getProfiles()
-      if (generation === listGeneration.current) setProfiles(res.data)
+      if (generation === listGeneration.current) setProfiles(prev => reuseUnchanged(prev, res.data))
     } catch {
       if (!initialLoadDone.current) toast.error(t('haproxy_configs.fetch_error'))
     } finally {
@@ -2010,8 +2055,9 @@ export default function HAProxyConfigs() {
 
   useEffect(() => { fetchProfiles() }, [fetchProfiles])
 
+  // В скрытой вкладке бэкенд не дёргаем
   useEffect(() => {
-    const id = setInterval(fetchProfiles, 3000)
+    const id = setInterval(() => { if (!document.hidden) fetchProfiles() }, 3000)
     return () => clearInterval(id)
   }, [fetchProfiles])
 

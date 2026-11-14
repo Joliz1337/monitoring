@@ -376,10 +376,15 @@ class BlocklistManager:
         # Списки по URL — про тех, кто приходит к нодам (CDN): только входящие
         listed = {"in": await get_allowlist_sources().collect()}
 
-        ips = {
-            direction: self.deduplicate_ips(sorted(auto.union(manual[direction], listed.get(direction, ()))))
-            for direction in DIRECTIONS
-        }
+        def merged() -> dict[str, list[str]]:
+            return {
+                direction: self.deduplicate_ips(sorted(auto.union(manual[direction], listed.get(direction, ()))))
+                for direction in DIRECTIONS
+            }
+
+        # Сортировка и нормализация тысяч адресов — в поток: на парке в 2000 нод
+        # они держали event loop десятую долю секунды на каждую сборку
+        ips = await asyncio.to_thread(merged)
         blocked = frozenset(row.id for row in servers if ping_scope.covers(row.id, row.folder))
         return AllowPolicy(ips=ips, ping_scope=ping_scope, ping_blocked_ids=blocked)
     

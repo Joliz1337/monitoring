@@ -1,8 +1,9 @@
-"""AdaptiveTtlCache: дорогой расчёт один на всех, а результат живёт тем дольше, чем дороже он обошёлся.
+"""AdaptiveTtlCache: дорогой расчёт один на всех, живёт тем дольше, чем дороже обошёлся, а пересчитывается в фоне.
 
 Разбор /proc/net/tcp на ноде с сотнями тысяч сокетов — доли секунды чистого
-Python на каждый опрос панели, а пересекающиеся опросы запускали его ещё и
-параллельно. Тихой ноде при этом нужна прежняя свежесть в 5 секунд.
+Python на каждый опрос панели, а на миллионе сокетов — секунды: опрос с прошлым
+срезом на руках ждать их не должен. Тихой ноде при этом нужна прежняя свежесть
+в 5 секунд.
 
 Запуск без psutil и без Linux, из node/:  python -m unittest discover -s tests -p "test_*.py"
 """
@@ -12,6 +13,7 @@ import os
 import sys
 import threading
 import unittest
+from typing import Callable
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -21,6 +23,11 @@ from app.services.adaptive_cache import AdaptiveTtlCache  # noqa: E402
 WAIT_SEC = 5.0
 # Сколько даётся второму потоку, чтобы дойти до кэша, прежде чем разбор отпустят
 SETTLE_SEC = 0.1
+
+
+def run_at_once(job: Callable[[], None]) -> None:
+    """Фоновый пересчёт без потока: к возврату из get() он уже отработал."""
+    job()
 
 
 class FakeClock:
@@ -46,55 +53,63 @@ class FakeParse:
 
 
 class LifetimeTests(unittest.TestCase):
+    """Просроченный срез вызов всё равно получает — срок жизни виден по числу разборов."""
 
     def setUp(self):
         self.clock = FakeClock()
 
-    def cache_of(self, parse_seconds: float) -> AdaptiveTtlCache:
-        return AdaptiveTtlCache(FakeParse(self.clock, parse_seconds), clock=self.clock)
+    def cached(self, parse_seconds: float) -> tuple[AdaptiveTtlCache, FakeParse]:
+        parse = FakeParse(self.clock, parse_seconds)
+        return AdaptiveTtlCache(parse, clock=self.clock, spawn=run_at_once), parse
 
     def test_cheap_parse_is_repeated_after_five_seconds(self):
-        cache = self.cache_of(parse_seconds=0.125)
+        cache, parse = self.cached(parse_seconds=0.125)
         self.assertEqual(cache.get(), 1)
 
         self.clock.now += 4.75
-        self.assertEqual(cache.get(), 1)
+        self.assertEqual((cache.get(), parse.runs), (1, 1))
 
         self.clock.now += 0.25
+        self.assertEqual((cache.get(), parse.runs), (1, 2))
         self.assertEqual(cache.get(), 2)
 
     def test_one_second_parse_is_not_repeated_for_twenty_seconds(self):
-        cache = self.cache_of(parse_seconds=1.0)
+        cache, parse = self.cached(parse_seconds=1.0)
         self.assertEqual(cache.get(), 1)
 
         self.clock.now += 19.5
-        self.assertEqual(cache.get(), 1)
+        self.assertEqual((cache.get(), parse.runs), (1, 1))
 
         self.clock.now += 0.5
+        self.assertEqual((cache.get(), parse.runs), (1, 2))
         self.assertEqual(cache.get(), 2)
 
     def test_lifetime_of_a_very_slow_parse_is_capped_at_a_minute(self):
-        cache = self.cache_of(parse_seconds=10.0)
+        cache, parse = self.cached(parse_seconds=10.0)
         self.assertEqual(cache.get(), 1)
 
         self.clock.now += 59.5
-        self.assertEqual(cache.get(), 1)
+        self.assertEqual((cache.get(), parse.runs), (1, 1))
 
         self.clock.now += 0.5
+        self.assertEqual((cache.get(), parse.runs), (1, 2))
         self.assertEqual(cache.get(), 2)
 
     def test_lifetime_follows_the_latest_parse(self):
         # Сокетов стало меньше, разбор подешевел — свежесть возвращается к пяти секундам
-        parse = FakeParse(self.clock, seconds=1.0)
-        cache = AdaptiveTtlCache(parse, clock=self.clock)
+        cache, parse = self.cached(parse_seconds=1.0)
         cache.get()
         parse.seconds = 0.125
         self.clock.now += 20.0
-        self.assertEqual(cache.get(), 2)
+        cache.get()
+        self.assertEqual(parse.runs, 2)
 
-        self.clock.now += 5.0
+        self.clock.now += 4.75
+        self.assertEqual((cache.get(), parse.runs), (2, 2))
 
-        self.assertEqual(cache.get(), 3)
+        self.clock.now += 0.25
+        cache.get()
+        self.assertEqual(parse.runs, 3)
 
 
 class BlockingParse:
@@ -117,9 +132,15 @@ class SingleFlightTests(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock()
         self.parse = BlockingParse()
-        self.cache = AdaptiveTtlCache(self.parse, clock=self.clock)
+        self.refreshes: list[threading.Thread] = []
+        self.cache = AdaptiveTtlCache(self.parse, clock=self.clock, spawn=self.refresh_in_thread)
         # Упавший тест не должен оставить потоки висеть на разборе
         self.addCleanup(self.parse.release.set)
+
+    def refresh_in_thread(self, job: Callable[[], None]) -> None:
+        thread = threading.Thread(target=job, daemon=True)
+        self.refreshes.append(thread)
+        thread.start()
 
     def get_in_thread(self) -> tuple[threading.Thread, list[int]]:
         received: list[int] = []
@@ -140,47 +161,84 @@ class SingleFlightTests(unittest.TestCase):
         first.join(WAIT_SEC)
         second.join(WAIT_SEC)
         self.assertEqual(first_received + second_received, [1, 1])
+        # Первый вызов считает сам: фоновому пересчёту нечего было бы отдать ждущим
+        self.assertEqual(self.refreshes, [])
 
-    def test_stale_value_is_served_while_a_refresh_is_running(self):
+    def test_expired_value_is_returned_at_once_while_the_parse_runs_in_the_background(self):
         self.parse.release.set()
         self.assertEqual(self.cache.get(), 1)
         self.parse.release.clear()
         self.parse.started.clear()
         self.clock.now += 5.0
 
-        refresher, refreshed = self.get_in_thread()
-        self.assertTrue(self.parse.started.wait(WAIT_SEC))
-        # Опрос панели не ждёт чужой разбор и не запускает третий: берёт прошлый срез
+        # Разбор стоит до release — вызов, считай он сам, простоял бы вместе с ним
         self.assertEqual(self.cache.get(), 1)
+        self.assertTrue(self.parse.started.wait(WAIT_SEC))
+        # Следующий опрос не запускает второй разбор поверх идущего
+        self.assertEqual(self.cache.get(), 1)
+        self.assertEqual(len(self.refreshes), 1)
 
         self.parse.release.set()
-        refresher.join(WAIT_SEC)
-        self.assertEqual(refreshed, [2])
+        self.refreshes[0].join(WAIT_SEC)
         self.assertEqual(self.cache.get(), 2)
 
 
 class FailedParseTests(unittest.TestCase):
 
-    def test_failed_refresh_is_reported_and_retried_by_the_next_call(self):
-        clock = FakeClock()
-        outcomes = iter(["first table", OSError("/proc/net/tcp is unreadable"), "third table"])
+    def setUp(self):
+        self.clock = FakeClock()
 
-        def parse() -> str:
-            outcome = next(outcomes)
+    def cache_of(self, *outcomes: object, spawn: Callable = run_at_once) -> AdaptiveTtlCache:
+        remaining = iter(outcomes)
+
+        def parse() -> object:
+            outcome = next(remaining)
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
 
-        cache = AdaptiveTtlCache(parse, clock=clock)
-        self.assertEqual(cache.get(), "first table")
-        clock.now += 5.0
+        return AdaptiveTtlCache(parse, clock=self.clock, spawn=spawn)
+
+    def test_failed_first_parse_is_raised_and_retried_by_the_next_call(self):
+        cache = self.cache_of(OSError("/proc/net/tcp is unreadable"), "second table")
 
         with self.assertRaises(OSError):
             cache.get()
 
-        # Ошибка не запоминается, и несостоявшийся разбор не считается идущим:
-        # иначе прошлый срез отдавался бы как свежий до перезапуска агента
+        self.assertEqual(cache.get(), "second table")
+
+    def test_failed_refresh_keeps_the_previous_value_and_is_retried_by_the_next_call(self):
+        cache = self.cache_of("first table", OSError("/proc/net/tcp is unreadable"), "third table")
+        self.assertEqual(cache.get(), "first table")
+        self.clock.now += 5.0
+
+        # Ошибку фонового разбора отдать некому — она уходит в журнал
+        with self.assertLogs("app.services.adaptive_cache", level="ERROR"):
+            self.assertEqual(cache.get(), "first table")
+
+        # Несостоявшийся разбор не считается идущим: иначе прошлый срез
+        # отдавался бы как обновляемый до перезапуска агента
+        self.assertEqual(cache.get(), "first table")
         self.assertEqual(cache.get(), "third table")
+
+    def test_refresh_that_could_not_start_is_retried_by_the_next_call(self):
+        attempts: list[Callable[[], None]] = []
+
+        def spawn(job: Callable[[], None]) -> None:
+            attempts.append(job)
+            if len(attempts) == 1:
+                raise RuntimeError("can't start new thread")
+            job()
+
+        cache = self.cache_of("first table", "second table", spawn=spawn)
+        self.assertEqual(cache.get(), "first table")
+        self.clock.now += 5.0
+
+        with self.assertLogs("app.services.adaptive_cache", level="ERROR"):
+            self.assertEqual(cache.get(), "first table")
+
+        self.assertEqual(cache.get(), "first table")
+        self.assertEqual(cache.get(), "second table")
 
 
 if __name__ == "__main__":

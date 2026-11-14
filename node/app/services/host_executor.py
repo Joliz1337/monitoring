@@ -7,6 +7,9 @@ Requires container to run with: privileged: true, pid: host
 import asyncio
 import json
 import logging
+import os
+import signal
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Optional, AsyncGenerator
@@ -18,6 +21,10 @@ logger = logging.getLogger(__name__)
 # Maximum allowed timeout (10 minutes)
 MAX_TIMEOUT = 600
 DEFAULT_TIMEOUT = 30
+
+# asyncio отдаёт wait() только после закрытия stdout/stderr команды, а потомок,
+# ушедший в свою сессию (setsid), держит их и после гибели группы
+REAP_TIMEOUT = 5
 
 # Extended PATH to include common binary locations (snap, local bins, etc.)
 EXTENDED_PATH = "/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -32,6 +39,28 @@ class ExecuteResult:
     stderr: str
     execution_time_ms: int
     error: Optional[str] = None
+
+
+def _kill_process_group(pid: int) -> None:
+    """SIGKILL всему дереву команды, а не одному nsenter.
+
+    Команда — потомок nsenter (с -p он форкается) и после его смерти жила дальше:
+    держала блокировку xtables или dpkg и открытые stdout/stderr, из-за которых
+    не возвращался и сам вызов. Процесс запускается лидером своей сессии, так
+    что его группа — всё дерево, кроме ушедших в другую сессию (setsid, systemd-run).
+    """
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
+    _kill_process_group(process.pid)
+    try:
+        await asyncio.wait_for(process.wait(), timeout=REAP_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning(f"Process {process.pid} is killed, but a detached child still holds its output pipes")
 
 
 class HostExecutor:
@@ -101,17 +130,17 @@ class HostExecutor:
                 *cmd,
                 stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else None,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
-            
+
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(stdin_bytes),
                     timeout=timeout
                 )
             except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+                await _kill_and_reap(process)
                 execution_time = int((time.time() - start_time) * 1000)
                 logger.warning(f"Command timed out after {timeout}s: {log_label or command[:50]}")
                 return ExecuteResult(
@@ -204,9 +233,10 @@ class HostExecutor:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
-            
+
             deadline = time.time() + timeout
             merged_queue: asyncio.Queue = asyncio.Queue()
             
@@ -234,8 +264,7 @@ class HostExecutor:
                 if remaining <= 0:
                     stdout_task.cancel()
                     stderr_task.cancel()
-                    process.kill()
-                    await process.wait()
+                    await _kill_and_reap(process)
                     execution_time = int((time.time() - start_time) * 1000)
                     logger.warning(f"Command timed out after {timeout}s: {command[:50]}")
                     yield format_sse("error", {"message": f"Command timed out after {timeout} seconds"})
@@ -288,8 +317,6 @@ class HostExecutor:
         """
         Synchronous version of execute for use in non-async contexts.
         """
-        import subprocess
-        
         timeout = min(max(1, timeout), MAX_TIMEOUT)
         
         # Wrap command with extended PATH
@@ -308,32 +335,39 @@ class HostExecutor:
         try:
             logger.info(f"Executing on host (sync): {command[:100]}{'...' if len(command) > 100 else ''}")
             
-            result = subprocess.run(
+            # На выходе из with каналы закрываются без дочитывания: после таймаута
+            # ждать EOF от потомка, пережившего группу, было бы зависанием
+            with subprocess.Popen(
                 cmd,
-                capture_output=True,
-                timeout=timeout
-            )
-            
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            ) as process:
+                try:
+                    stdout, stderr = process.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    _kill_process_group(process.pid)
+                    execution_time = int((time.time() - start_time) * 1000)
+                    logger.warning(f"Command timed out after {timeout}s: {command[:50]}")
+                    return ExecuteResult(
+                        success=False,
+                        exit_code=-1,
+                        stdout="",
+                        stderr="",
+                        execution_time_ms=execution_time,
+                        error=f"Command timed out after {timeout} seconds"
+                    )
+
             execution_time = int((time.time() - start_time) * 1000)
-            
+
             return ExecuteResult(
-                success=result.returncode == 0,
-                exit_code=result.returncode,
-                stdout=result.stdout.decode('utf-8', errors='replace').strip(),
-                stderr=result.stderr.decode('utf-8', errors='replace').strip(),
+                success=process.returncode == 0,
+                exit_code=process.returncode,
+                stdout=stdout.decode('utf-8', errors='replace').strip(),
+                stderr=stderr.decode('utf-8', errors='replace').strip(),
                 execution_time_ms=execution_time
             )
-            
-        except subprocess.TimeoutExpired:
-            execution_time = int((time.time() - start_time) * 1000)
-            return ExecuteResult(
-                success=False,
-                exit_code=-1,
-                stdout="",
-                stderr="",
-                execution_time_ms=execution_time,
-                error=f"Command timed out after {timeout} seconds"
-            )
+
         except Exception as e:
             execution_time = int((time.time() - start_time) * 1000)
             return ExecuteResult(

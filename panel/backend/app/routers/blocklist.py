@@ -32,9 +32,8 @@ router = APIRouter(prefix="/blocklist", tags=["blocklist"])
 
 
 # Per-(server_id, direction) кэш для GET /blocklist/server/{id}.
-# При 100 серверах фронт открывает страницу и шлёт 200 параллельных запросов
-# (in+out на каждый сервер) — кэш с per-key lock защищает БД от лавины и
-# сериализует дублирующие запросы к одному ключу.
+# Страница запрашивает правила при каждом раскрытии карточки сервера (in+out) —
+# кэш с per-key lock сериализует дублирующие запросы к одному ключу.
 SERVER_RULES_CACHE_TTL_SEC = 15.0
 
 _server_rules_cache: dict[tuple[int, str], tuple[float, dict]] = {}
@@ -315,7 +314,7 @@ async def manager_sync_single(server_id: int):
 async def _build_server_rules_payload(
     db: AsyncSession, server_id: int, direction: str
 ) -> dict:
-    # Страница запрашивает это по два раза на каждый сервер парка: строка сервера
+    # Страница запрашивает это по два раза на каждую раскрытую карточку: строка сервера
     # с метриками и все глобальные правила ради одного числа здесь не нужны
     result = await db.execute(select(Server.id).where(Server.id == server_id))
     if result.scalar_one_or_none() is None:
@@ -388,6 +387,29 @@ async def get_server_rules(
             payload,
         )
         return payload
+
+
+@router.get("/servers/summary")
+async def get_servers_rules_summary(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(verify_auth)
+):
+    """Счётчики правил по всем серверам сразу: страница показывает их на закрытых
+    карточках, а сами списки запрашивает только у раскрытой."""
+    result = await db.execute(
+        select(BlocklistRule.server_id, BlocklistRule.direction, func.count())
+        .where(BlocklistRule.direction.in_(("in", "out")))
+        .group_by(BlocklistRule.server_id, BlocklistRule.direction)
+    )
+    global_counts = {"in": 0, "out": 0}
+    servers: dict[int, dict[str, int]] = {}
+    for server_id, direction, count in result.all():
+        if server_id is None:
+            global_counts[direction] = count
+        else:
+            servers.setdefault(server_id, {"in": 0, "out": 0})[direction] = count
+    # Серверов без собственных правил в ответе нет — на парке в тысячи нод их большинство
+    return {"global": global_counts, "servers": servers}
 
 
 @router.post("/server/{server_id}")

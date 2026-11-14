@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urlsplit
 
+import aiohttp
 import httpx
 
 if TYPE_CHECKING:
@@ -40,6 +41,18 @@ _EXTERNAL_LIMITS = httpx.Limits(
 _NODE_TIMEOUT = httpx.Timeout(connect=2.0, read=10.0, write=2.0, pool=2.0)
 _EXTERNAL_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
 
+# Опрос метрик идёт мимо клиентов httpx, одной сессией aiohttp на весь парк: тот же
+# запрос через httpx стоит втрое больше процессора (0,90 мс против 0,27 мс), а опрос
+# 2000 нод каждые 10 секунд — половина процессорного времени цикла сбора.
+# connect у aiohttp — вся фаза соединения: DNS, TCP и TLS-рукопожатие. У httpx TCP и
+# TLS получают по _NODE_TIMEOUT.connect каждый, поэтому здесь их сумма. Отдельного
+# срока на один TCP у aiohttp нет: sock_connect включает и рукопожатие, и с ним
+# далёкая или нагруженная нода не успевала бы подключиться.
+_METRICS_TIMEOUT = aiohttp.ClientTimeout(
+    total=None, connect=2 * _NODE_TIMEOUT.connect, sock_read=_NODE_TIMEOUT.read
+)
+_METRICS_CONNECTIONS_PER_NODE = 2
+
 # Долгие apply-запросы (firewall/haproxy profile apply) идут своим клиентом с read=300s,
 # чтобы не занимать соединения, по которым опрашиваются метрики.
 _APPLY_TIMEOUT = httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=5.0)
@@ -51,10 +64,11 @@ _PROXY_APPLY_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections
 NODE_CLIENT_IDLE_TTL = 900.0
 PRUNE_INTERVAL = 60.0
 
-# Keep-alive соединение на каждую ноду — это дескриптор на ноду, а мягкий лимит
-# в контейнере бывает 1024
+# Keep-alive соединения — это дескрипторы на каждую ноду: одно у опроса метрик,
+# до двух у клиента коротких запросов и одно у apply-клиента. Мягкий лимит
+# в контейнере бывает 1024; порог предупреждения — 2000 нод с двойным запасом
 OPEN_FILES_TARGET = 65536
-OPEN_FILES_COMFORTABLE = 8192
+OPEN_FILES_COMFORTABLE = 16384
 
 _monotonic = time.monotonic
 
@@ -70,6 +84,7 @@ _node_clients: dict[tuple[str, bool, bool], _NodeClient] = {}
 _last_prune_at: float = 0.0
 _closing_tasks: set[asyncio.Task] = set()
 _external_client: httpx.AsyncClient | None = None
+_metrics_session: aiohttp.ClientSession | None = None
 _cert_tmpdir: Path | None = None
 _mtls_ctx: ssl.SSLContext | None = None
 _legacy_ctx: ssl.SSLContext | None = None
@@ -250,7 +265,8 @@ def _prune_idle_clients(now: float) -> None:
     task.add_done_callback(_closing_tasks.discard)
 
 
-def _direct_node_client(server: "Server", *, apply: bool) -> httpx.AsyncClient:
+def node_ssl_context(server: "Server") -> ssl.SSLContext:
+    """TLS-контекст прямого соединения с нодой: mTLS либо legacy без проверки сертификата."""
     mtls = bool(getattr(server, "pki_enabled", False))
     ctx = _mtls_ctx if mtls else _legacy_ctx
     if ctx is None:
@@ -258,6 +274,12 @@ def _direct_node_client(server: "Server", *, apply: bool) -> httpx.AsyncClient:
             "mTLS http client is not initialized — PKI keygen missing at startup" if mtls
             else "Legacy http client not initialized — call init_http_clients() first"
         )
+    return ctx
+
+
+def _direct_node_client(server: "Server", *, apply: bool) -> httpx.AsyncClient:
+    mtls = bool(getattr(server, "pki_enabled", False))
+    ctx = node_ssl_context(server)
 
     now = _monotonic()
     _prune_idle_clients(now)
@@ -270,8 +292,25 @@ def _direct_node_client(server: "Server", *, apply: bool) -> httpx.AsyncClient:
     return entry.client
 
 
+def _new_metrics_session() -> aiohttp.ClientSession:
+    # Общего лимита соединений нет: параллельность опроса задаёт коллектор,
+    # а соединение между опросами у каждой ноды своё
+    connector = aiohttp.TCPConnector(
+        limit=0,
+        limit_per_host=_METRICS_CONNECTIONS_PER_NODE,
+        keepalive_timeout=_NODE_LIMITS.keepalive_expiry,
+    )
+    return aiohttp.ClientSession(
+        connector=connector,
+        timeout=_METRICS_TIMEOUT,
+        cookie_jar=aiohttp.DummyCookieJar(),
+        # Тело распаковывает metrics_request — с потолком на размер
+        auto_decompress=False,
+    )
+
+
 async def init_http_clients(keygen: "PKIKeygenData | None" = None) -> None:
-    global _external_client, _cert_tmpdir, _mtls_ctx, _legacy_ctx, _last_prune_at
+    global _external_client, _metrics_session, _cert_tmpdir, _mtls_ctx, _legacy_ctx, _last_prune_at
 
     _raise_open_files_limit()
     _last_prune_at = 0.0
@@ -290,10 +329,11 @@ async def init_http_clients(keygen: "PKIKeygenData | None" = None) -> None:
         follow_redirects=True,
         http2=True,
     )
+    _metrics_session = _new_metrics_session()
 
 
 async def close_http_clients() -> None:
-    global _external_client, _cert_tmpdir, _mtls_ctx, _legacy_ctx
+    global _external_client, _metrics_session, _cert_tmpdir, _mtls_ctx, _legacy_ctx
     # Клиенты держат ссылку на mTLS-контекст — закрываем до его сброса
     # (restore бэкапа делает close+init, старый контекст не должен пережить рестарт клиентов)
     node_clients = [entry.client for entry in _node_clients.values()]
@@ -301,6 +341,9 @@ async def close_http_clients() -> None:
     await _close_clients([*node_clients, *_proxy_clients.values(), *_external_proxy_clients.values()])
     _proxy_clients.clear()
     _external_proxy_clients.clear()
+    if _metrics_session is not None:
+        await _metrics_session.close()
+        _metrics_session = None
     _mtls_ctx = None
     _legacy_ctx = None
     if _external_client:
@@ -319,6 +362,13 @@ def get_node_client(server: "Server") -> httpx.AsyncClient:
             proxy_raw, mtls=bool(getattr(server, "pki_enabled", False)), apply=False
         )
     return _direct_node_client(server, apply=False)
+
+
+def get_metrics_session() -> aiohttp.ClientSession:
+    """Сессия опроса метрик у нод, к которым панель ходит напрямую."""
+    if _metrics_session is None:
+        raise RuntimeError("HTTP clients not initialized — call init_http_clients() first")
+    return _metrics_session
 
 
 def get_node_apply_client(server: "Server") -> httpx.AsyncClient:

@@ -5,6 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import event, text
 
@@ -13,6 +14,12 @@ from app import crypto
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# Транзакция, брошенная открытой, держит блокировки строк и не даёт VACUUM
+# чистить историю — такое соединение PostgreSQL рвёт сам
+IDLE_IN_TRANSACTION_TIMEOUT_MS = 10 * 60 * 1000
+# Потолок одного SQL-запроса из API. Фоновые задачи и миграции не ограничены
+API_STATEMENT_TIMEOUT_MS = 120 * 1000
 
 # PostgreSQL engine with connection pool sized for concurrent background tasks
 pool_size = 40
@@ -24,9 +31,30 @@ engine = create_async_engine(
     pool_pre_ping=True,
     pool_recycle=3600,
     pool_timeout=30,
+    connect_args={
+        "server_settings": {"idle_in_transaction_session_timeout": str(IDLE_IN_TRANSACTION_TIMEOUT_MS)},
+    },
 )
 
-async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+class PanelSession(AsyncSession):
+    """Сессия, которая спокойно закрывается на уже оборванном соединении.
+
+    Транзакцию, простоявшую открытой дольше IDLE_IN_TRANSACTION_TIMEOUT_MS, PostgreSQL
+    рвёт вместе с соединением. Откатывать после этого нечего, а исключение из
+    close() на выходе из `async with` пропустило бы код после блока, хотя
+    сессией к тому моменту никто не пользуется."""
+
+    async def close(self) -> None:
+        try:
+            await super().close()
+        except DBAPIError as e:
+            if not e.connection_invalidated:
+                raise
+            logger.warning(f"Session closed on a connection the database had already dropped: {e.orig}")
+
+
+async_session = async_sessionmaker(engine, class_=PanelSession, expire_on_commit=False)
 
 # Alias for background tasks
 async_session_maker = async_session
@@ -274,7 +302,17 @@ async def run_migrations(conn):
             logger.info("Added column: remnawave_settings.ignored_user_ids")
         except Exception:
             pass
-    
+
+    if remnawave_settings_columns and "verify_tls" not in remnawave_settings_columns:
+        try:
+            await conn.execute(text(
+                'ALTER TABLE remnawave_settings ADD COLUMN "verify_tls" BOOLEAN NOT NULL DEFAULT TRUE'
+            ))
+            logger.info("Added column: remnawave_settings.verify_tls")
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.warning(f"Could not add remnawave_settings.verify_tls: {e}")
+
     # Пер-раздельных retention-колонок здесь больше не заводится: их удаляет
     # _migrate_simplify_remnawave в том же init_db(), и пара «добавить → удалить»
     # выполнялась восемью ALTER TABLE при каждом старте панели.
@@ -635,6 +673,7 @@ async def run_migrations(conn):
             ("ssh_password", "TEXT"),
             ("ssh_private_key", "TEXT"),
             ("ssh_passphrase", "TEXT"),
+            ("ssh_host_key", "TEXT"),
         ]
         for col_name, col_type in image_delivery_columns:
             if col_name not in columns:
@@ -1709,7 +1748,7 @@ async def _migrate_remnawave_anomaly_settings(conn):
 
     new_cols = {
         "anomaly_enabled": "BOOLEAN DEFAULT FALSE",
-        "anomaly_tg_bot_token": "VARCHAR(200)",
+        "anomaly_tg_bot_token": "TEXT",
         "anomaly_tg_chat_id": "VARCHAR(100)",
         "anomaly_ignore_ip": "TEXT",
         "anomaly_ignore_hwid": "TEXT",
@@ -1994,6 +2033,7 @@ async def _migrate_wildcard_ssl(conn):
         ("wildcard_ssl_custom_path_enabled", "BOOLEAN DEFAULT FALSE"),
         ("wildcard_ssl_custom_fullchain_path", "VARCHAR(500)"),
         ("wildcard_ssl_custom_privkey_path", "VARCHAR(500)"),
+        ("wildcard_ssl_deployed_fingerprint", "VARCHAR(64)"),
     ]
     for col_name, col_type in ssl_columns:
         if col_name not in columns:
@@ -2361,7 +2401,7 @@ async def _migrate_node_update_step(conn):
         logger.warning(f"Could not add node_update_attempts.step: {e}")
 
 
-# (таблица, колонка) — целевые секреты: приватные ключи, не публичные сертификаты
+# (таблица, колонка) — целевые секреты: приватные ключи и токены, не публичные сертификаты
 _SECRET_COLUMNS = [
     ("keygen", "ca_key_pem"),
     ("keygen", "client_key_pem"),
@@ -2371,32 +2411,75 @@ _SECRET_COLUMNS = [
     ("remnawave_cert_profiles", "secret_key"),
     ("billing_servers", "cloud_credential"),
     ("billing_servers", "cloud_proxy"),
+    ("remnawave_settings", "api_token"),
+    ("remnawave_settings", "cookie_secret"),
+    ("remnawave_settings", "anomaly_tg_bot_token"),
+    ("alert_settings", "telegram_bot_token"),
+    ("torrent_blocker_settings", "webhook_secret"),
+    ("wildcard_certificates", "privkey_pem"),
 ]
+
+# Ключи panel_settings с секретным значением. Таблица общая для всех настроек,
+# поэтому шифруются только они: при записи — models.PanelSettings, уже лежащие — миграцией
+SECRET_SETTING_KEYS = frozenset({"wildcard_cloudflare_api_token"})
 
 
 def needs_encryption(value) -> bool:
     return bool(value) and not value.startswith(crypto.ENC_PREFIX)
 
 
+async def _migrate_widen_secret_columns(conn) -> None:
+    """Шифротекст длиннее значения (nonce, тег и base64), в VARCHAR(n) прежней
+    схемы он не помещается. VARCHAR → TEXT правит только каталог, без перезаписи таблицы."""
+    result = await conn.execute(text("""
+        SELECT table_name, column_name FROM information_schema.columns
+        WHERE data_type = 'character varying'
+    """))
+    narrow = {(row[0], row[1]) for row in result.fetchall()}
+    for table, col in _SECRET_COLUMNS:
+        if (table, col) not in narrow:
+            continue
+        try:
+            await conn.execute(text(f'ALTER TABLE {table} ALTER COLUMN "{col}" TYPE TEXT'))
+            logger.info(f"Widened column: {table}.{col}")
+        except Exception as e:
+            logger.warning(f"Could not widen {table}.{col}: {e}")
+
+
+async def _encrypt_plaintext(conn, table: str, col: str, setting_key: str | None = None) -> None:
+    """Имена таблиц/колонок — константы, не пользовательский ввод; значения параметризованы."""
+    key_filter = " AND key = :key" if setting_key else ""
+    params = {"pfx": crypto.ENC_PREFIX + "%"}
+    if setting_key:
+        params["key"] = setting_key
+    rows = (await conn.execute(
+        text(f'SELECT id, "{col}" AS v FROM {table} '
+             f'WHERE "{col}" IS NOT NULL AND "{col}" NOT LIKE :pfx{key_filter}'),
+        params,
+    )).fetchall()
+    for row in rows:
+        if not needs_encryption(row.v):
+            continue
+        await conn.execute(
+            text(f'UPDATE {table} SET "{col}" = :val WHERE id = :id'),
+            {"val": crypto.encrypt_secret(row.v), "id": row.id},
+        )
+
+
 async def _migrate_encrypt_secrets(conn) -> None:
     """Зашифровать уже лежащие открытым текстом секреты. Гейт по ключу: без
-    PANEL_ENC_KEY не трогаем — панель продолжает работать на плейнтексте.
-    Имена таблиц/колонок — константы, не пользовательский ввод; значения параметризованы."""
+    PANEL_ENC_KEY не трогаем — панель продолжает работать на плейнтексте."""
     if not crypto.encryption_enabled():
         return
-    for table, col in _SECRET_COLUMNS:
-        rows = (await conn.execute(
-            text(f'SELECT id, "{col}" AS v FROM {table} '
-                 f'WHERE "{col}" IS NOT NULL AND "{col}" NOT LIKE :pfx'),
-            {"pfx": crypto.ENC_PREFIX + "%"},
-        )).fetchall()
-        for row in rows:
-            if not needs_encryption(row.v):
-                continue
-            await conn.execute(
-                text(f'UPDATE {table} SET "{col}" = :val WHERE id = :id'),
-                {"val": crypto.encrypt_secret(row.v), "id": row.id},
-            )
+    targets = [(table, col, None) for table, col in _SECRET_COLUMNS]
+    targets += [("panel_settings", "value", key) for key in sorted(SECRET_SETTING_KEYS)]
+    for table, col, setting_key in targets:
+        try:
+            await _encrypt_plaintext(conn, table, col, setting_key)
+        except Exception as e:
+            # Открытый текст читается как раньше — один несошедшийся секрет не должен
+            # ни остановить старт панели, ни оставить незашифрованными остальные
+            logger.error(f"Could not encrypt {table}.{col}: {e}")
 
 
 async def _migrate_remnawave_geo(conn):
@@ -2453,14 +2536,22 @@ async def init_db():
         await _migrate_source_pool_manual(conn)
         await _migrate_torrent_blocker_server_mode(conn)
         await _migrate_node_update_step(conn)
+        await _migrate_widen_secret_columns(conn)
         await _migrate_encrypt_secrets(conn)
         await _migrate_remnawave_geo(conn)
 
     await _warmup_pool()
 
 
+def _limit_statement_time(session, transaction, connection) -> None:
+    connection.exec_driver_sql(f"SET LOCAL statement_timeout = {API_STATEMENT_TIMEOUT_MS}")
+
+
 async def get_db():
     async with async_session() as session:
+        # SET LOCAL живёт до конца транзакции, а обработчик нередко коммитит и
+        # работает дальше — лимит ставится в начале каждой транзакции сессии
+        event.listen(session.sync_session, "after_begin", _limit_statement_time)
         try:
             yield session
         finally:

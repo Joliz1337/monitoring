@@ -4,7 +4,7 @@
 docker-compose.yml (сервисы remnawave-nginx + remnanode), nginx.conf, ssl/.
 Файл nginx.conf смонтирован в контейнер remnawave-nginx как single-file
 bind-mount, поэтому любые записи и откаты выполняются строго in-place
-(write_host_file пишет через `> path`, сохраняя inode) — замена файла через
+(write_host_file с in_place пишет через `> path`, сохраняя inode) — замена файла через
 mv/rename создала бы новый inode, и контейнер продолжил бы видеть старый файл.
 
 Правила парсит только панель: нода принимает готовый отрендеренный конфиг
@@ -812,10 +812,10 @@ class RemnawaveNginxManager:
         if not (backup.success and backup.exit_code == 0):
             logger.warning("remnawave nginx: backup failed for %s", conf)
             return False
-        return await write_host_file(conf, content, mode="644")
+        return await write_host_file(conf, content, mode="644", in_place=True)
 
     async def _rollback(self, conf: str, previous: str) -> None:
-        if not await write_host_file(conf, previous):
+        if not await write_host_file(conf, previous, in_place=True):
             logger.error("remnawave nginx: rollback write failed for %s", conf)
 
     async def _compose_up(self, path: str, force_recreate: bool = False) -> tuple[bool, str]:

@@ -16,10 +16,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
+import aiohttp
 import httpx
 from sqlalchemy import select, delete, update, bindparam, func, ColumnElement
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.loss_registry import get_loss_registry
+from app.services.metrics_request import MetricsBodyRejected, request_metrics
 from app.services.node_capabilities import (
     Capability,
     normalize_map as normalize_capabilities_map,
@@ -257,7 +259,10 @@ class MetricsCollector:
     ACTIVE_REFRESH_INTERVAL = 5
     ACTIVITY_TTL = 60
     
-    HTTP_CONCURRENCY = 100  # одновременных запросов метрик к нодам
+    # Одновременных запросов метрик к нодам. При ста на парке в 2000 нод со средним
+    # ответом 0,4 с каждая десятая нода не успевала к сроку цикла, а зависшие ноды
+    # занимали слоты и отнимали цикл у сотен здоровых
+    HTTP_CONCURRENCY = 400
     # Доля интервала, которую цикл ждёт ответов нод; остаток — на запись в базу.
     # Опрос, не успевший к этому сроку, не обрывается: ответ заберёт следующий цикл
     POLL_WAIT_SHARE = 0.7
@@ -313,7 +318,8 @@ class MetricsCollector:
     HAPROXY_FETCH_TIMEOUT = 15.0
     HAPROXY_FAST_FETCH_TIMEOUT = 10.0
 
-    # Жёсткий потолок на весь запрос метрик, поверх httpx-таймаутов (2+2+10+2=16s).
+    # Жёсткий потолок на весь запрос метрик, поверх таймаутов клиента (у httpx
+    # 2+2+10+2=16s, у aiohttp 4s на соединение и 10s между порциями ответа).
     # httpx не покрывает SOCKS5-рукопожатие: запрос через прокси может повиснуть навсегда,
     # а пока опрос ноды не завершён, новый ей не уходит — нода осталась бы offline
     # до перезапуска панели.
@@ -795,27 +801,21 @@ class MetricsCollector:
 
     async def _fetch_metrics(self, server: Server) -> tuple[Optional[dict], Optional[dict]]:
         """Fetch current metrics from server API. Returns (metrics, error_info)"""
-        url = f"{server.url}/api/metrics"
-
         try:
-            client = get_node_client(server)
-            # Таймаут берётся из клиента (_NODE_TIMEOUT) — без лишних аллокаций.
-            response = await client.get(
-                url, headers=node_auth_headers(server), params={"window": self._window_seconds(server.id)}
-            )
-            if response.status_code == 200:
-                data = response.json()
+            status, data = await request_metrics(server, self._window_seconds(server.id))
+            if status == 200:
                 self._last_success_mono[server.id] = time.monotonic()
                 # Момент ответа ноды — база времени для расчёта скоростей.
                 # Сборка снапшотов идёт после gather по всем нодам, и её момент
                 # плавает вместе с самой медленной нодой (см. _build_snapshot).
                 data["collected_at"] = time.time()
                 return data, None
-            elif response.status_code == 401 or response.status_code == 403:
-                return None, {"message": ErrorTypes.AUTH_ERROR, "code": response.status_code}
+            elif status == 401 or status == 403:
+                return None, {"message": ErrorTypes.AUTH_ERROR, "code": status}
             else:
-                return None, {"message": f"{ErrorTypes.SERVER_ERROR}: HTTP {response.status_code}", "code": response.status_code}
-        except httpx.TimeoutException:
+                return None, {"message": f"{ErrorTypes.SERVER_ERROR}: HTTP {status}", "code": status}
+        # Напрямую к ноде ходит aiohttp, через SOCKS5-прокси — httpx: у каждого свои исключения
+        except (httpx.TimeoutException, asyncio.TimeoutError):
             logger.debug(f"Timeout connecting to {server.name}")
             return None, {"message": ErrorTypes.TIMEOUT, "code": 504}
         except httpx.ProxyError:
@@ -823,6 +823,15 @@ class MetricsCollector:
             # str(e) не пишем — текст SOCKS-ошибки бесполезен, а прокси-креды секретны.
             logger.debug(f"Proxy error connecting to {server.name}")
             return None, {"message": ErrorTypes.PROXY_ERROR, "code": 502}
+        except MetricsBodyRejected as e:
+            logger.warning(f"Metrics answer of {server.name} rejected: {e}")
+            return None, {"message": ErrorTypes.INVALID_RESPONSE, "code": 502}
+        except aiohttp.ClientSSLError:
+            return None, {"message": ErrorTypes.SSL_ERROR, "code": 495}
+        except aiohttp.ClientConnectorError as e:
+            if isinstance(e.os_error, ConnectionRefusedError):
+                return None, {"message": ErrorTypes.CONNECTION_REFUSED, "code": 502}
+            return None, {"message": f"{ErrorTypes.CONNECTION_REFUSED}: {str(e.os_error)[:100]}", "code": 502}
         except httpx.ConnectError as e:
             error_str = str(e).lower()
             if "refused" in error_str:

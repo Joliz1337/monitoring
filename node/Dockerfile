@@ -27,9 +27,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     procps certbot openssl curl iptables git rsync iperf3
 
 # Install Docker CLI for accessing remnanode container logs (Xray stats collection)
-RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-26.1.4.tgz | tar xz -C /tmp && \
+# Архив сверяется с суммой, записанной здесь: подменённый по дороге бинарник иначе
+# попал бы в привилегированный контейнер. Суммы есть только для архитектур ниже —
+# на другой сборка падает, а не ставит чужой бинарник. При смене версии суммы
+# пересчитать: sha256sum docker-<версия>.tgz
+RUN docker_version=26.1.4 && \
+    case "$(dpkg --print-architecture)" in \
+        amd64) docker_arch=x86_64;  docker_sha256=a9cede81aa3337f310132c2c920dba2edc8d29b7d97065b63ba41cf47ae1ca4f ;; \
+        arm64) docker_arch=aarch64; docker_sha256=6f1a5fb161aef875d305ee4f79e65492b3c13e90dbe0a339df2ad6515e4f6849 ;; \
+        *) echo "Docker CLI ${docker_version}: no pinned checksum for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${docker_version}.tgz" -o /tmp/docker.tgz && \
+    echo "${docker_sha256}  /tmp/docker.tgz" | sha256sum -c - && \
+    tar xzf /tmp/docker.tgz -C /tmp docker/docker && \
     mv /tmp/docker/docker /usr/local/bin/ && \
-    rm -rf /tmp/docker
+    rm -rf /tmp/docker /tmp/docker.tgz
 
 # Copy requirements and install Python dependencies with cache
 COPY requirements.txt .

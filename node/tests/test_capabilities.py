@@ -16,19 +16,25 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app import capabilities  # noqa: E402
 from app.capabilities import (  # noqa: E402
     ALWAYS_ALLOWED,
     DENIAL_ERROR,
+    DENIAL_HEADER,
     DOMAIN_PREFIXES,
+    EXEC_REQUIRED_WRITES,
     READ_ONLY_WRITES,
     Access,
     CapabilityMiddleware,
     DenyLog,
     Domain,
     domain_for_path,
+    exec_denial_response,
+    haproxy_config_runs_code,
     normalize_path,
     parse_capabilities,
     read_env_file,
@@ -190,6 +196,119 @@ class AccessLevelTests(unittest.TestCase):
         self.assertIsNone(policy.check("HEAD", "/api/ipset/status"))
 
 
+class ExecRequiredWriteTests(unittest.TestCase):
+    """Скрипты и юниты из тела запроса нода запускает от root: запись в свой
+    домен без exec не должна быть тем же exec."""
+
+    def test_own_domain_alone_is_not_enough(self):
+        cases = {"/api/antiddos/install": "antiddos", "/api/system/optimizations/apply": "system"}
+        for path, grant in cases.items():
+            with self.subTest(path=path):
+                denial = parse_capabilities(grant).check("POST", path)
+                self.assertEqual((denial.domain, denial.required), (Domain.EXEC, Access.WRITE))
+
+    def test_exec_read_only_is_not_enough(self):
+        denial = parse_capabilities("antiddos,exec:ro").check("POST", "/api/antiddos/install")
+        self.assertEqual(denial.domain, Domain.EXEC)
+
+    def test_own_domain_with_exec_passes(self):
+        for raw in ["antiddos,exec", "full", "readonly,antiddos,exec"]:
+            with self.subTest(raw=raw):
+                self.assertIsNone(parse_capabilities(raw).check("POST", "/api/antiddos/install/"))
+
+    def test_exec_alone_does_not_open_a_closed_domain(self):
+        denial = parse_capabilities("exec").check("POST", "/api/antiddos/install")
+        self.assertEqual((denial.domain, denial.required), (Domain.ANTIDDOS, Access.WRITE))
+
+    def test_neighbours_in_the_same_domain_need_no_exec(self):
+        policy = parse_capabilities("antiddos,system")
+        for path in ["/api/antiddos/emergency", "/api/antiddos/whitelist/sync", "/api/system/optimizations/remove"]:
+            with self.subTest(path=path):
+                self.assertIsNone(policy.check("POST", path))
+
+    def test_unrestricted_node_is_not_affected(self):
+        policy = parse_capabilities("")
+        for path in EXEC_REQUIRED_WRITES:
+            with self.subTest(path=path):
+                self.assertIsNone(policy.check("POST", path))
+        self.assertIsNone(policy.exec_denial())
+
+    def test_every_listed_path_belongs_to_a_domain_other_than_exec(self):
+        for path in EXEC_REQUIRED_WRITES:
+            with self.subTest(path=path):
+                self.assertNotIn(path, ALWAYS_ALLOWED)
+                self.assertNotIn(domain_for_path(path), (None, Domain.EXEC))
+
+
+class HaproxyConfigTests(unittest.TestCase):
+    """Конфиг HAProxy — не только маршруты: он умеет запускать программы и Lua."""
+
+    PLAIN = (
+        "global\n    maxconn 39000\n    stats socket /run/haproxy/admin.sock mode 660 level admin\n"
+        "defaults\n    mode tcp\n    option tcplog\n    no option http-use-htx\n"
+        "frontend tcp_program\n    bind *:443\n    default_backend backend_tcp_program\n"
+        "backend backend_tcp_program\n    # program lua-load external-check\n"
+        "    server program 10.0.0.1:443 check\n    log \"${LOCAL_SYSLOG}:514\" local0\n"
+    )
+
+    def test_ordinary_config_runs_nothing(self):
+        self.assertFalse(haproxy_config_runs_code(self.PLAIN))
+
+    def test_directives_that_run_programs_or_code(self):
+        for line in [
+            "program dropper",
+            "\tprogram dropper",
+            "    lua-load /etc/haproxy/x.lua",
+            "    lua-load-per-thread /etc/haproxy/x.lua",
+            "    external-check",
+            "    external-check command /bin/sh",
+            "    option external-check",
+            "    no option external-check",
+            "    insecure-fork-wanted",
+            "    insecure-setuid-wanted",
+            "program dropper # comment",
+        ]:
+            with self.subTest(line=line):
+                self.assertTrue(haproxy_config_runs_code(self.PLAIN + line + "\n"))
+
+    def test_quoted_or_escaped_keyword_counts_as_executable(self):
+        # HAProxy снимает кавычки и экранирование до того, как узнаёт слово
+        for line in ['"lua-load" /etc/haproxy/x.lua', "lua\\x2dload /etc/haproxy/x.lua",
+                     "option 'external-check'", '"${KEYWORD}" dropper']:
+            with self.subTest(line=line):
+                self.assertTrue(haproxy_config_runs_code(self.PLAIN + line + "\n"))
+
+
+class ExecDenialResponseTests(unittest.TestCase):
+    """Отказ из обработчика выглядит для панели так же, как отказ слоя прав."""
+
+    def response_for(self, raw: str):
+        # Свой журнал отказов: общий молчит пять минут после первого же отказа в процессе
+        with mock.patch.object(capabilities, "get_policy", return_value=parse_capabilities(raw)), \
+                mock.patch.object(capabilities, "_handler_deny_log", DenyLog()):
+            try:
+                return exec_denial_response()
+            except ImportError as exc:  # рантайм агента не установлен
+                raise unittest.SkipTest(f"fastapi is not importable: {exc}")
+
+    def test_no_response_when_exec_is_granted_or_node_is_open(self):
+        for raw in ["", "ssl,exec", "full"]:
+            with self.subTest(raw=raw):
+                self.assertIsNone(self.response_for(raw))
+
+    def test_denial_has_the_shape_of_a_middleware_denial(self):
+        with self.assertLogs("app.capabilities", level="WARNING"):
+            response = self.response_for("ssl,haproxy")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.headers[DENIAL_HEADER], "exec:rw")
+        body = json.loads(response.body)
+        self.assertIsInstance(body["detail"], str)
+        self.assertEqual((body["error"], body["domain"], body["access"]), (DENIAL_ERROR, "exec", "rw"))
+        self.assertEqual(body["capabilities"]["ssl"], "rw")
+        self.assertEqual(set(body["capabilities"]), {d.value for d in Domain})
+
+
 def collect_paths(routes, prefix: str = "") -> set:
     """Пути приложения. FastAPI держит подключённые роутеры обёрткой, а не
     списком маршрутов, поэтому дерево обходится рекурсивно."""
@@ -236,6 +355,13 @@ class RouteCoverageTests(unittest.TestCase):
         existing = {normalize_path(p) for p in self.paths}
         # /api/metrics регистрируется как /api/metrics с пустым path у роутера
         for path in ALWAYS_ALLOWED | READ_ONLY_WRITES:
+            with self.subTest(path=path):
+                self.assertIn(path, existing)
+
+    def test_exec_required_writes_still_exist(self):
+        # Переименованный маршрут молча вышел бы из-под требования exec
+        existing = {normalize_path(p) for p in self.paths}
+        for path in EXEC_REQUIRED_WRITES:
             with self.subTest(path=path):
                 self.assertIn(path, existing)
 

@@ -56,6 +56,10 @@ const TIMEOUT_OPTIONS = [
 ]
 
 const JOB_POLL_INTERVAL_MS = 1500
+// Строки итога появляются лесенкой только в начале списка: с задержкой на каждую строку
+// двухтысячная ждала бы своей очереди больше минуты
+const RESULT_STAGGER_ROWS = 10
+const RESULT_STAGGER_STEP_SEC = 0.05
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -108,6 +112,10 @@ export default function BulkActions() {
   })
   const [bulkScriptMode, setBulkScriptMode] = useState(false)
   const [terminalResults, setTerminalResults] = useState<BulkTerminalResult[]>([])
+  const terminalResultByServer = useMemo(
+    () => new Map(terminalResults.map(result => [result.server_id, result])),
+    [terminalResults],
+  )
   const [expandedOutputs, setExpandedOutputs] = useState<Set<number>>(new Set())
   
   const [formError, setFormError] = useState('')
@@ -1179,7 +1187,7 @@ export default function BulkActions() {
                 
                 <div className="space-y-2 max-h-[500px] overflow-y-auto">
                   {results.map((result, index) => {
-                    const termResult = terminalResults.find(tr => tr.server_id === result.server_id)
+                    const termResult = terminalResultByServer.get(result.server_id)
                     const hasOutput = termResult && (termResult.stdout || termResult.stderr)
                     const isExpanded = expandedOutputs.has(result.server_id)
                     
@@ -1191,7 +1199,7 @@ export default function BulkActions() {
                         }`}
                         initial={{ opacity: 0, x: -10 }}
                         animate={{ opacity: 1, x: 0 }}
-                        transition={{ delay: index * 0.05 }}
+                        transition={{ delay: Math.min(index, RESULT_STAGGER_ROWS) * RESULT_STAGGER_STEP_SEC }}
                       >
                         <div className="flex items-center gap-3 p-3">
                           {result.success ? (

@@ -6,10 +6,12 @@ Based on reference implementation from vpn_v2/services/remnawave_api.py
 """
 
 import asyncio
+import ipaddress
 import logging
 import ssl
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -18,9 +20,28 @@ logger = logging.getLogger(__name__)
 API_V2 = 2
 API_V3 = 3
 
+TLS_UNTRUSTED = "tls_untrusted"
+TLS_UNTRUSTED_MESSAGE = (
+    "The TLS certificate of the Remnawave API is not trusted (self-signed, expired or issued "
+    "for another host). Certificate verification can be turned off in the Remnawave settings"
+)
+
 # Версия API панели живёт дольше клиента: клиент создаётся на один вызов,
 # а детект стоит запроса. Ключ — адрес панели, значение — API_V2/API_V3.
 _api_version_by_url: dict[str, int] = {}
+
+
+def host_can_have_public_cert(api_url: str) -> bool:
+    """Публичный сертификат выдают только доменному имени: у IP-адреса, localhost
+    и однословного имени (сервис в docker-сети) проверять нечего."""
+    host = (urlparse(api_url).hostname or "").rstrip(".")
+    if "." not in host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return False
 
 
 def api_version_from_nodes(nodes: list) -> Optional[int]:
@@ -81,7 +102,8 @@ class RemnawaveAPIError(Exception):
 class RemnawaveAPI:
     """API client for Remnawave Panel."""
     
-    def __init__(self, api_url: str, api_token: str, cookie_secret: Optional[str] = None):
+    def __init__(self, api_url: str, api_token: str, cookie_secret: Optional[str] = None,
+                 verify_tls: bool = True):
         """
         Initialize Remnawave API client.
         
@@ -89,10 +111,13 @@ class RemnawaveAPI:
             api_url: Base URL of Remnawave Panel API
             api_token: API token for authentication
             cookie_secret: Optional cookie in format "name:value" for Nginx auth
+            verify_tls: Verify the API certificate; hosts that cannot have a public one are never verified
         """
         self.base_url = api_url.rstrip('/') if api_url else ""
         self.token = api_token or ""
         self.cookie_secret = cookie_secret
+        # Проверку снимает только явный False: незаданная настройка её не отключает
+        self.verify_tls = verify_tls is not False and host_can_have_public_cert(self.base_url)
         self.timeout = aiohttp.ClientTimeout(total=60, connect=15)
         self._session: Optional[aiohttp.ClientSession] = None
         self._cookies: Optional[dict] = None
@@ -114,20 +139,24 @@ class RemnawaveAPI:
             'Authorization': f'Bearer {self.token}'
         }
     
+    def _ssl_context(self) -> ssl.SSLContext:
+        # С каждым запросом уходят токен API и cookie: без проверки сертификата
+        # их получил бы любой, кто встал между панелью и Remnawave
+        ssl_context = ssl.create_default_context()
+        if not self.verify_tls:
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+        ssl_context.set_alpn_protocols(['http/1.1'])
+        return ssl_context
+
     async def _create_session(self) -> aiohttp.ClientSession:
         """Create new session with configured connector."""
-        # SSL context - disable verification for internal connections
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        ssl_context.set_alpn_protocols(['http/1.1'])
-        
         connector = aiohttp.TCPConnector(
             limit=20,
             limit_per_host=10,
             enable_cleanup_closed=True,
             force_close=True,
-            ssl=ssl_context
+            ssl=self._ssl_context()
         )
         
         session_kwargs = {
@@ -190,6 +219,9 @@ class RemnawaveAPI:
                     response_text = await response.text()
                     result["error"] = f"HTTP {response.status}: {response_text[:200]}"
                     
+        except aiohttp.ClientConnectorCertificateError:
+            result["error"] = TLS_UNTRUSTED_MESSAGE
+            result["error_code"] = TLS_UNTRUSTED
         except aiohttp.ClientSSLError as e:
             result["error"] = f"SSL error: {e}"
         except aiohttp.ClientConnectorError as e:
@@ -230,6 +262,9 @@ class RemnawaveAPI:
 
                     return response_data
 
+            except aiohttp.ClientConnectorCertificateError as e:
+                # Повторять бессмысленно: сертификат от попытки к попытке не меняется
+                raise RemnawaveAPIError(TLS_UNTRUSTED_MESSAGE) from e
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 last_error = e
                 if attempt < retries - 1:
@@ -509,5 +544,7 @@ class RemnawaveAPI:
         """В 3.x DELETE отвечает 204 без тела, в 2.x — 200 с телом; тело никому не нужно."""
         await self._request("DELETE", "/api/node-plugins/torrent-blocker/truncate")
 
-def get_remnawave_api(api_url: str, api_token: str, cookie_secret: Optional[str] = None) -> RemnawaveAPI:
-    return RemnawaveAPI(api_url, api_token, cookie_secret)
+def get_remnawave_api(
+    api_url: str, api_token: str, cookie_secret: Optional[str] = None, verify_tls: bool = True,
+) -> RemnawaveAPI:
+    return RemnawaveAPI(api_url, api_token, cookie_secret, verify_tls)

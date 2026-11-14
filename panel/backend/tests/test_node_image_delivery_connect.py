@@ -35,6 +35,9 @@ class DeadSession:
     async def __aexit__(self, *exc_info):
         return False
 
+    def get_server_host_key(self):
+        return None
+
     async def run(self, *_args, **_kwargs):
         raise OSError()
 

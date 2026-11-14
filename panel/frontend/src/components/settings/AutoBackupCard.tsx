@@ -30,7 +30,11 @@ function localTimeToUtc(hhmm: string): string {
   return `${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}`
 }
 
-export default function AutoBackupCard() {
+interface AutoBackupCardProps {
+  onArchivePassword?: (isSet: boolean) => void
+}
+
+export default function AutoBackupCard({ onArchivePassword }: AutoBackupCardProps) {
   const { t } = useTranslation()
   const scheduleSelectId = useId()
 
@@ -62,6 +66,7 @@ export default function AutoBackupCard() {
     setVolumeMb(s.volume_size_mb || 45)
     setHasToken(s.has_bot_token)
     setHasPassword(s.has_archive_password)
+    onArchivePassword?.(s.has_archive_password)
     setLastRunAt(s.last_run_at)
     setLastStatus(s.last_status)
     setLastError(s.last_error)
@@ -112,6 +117,7 @@ export default function AutoBackupCard() {
       await backupApi.updateAutoSettings(buildPayload())
       setBotToken('')
       setPassword('')
+      apply((await backupApi.getAutoSettings()).data)
       await backupApi.testTelegram()
       toast.success(t('backup.auto.test_ok'))
     } catch (err: any) {

@@ -96,7 +96,7 @@ class ScheduledRunTests(PatchingTestCase):
         self.assertIn("timed out after 600 seconds", error)
 
     async def test_failure_while_alerting_is_recorded_too(self):
-        self.patch(bk, "_run_pg_dump", mock.Mock(return_value=(b"", "pg_dump: error: connection refused")))
+        self.patch(bk, "_run_pg_dump", mock.Mock(return_value=(0, "pg_dump: error: connection refused")))
         self.send_message.side_effect = ValueError("Telegram answered with a non-JSON page")
 
         with self.assertLogs(sched.logger, level="ERROR"):
@@ -119,7 +119,7 @@ class ScheduledRunTests(PatchingTestCase):
         self.assertIn("timed out", self.send_message.await_args.args[2])
 
     async def test_empty_dump_alerts_and_is_recorded(self):
-        self.patch(bk, "_run_pg_dump", mock.Mock(return_value=(b"", None)))
+        self.patch(bk, "_run_pg_dump", mock.Mock(return_value=(0, None)))
 
         await self.run_one_tick()
 
@@ -127,7 +127,7 @@ class ScheduledRunTests(PatchingTestCase):
         self.assertIn("Пустой дамп", self.send_message.await_args.args[2])
 
     async def test_delivered_backup_is_recorded_ok(self):
-        self.patch(bk, "_run_pg_dump", mock.Mock(return_value=(DUMP, None)))
+        self.patch(bk, "_run_pg_dump", mock.Mock(side_effect=lambda target: (target.write(DUMP), None)))
 
         await self.run_one_tick()
 

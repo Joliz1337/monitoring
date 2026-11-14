@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback, FormEvent, type MouseEvent, type ReactNode } from 'react'
+import { memo, useState, useEffect, useMemo, useRef, useCallback, FormEvent, type MouseEvent, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, DragOverlay } from '@dnd-kit/core'
 import { SortableContext, rectSortingStrategy, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
@@ -67,6 +67,12 @@ import ExtraServerCard, { type ExtraTarget, type DeployStatus } from '../compone
 import InstallKeysPanel from '../components/servers/InstallKeysPanel'
 import ManualInstallBlock from '../components/servers/ManualInstallBlock'
 import { FolderStatusCounts } from '../components/Dashboard/FolderStats'
+import {
+  LAZY_CARDS_MIN_SERVERS,
+  LazySlot,
+  useSlotPlaceholder,
+  type CardPlaceholder,
+} from '../components/Dashboard/LazyServerCard'
 import { SortableFolder, UnfolderDropZone, FolderDragPreview } from '../components/folders/SortableFolder'
 import { FolderDialogs } from '../components/folders/FolderDialogs'
 import { FolderChips, type FolderOption } from '../components/folders/FolderChips'
@@ -172,6 +178,15 @@ const removeStoredJob = (jobId: string) => {
 const COLLAPSED_FOLDERS_KEY = 'servers_collapsed_folders'
 const SERVER_GRID_CLASS = 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
 const NO_SERVERS: ServerWithMetrics[] = []
+const NO_IDS: number[] = []
+
+// Высота заглушки, пока первые карточки не измерены: шапка с иконкой 40px, строка
+// статуса с кнопками 30px, отступы и рамки
+const SERVER_CARD_HEIGHT_ESTIMATE = 137
+const SERVER_CARD_LAYOUT_KEY = 'servers'
+
+// Дерево инфраструктуры от поиска не зависит — без memo оно перерисовывалось бы на каждый символ
+const InfraTreeMemo = memo(InfraTree)
 
 // Кнопки, ссылки и копируемый IP внутри карточки делают своё — выделение только от клика по свободному месту
 const CARD_CONTROLS_SELECTOR = 'button, a, input, [role="button"]'
@@ -181,24 +196,355 @@ interface ServerDragHandle {
   listeners: ReturnType<typeof useSortable>['listeners']
 }
 
+/** Действия карточки. Объект один на все карточки и не меняется от рендера к рендеру страницы */
+interface ServerCardActions {
+  toggleSelected: (serverId: number) => void
+  openDashboard: (serverId: number) => void
+  toggleMonitoring: (serverId: number, isActive: boolean) => void
+  test: (serverId: number) => void
+  edit: (server: ServerWithMetrics) => void
+  cancelEdit: () => void
+  armDelete: (serverId: number) => void
+  confirmDelete: (serverId: number) => void
+}
+
+interface ServerListCardProps {
+  server: ServerWithMetrics
+  isEditing: boolean
+  isSelected: boolean
+  isTesting: boolean
+  /** Первый клик по удалению уже был — следующий удалит сервер */
+  isDeleteArmed: boolean
+  testResult?: { status: string; message?: string }
+  actions: ServerCardActions
+  dragHandle?: ServerDragHandle
+}
+
+function cardBorderClass(server: ServerWithMetrics, isEditing: boolean, isSelected: boolean) {
+  if (isEditing) return 'rounded-b-none border-b-0 border-accent-500/30'
+  if (isSelected) return 'border-accent-500/60 ring-1 ring-accent-500/30'
+  return server.is_active ? 'hover:border-dark-700' : 'border-dark-700/50'
+}
+
+const ServerListCard = memo(function ServerListCard({
+  server, isEditing, isSelected, isTesting, isDeleteArmed, testResult, actions, dragHandle,
+}: ServerListCardProps) {
+  const { t } = useTranslation()
+
+  const handleCardClick = (event: MouseEvent) => {
+    if ((event.target as HTMLElement).closest(CARD_CONTROLS_SELECTOR)) return
+    actions.toggleSelected(server.id)
+  }
+
+  return (
+    <div
+      onClick={handleCardClick}
+      className={`card group transition-all overflow-visible flex flex-col cursor-pointer ${
+        server.is_active ? '' : 'opacity-60'
+      } ${cardBorderClass(server, isEditing, isSelected)}`}
+    >
+      {/* Шапка: иконка + имя + URL */}
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          {...dragHandle?.attributes}
+          {...dragHandle?.listeners}
+          className="p-1.5 -ml-2 -mr-1 text-dark-500 hover:text-dark-400 cursor-grab active:cursor-grabbing rounded touch-none flex-shrink-0"
+        >
+          <GripVertical className="w-4 h-4" />
+        </button>
+        <div
+          className={`w-10 h-10 rounded-xl flex items-center justify-center border flex-shrink-0 transition-colors ${
+            server.is_active
+              ? 'bg-gradient-to-br from-dark-700 to-dark-800 border-dark-700/50 group-hover:border-accent-500/30'
+              : 'bg-dark-800/50 border-dark-700/30'
+          }`}
+        >
+          <ServerIcon className={`w-4 h-4 ${server.is_active ? 'text-accent-500' : 'text-dark-500'}`} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h3 className="font-semibold text-dark-100 flex items-center gap-2 truncate">
+            <button
+              type="button"
+              onClick={() => actions.openDashboard(server.id)}
+              title={t('servers.open_dashboard')}
+              className="truncate text-left hover:text-accent-400 transition-colors"
+            >
+              {server.name}
+            </button>
+            <span
+              className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                !server.is_active
+                  ? 'bg-dark-500'
+                  : server.status === 'online'
+                    ? 'bg-success'
+                    : server.status === 'loading'
+                      ? 'bg-dark-400 animate-pulse'
+                      : 'bg-danger'
+              }`}
+            />
+            {nodeIsRestricted(server) && (
+              <Tooltip
+                maxWidth={320}
+                label={
+                  <span>
+                    {t('node_caps.badge_tooltip_title')}
+                    <br />
+                    {t('node_caps.allowed', { allowed: describeAllowedDomains(server, t) })}
+                    <br />
+                    {t('node_caps.where')}
+                  </span>
+                }
+              >
+                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-2xs font-medium flex-shrink-0">
+                  <Lock className="w-3.5 h-3.5" />
+                  {t('servers.restricted_badge')}
+                </span>
+              </Tooltip>
+            )}
+            {server.uses_shared_cert ? (
+              <Tooltip label={t('servers.shared_cert_tooltip')}>
+                <ShieldCheck className="w-3.5 h-3.5 text-success flex-shrink-0" />
+              </Tooltip>
+            ) : server.auth_kind === 'dedicated' ? (
+              <Tooltip label={t('servers.dedicated_cert_tooltip')}>
+                <ShieldCheck className="w-3.5 h-3.5 text-accent-400 flex-shrink-0" />
+              </Tooltip>
+            ) : (
+              <Tooltip label={t('servers.needs_migration_tooltip')}>
+                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-warning/10 text-warning text-2xs font-medium flex-shrink-0">
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                  {server.auth_kind === 'legacy'
+                    ? t('servers.legacy_badge')
+                    : t('servers.old_key_badge')}
+                </span>
+              </Tooltip>
+            )}
+          </h3>
+          <p className="text-xs text-dark-500 flex items-center gap-1.5 min-w-0">
+            <CopyableIp value={extractHost(server.url)} display={server.url} className="truncate" />
+            <a
+              href={server.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-accent-400 transition-colors flex-shrink-0"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          </p>
+        </div>
+      </div>
+
+      {/* Статус + кнопки действий */}
+      <div className="flex items-center justify-between mt-3 pt-3 border-t border-dark-700/30 gap-2">
+        <div className="flex-1 min-w-0">
+          <AnimatePresence mode="wait">
+            {testResult ? (
+              <motion.div
+                key="test-result"
+                className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg w-fit ${
+                  testResult.status === 'online'
+                    ? 'text-success bg-success/10'
+                    : 'text-danger bg-danger/10'
+                }`}
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+              >
+                {testResult.status === 'online' ? (
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                ) : (
+                  <XCircle className="w-3.5 h-3.5" />
+                )}
+                <span className="truncate max-w-[140px]">
+                  {testResult.status === 'online'
+                    ? t('common.connected')
+                    : testResult.message || t('common.failed')}
+                </span>
+              </motion.div>
+            ) : !server.is_active ? (
+              <motion.span
+                key="disabled"
+                className="px-2 py-0.5 text-xs font-medium bg-dark-700/50 text-dark-400 rounded-full"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              >
+                {t('servers.disabled')}
+              </motion.span>
+            ) : server.status === 'online' ? (
+              <motion.span
+                key="online"
+                className="flex items-center gap-1.5 text-xs text-success"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                {t('common.online')}
+              </motion.span>
+            ) : server.status === 'loading' ? (
+              <motion.span
+                key="loading"
+                className="flex items-center gap-1.5 text-xs text-dark-400"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              >
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                {t('common.loading')}
+              </motion.span>
+            ) : (
+              <motion.span
+                key="offline"
+                className="flex items-center gap-1.5 text-xs text-danger"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              >
+                <XCircle className="w-3.5 h-3.5" />
+                <span className="truncate max-w-[140px]">
+                  {server.last_error || t('common.offline')}
+                </span>
+              </motion.span>
+            )}
+          </AnimatePresence>
+        </div>
+
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <Tooltip label={t('servers.open_dashboard')}>
+            <motion.button
+              onClick={() => actions.openDashboard(server.id)}
+              className="p-2 rounded-lg transition-all text-accent-400 hover:bg-accent-500/10"
+              whileTap={{ scale: 0.9 }}
+            >
+              <Activity className="w-3.5 h-3.5" />
+            </motion.button>
+          </Tooltip>
+
+          <Tooltip label={server.is_active ? t('servers.monitoring_enabled') : t('servers.monitoring_disabled')}>
+            <motion.button
+              onClick={() => actions.toggleMonitoring(server.id, !server.is_active)}
+              className={`p-2 rounded-lg transition-all ${
+                server.is_active
+                  ? 'text-success hover:bg-success/10'
+                  : 'text-dark-500 hover:bg-dark-700/50'
+              }`}
+              whileTap={{ scale: 0.9 }}
+            >
+              <Power className="w-3.5 h-3.5" />
+            </motion.button>
+          </Tooltip>
+
+          <Tooltip label={t('common.test')}>
+            <motion.button
+              onClick={() => actions.test(server.id)}
+              disabled={isTesting || !server.is_active}
+              className={`p-2 rounded-lg transition-all text-dark-300 hover:bg-dark-700/50 ${
+                !server.is_active ? 'opacity-40 cursor-not-allowed' : ''
+              }`}
+              whileTap={{ scale: server.is_active ? 0.9 : 1 }}
+            >
+              {isTesting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Zap className="w-3.5 h-3.5" />
+              )}
+            </motion.button>
+          </Tooltip>
+
+          <Tooltip label={isEditing ? t('common.cancel') : t('common.edit')}>
+            <motion.button
+              onClick={() => (isEditing ? actions.cancelEdit() : actions.edit(server))}
+              className={`p-2 rounded-lg transition-all ${
+                isEditing
+                  ? 'text-accent-400 bg-accent-500/10'
+                  : 'text-dark-300 hover:bg-dark-700/50'
+              }`}
+              whileTap={{ scale: 0.9 }}
+            >
+              {isEditing ? <X className="w-3.5 h-3.5" /> : <Edit2 className="w-3.5 h-3.5" />}
+            </motion.button>
+          </Tooltip>
+
+          <Tooltip label={t('common.delete')}>
+            <motion.button
+              onClick={() => (isDeleteArmed ? actions.confirmDelete(server.id) : actions.armDelete(server.id))}
+              className={`p-2 rounded-lg transition-all ${
+                isDeleteArmed
+                  ? 'bg-danger text-white'
+                  : 'text-danger hover:bg-danger/10'
+              }`}
+              whileTap={{ scale: 0.9 }}
+              animate={isDeleteArmed ? { scale: [1, 1.1, 1] } : {}}
+              transition={{ duration: 0.15 }}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </motion.button>
+          </Tooltip>
+        </div>
+      </div>
+    </div>
+  )
+})
+
+interface SortableServerProps extends Omit<ServerListCardProps, 'dragHandle'> {
+  /** Форма правки под карточкой — только у сервера, который сейчас редактируют */
+  editForm: ReactNode
+  className?: string
+  /** Карточку монтирует прокрутка: анимация появления меняла бы transform и дёргала страницу */
+  lazy?: boolean
+}
+
 // transform перетаскивания — на этой обёртке, а анимация появления — на вложенном motion.div:
 // framer-motion пишет свой transform и на том же элементе глушил бы сдвиг от dnd-kit
-function SortableServer({ id, className, children }: {
-  id: number
-  className: string
-  children: (handle: ServerDragHandle, isDragging: boolean) => ReactNode
-}) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id })
+const SortableServer = memo(function SortableServer({
+  editForm, className = '', lazy = false, ...cardProps
+}: SortableServerProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: cardProps.server.id })
+  // Обёртку dnd-kit перерисовывает на каждый сдвиг соседей; ручка — тот же объект, пока
+  // не сменились обработчики, поэтому карточка под memo эти перерисовки пропускает
+  const dragHandle = useMemo(() => ({ attributes, listeners }), [attributes, listeners])
+
   return (
     <div
       ref={setNodeRef}
       className={`${className} ${isDragging ? 'opacity-30' : ''}`}
       style={{ transform: CSS.Transform.toString(transform), transition }}
     >
-      {children({ attributes, listeners }, isDragging)}
+      <motion.div
+        initial={isDragging || lazy ? false : { opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.15 }}
+      >
+        <ServerListCard {...cardProps} dragHandle={dragHandle} />
+        <AnimatePresence>{editForm}</AnimatePresence>
+      </motion.div>
     </div>
   )
+})
+
+interface ServerGridItemProps extends Omit<SortableServerProps, 'className' | 'lazy'> {
+  /** null — парк небольшой, карточки монтируются сразу */
+  placeholder: CardPlaceholder | null
+  holdMounted: boolean
+  dragged: boolean
 }
+
+const ServerGridItem = memo(function ServerGridItem({
+  placeholder, holdMounted, dragged, ...serverProps
+}: ServerGridItemProps) {
+  const { isEditing } = serverProps
+  // Открытая форма правки занимает весь ряд сетки
+  const spanClass = isEditing ? 'col-span-full' : ''
+
+  if (!placeholder) return <SortableServer {...serverProps} className={spanClass} />
+
+  // Сервер с открытой формой остаётся в DOM и вдали от экрана: иначе при возврате
+  // к нему форма разворачивалась бы заново
+  return (
+    <LazySlot placeholder={placeholder} holdMounted={holdMounted || isEditing} dragged={dragged} className={spanClass}>
+      <SortableServer {...serverProps} lazy />
+    </LazySlot>
+  )
+})
 
 export default function Servers() {
   const { servers, fetchServersWithMetrics, addServer, deleteServer, testServer, updateServer, toggleServer } = useServersStore()
@@ -206,7 +552,10 @@ export default function Servers() {
   const { uid } = useParams()
   const navigate = useNavigate()
 
-  const openDashboard = (serverId: number) => navigate(`/${uid}/server/${serverId}`)
+  const openDashboard = useCallback(
+    (serverId: number) => navigate(`/${uid}/server/${serverId}`),
+    [navigate, uid],
+  )
 
   const board = useFolderBoard(servers)
   const [collapsedFolders, toggleFolderCollapsed] = useCollapsedFolders(COLLAPSED_FOLDERS_KEY)
@@ -296,6 +645,21 @@ export default function Servers() {
   // Папки как на дашборде: общий порядок папок, внутри — порядок карточек.
   // При поиске пустые папки не показываем — в них нечего искать
   const groupedServers = useMemo(() => groupByFolder(filteredServers), [filteredServers])
+
+  // SortableContext кладёт items в свой контекст: массив, собранный прямо в JSX, новый
+  // на каждом рендере, и все карточки перерисовывались бы в обход memo
+  const sortableIds = useMemo(() => {
+    const ids = new Map<string | null, number[]>()
+    groupedServers.forEach((list, folder) => ids.set(folder, list.map(s => s.id)))
+    return ids
+  }, [groupedServers])
+
+  // По размеру парка, а не по числу найденных: иначе поиск, сузив список до порога,
+  // переключал бы режим и разом монтировал сотни карточек
+  const lazyCards = servers.length > LAZY_CARDS_MIN_SERVERS
+  const cardPlaceholder = useSlotPlaceholder(SERVER_CARD_LAYOUT_KEY, SERVER_CARD_HEIGHT_ESTIMATE)
+  const isDragActive = board.activeServerId !== null || board.activeFolderName !== null
+
   const folderNames = useMemo(
     () => collectFolders(filteredServers, isSearching ? [] : board.emptyFolders, board.folderOrder),
     [filteredServers, isSearching, board.emptyFolders, board.folderOrder],
@@ -831,7 +1195,7 @@ export default function Servers() {
     }
   }
 
-  const handleEdit = (server: typeof servers[0]) => {
+  const handleEdit = useCallback((server: ServerWithMetrics) => {
     setShowForm(false)
     setEditingId(server.id)
     const { host, port } = parseServerUrl(server.url)
@@ -843,12 +1207,12 @@ export default function Servers() {
       folder: server.folder ?? null,
     })
     setError('')
-  }
+  }, [])
 
-  const handleCancel = () => {
+  const handleCancel = useCallback(() => {
     if (isDeploying) return
     resetForm()
-  }
+  }, [isDeploying, resetForm])
 
   const handleCopyToken = async () => {
     if (!installerToken) return
@@ -866,7 +1230,7 @@ export default function Servers() {
     setTimeout(() => setTokenCopied(false), 2000)
   }
 
-  const handleTest = async (serverId: number) => {
+  const handleTest = useCallback(async (serverId: number) => {
     setTestingId(serverId)
     const result = await testServer(serverId)
     setTestResults(prev => ({ ...prev, [serverId]: result }))
@@ -876,284 +1240,46 @@ export default function Servers() {
       toast.error(result.message || t('servers.test_failed'))
     }
     setTestingId(null)
-  }
-  
-  const handleDelete = async (serverId: number) => {
-    if (deleteConfirm === serverId) {
-      await deleteServer(serverId)
-      toast.success(t('servers.server_deleted'))
-      setDeleteConfirm(null)
-    } else {
-      setDeleteConfirm(serverId)
-      setTimeout(() => setDeleteConfirm(null), 3000)
-    }
-  }
-  
-  const handleCardClick = (event: MouseEvent, serverId: number) => {
-    if ((event.target as HTMLElement).closest(CARD_CONTROLS_SELECTOR)) return
+  }, [testServer, t])
+
+  // Удаление в два клика: первый взводит кнопку на три секунды, второй удаляет
+  const armDelete = useCallback((serverId: number) => {
+    setDeleteConfirm(serverId)
+    setTimeout(() => setDeleteConfirm(null), 3000)
+  }, [])
+
+  const confirmDelete = useCallback(async (serverId: number) => {
+    await deleteServer(serverId)
+    toast.success(t('servers.server_deleted'))
+    setDeleteConfirm(null)
+  }, [deleteServer, t])
+
+  const toggleSelected = useCallback((serverId: number) => {
     setSelectedServerId(prev => (prev === serverId ? null : serverId))
-  }
+  }, [])
 
-  const cardBorderClass = (server: ServerWithMetrics, isEditing: boolean, isSelected: boolean) => {
-    if (isEditing) return 'rounded-b-none border-b-0 border-accent-500/30'
-    if (isSelected) return 'border-accent-500/60 ring-1 ring-accent-500/30'
-    return server.is_active ? 'hover:border-dark-700' : 'border-dark-700/50'
-  }
+  // Ссылки на обработчики постоянны, пока не меняется то, от чего они зависят: ввод в поиске
+  // и перетаскивание перерисовывают страницу, но не карточки под memo
+  const cardActions = useMemo<ServerCardActions>(() => ({
+    toggleSelected,
+    openDashboard,
+    toggleMonitoring: toggleServer,
+    test: handleTest,
+    edit: handleEdit,
+    cancelEdit: handleCancel,
+    armDelete,
+    confirmDelete,
+  }), [toggleSelected, openDashboard, toggleServer, handleTest, handleEdit, handleCancel, armDelete, confirmDelete])
 
-  const renderServerCard = (server: ServerWithMetrics, dragHandle?: ServerDragHandle) => {
-    const isEditing = editingId === server.id
-    const isSelected = selectedServerId === server.id
-    const isTesting = testingId === server.id
-    const testResult = testResults[server.id]
-
-    return (
-      <div
-        onClick={(e) => handleCardClick(e, server.id)}
-        className={`card group transition-all overflow-visible flex flex-col cursor-pointer ${
-          server.is_active ? '' : 'opacity-60'
-        } ${cardBorderClass(server, isEditing, isSelected)}`}
-      >
-        {/* Шапка: иконка + имя + URL */}
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            {...dragHandle?.attributes}
-            {...dragHandle?.listeners}
-            className="p-1.5 -ml-2 -mr-1 text-dark-500 hover:text-dark-400 cursor-grab active:cursor-grabbing rounded touch-none flex-shrink-0"
-          >
-            <GripVertical className="w-4 h-4" />
-          </button>
-          <div
-            className={`w-10 h-10 rounded-xl flex items-center justify-center border flex-shrink-0 transition-colors ${
-              server.is_active
-                ? 'bg-gradient-to-br from-dark-700 to-dark-800 border-dark-700/50 group-hover:border-accent-500/30'
-                : 'bg-dark-800/50 border-dark-700/30'
-            }`}
-          >
-            <ServerIcon className={`w-4 h-4 ${server.is_active ? 'text-accent-500' : 'text-dark-500'}`} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h3 className="font-semibold text-dark-100 flex items-center gap-2 truncate">
-              <button
-                type="button"
-                onClick={() => openDashboard(server.id)}
-                title={t('servers.open_dashboard')}
-                className="truncate text-left hover:text-accent-400 transition-colors"
-              >
-                {server.name}
-              </button>
-              <span
-                className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                  !server.is_active
-                    ? 'bg-dark-500'
-                    : server.status === 'online'
-                      ? 'bg-success'
-                      : server.status === 'loading'
-                        ? 'bg-dark-400 animate-pulse'
-                        : 'bg-danger'
-                }`}
-              />
-              {nodeIsRestricted(server) && (
-                <Tooltip
-                  maxWidth={320}
-                  label={
-                    <span>
-                      {t('node_caps.badge_tooltip_title')}
-                      <br />
-                      {t('node_caps.allowed', { allowed: describeAllowedDomains(server, t) })}
-                      <br />
-                      {t('node_caps.where')}
-                    </span>
-                  }
-                >
-                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple/10 text-purple text-2xs font-medium flex-shrink-0">
-                    <Lock className="w-3.5 h-3.5" />
-                    {t('servers.restricted_badge')}
-                  </span>
-                </Tooltip>
-              )}
-              {server.uses_shared_cert ? (
-                <Tooltip label={t('servers.shared_cert_tooltip')}>
-                  <ShieldCheck className="w-3.5 h-3.5 text-success flex-shrink-0" />
-                </Tooltip>
-              ) : server.auth_kind === 'dedicated' ? (
-                <Tooltip label={t('servers.dedicated_cert_tooltip')}>
-                  <ShieldCheck className="w-3.5 h-3.5 text-accent-400 flex-shrink-0" />
-                </Tooltip>
-              ) : (
-                <Tooltip label={t('servers.needs_migration_tooltip')}>
-                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-warning/10 text-warning text-2xs font-medium flex-shrink-0">
-                    <ShieldAlert className="w-3.5 h-3.5" />
-                    {server.auth_kind === 'legacy'
-                      ? t('servers.legacy_badge')
-                      : t('servers.old_key_badge')}
-                  </span>
-                </Tooltip>
-              )}
-            </h3>
-            <p className="text-xs text-dark-500 flex items-center gap-1.5 min-w-0">
-              <CopyableIp value={extractHost(server.url)} display={server.url} className="truncate" />
-              <a
-                href={server.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-accent-400 transition-colors flex-shrink-0"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            </p>
-          </div>
-        </div>
-
-        {/* Статус + кнопки действий */}
-        <div className="flex items-center justify-between mt-3 pt-3 border-t border-dark-700/30 gap-2">
-          <div className="flex-1 min-w-0">
-            <AnimatePresence mode="wait">
-              {testResult ? (
-                <motion.div
-                  key="test-result"
-                  className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg w-fit ${
-                    testResult.status === 'online'
-                      ? 'text-success bg-success/10'
-                      : 'text-danger bg-danger/10'
-                  }`}
-                  initial={{ opacity: 0, scale: 0.8 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
-                >
-                  {testResult.status === 'online' ? (
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                  ) : (
-                    <XCircle className="w-3.5 h-3.5" />
-                  )}
-                  <span className="truncate max-w-[140px]">
-                    {testResult.status === 'online'
-                      ? t('common.connected')
-                      : testResult.message || t('common.failed')}
-                  </span>
-                </motion.div>
-              ) : !server.is_active ? (
-                <motion.span
-                  key="disabled"
-                  className="px-2 py-0.5 text-xs font-medium bg-dark-700/50 text-dark-400 rounded-full"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                >
-                  {t('servers.disabled')}
-                </motion.span>
-              ) : server.status === 'online' ? (
-                <motion.span
-                  key="online"
-                  className="flex items-center gap-1.5 text-xs text-success"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                >
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  {t('common.online')}
-                </motion.span>
-              ) : server.status === 'loading' ? (
-                <motion.span
-                  key="loading"
-                  className="flex items-center gap-1.5 text-xs text-dark-400"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                >
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  {t('common.loading')}
-                </motion.span>
-              ) : (
-                <motion.span
-                  key="offline"
-                  className="flex items-center gap-1.5 text-xs text-danger"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                >
-                  <XCircle className="w-3.5 h-3.5" />
-                  <span className="truncate max-w-[140px]">
-                    {server.last_error || t('common.offline')}
-                  </span>
-                </motion.span>
-              )}
-            </AnimatePresence>
-          </div>
-
-          <div className="flex items-center gap-1 flex-shrink-0">
-            <Tooltip label={t('servers.open_dashboard')}>
-              <motion.button
-                onClick={() => openDashboard(server.id)}
-                className="p-2 rounded-lg transition-all text-accent-400 hover:bg-accent-500/10"
-                whileTap={{ scale: 0.9 }}
-              >
-                <Activity className="w-3.5 h-3.5" />
-              </motion.button>
-            </Tooltip>
-
-            <Tooltip label={server.is_active ? t('servers.monitoring_enabled') : t('servers.monitoring_disabled')}>
-              <motion.button
-                onClick={() => toggleServer(server.id, !server.is_active)}
-                className={`p-2 rounded-lg transition-all ${
-                  server.is_active
-                    ? 'text-success hover:bg-success/10'
-                    : 'text-dark-500 hover:bg-dark-700/50'
-                }`}
-                whileTap={{ scale: 0.9 }}
-              >
-                <Power className="w-3.5 h-3.5" />
-              </motion.button>
-            </Tooltip>
-
-            <Tooltip label={t('common.test')}>
-              <motion.button
-                onClick={() => handleTest(server.id)}
-                disabled={isTesting || !server.is_active}
-                className={`p-2 rounded-lg transition-all text-dark-300 hover:bg-dark-700/50 ${
-                  !server.is_active ? 'opacity-40 cursor-not-allowed' : ''
-                }`}
-                whileTap={{ scale: server.is_active ? 0.9 : 1 }}
-              >
-                {isTesting ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Zap className="w-3.5 h-3.5" />
-                )}
-              </motion.button>
-            </Tooltip>
-
-            <Tooltip label={isEditing ? t('common.cancel') : t('common.edit')}>
-              <motion.button
-                onClick={() => (isEditing ? handleCancel() : handleEdit(server))}
-                className={`p-2 rounded-lg transition-all ${
-                  isEditing
-                    ? 'text-accent-400 bg-accent-500/10'
-                    : 'text-dark-300 hover:bg-dark-700/50'
-                }`}
-                whileTap={{ scale: 0.9 }}
-              >
-                {isEditing ? <X className="w-3.5 h-3.5" /> : <Edit2 className="w-3.5 h-3.5" />}
-              </motion.button>
-            </Tooltip>
-
-            <Tooltip label={t('common.delete')}>
-              <motion.button
-                onClick={() => handleDelete(server.id)}
-                className={`p-2 rounded-lg transition-all ${
-                  deleteConfirm === server.id
-                    ? 'bg-danger text-white'
-                    : 'text-danger hover:bg-danger/10'
-                }`}
-                whileTap={{ scale: 0.9 }}
-                animate={deleteConfirm === server.id ? { scale: [1, 1.1, 1] } : {}}
-                transition={{ duration: 0.15 }}
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </motion.button>
-            </Tooltip>
-          </div>
-        </div>
-      </div>
-    )
-  }
+  const cardStateOf = (server: ServerWithMetrics) => ({
+    server,
+    isEditing: editingId === server.id,
+    isSelected: selectedServerId === server.id,
+    isTesting: testingId === server.id,
+    isDeleteArmed: deleteConfirm === server.id,
+    testResult: testResults[server.id],
+    actions: cardActions,
+  })
 
   const renderEditForm = () => (
     <motion.div
@@ -1268,26 +1394,20 @@ export default function Servers() {
     </motion.div>
   )
 
-  const renderServerItem = (server: ServerWithMetrics) => (
-    <SortableServer key={server.id} id={server.id} className={editingId === server.id ? 'col-span-full' : ''}>
-      {(handle, isDragging) => (
-        <motion.div
-          initial={isDragging ? false : { opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.15 }}
-        >
-          {renderServerCard(server, handle)}
-          <AnimatePresence>
-            {editingId === server.id && renderEditForm()}
-          </AnimatePresence>
-        </motion.div>
-      )}
-    </SortableServer>
-  )
-
-  const renderServerGrid = (list: ServerWithMetrics[]) => (
-    <SortableContext items={list.map(s => s.id)} strategy={rectSortingStrategy}>
-      <div className={SERVER_GRID_CLASS}>{list.map(server => renderServerItem(server))}</div>
+  const renderServerGrid = (folder: string | null, list: ServerWithMetrics[]) => (
+    <SortableContext items={sortableIds.get(folder) ?? NO_IDS} strategy={rectSortingStrategy}>
+      <div className={SERVER_GRID_CLASS}>
+        {list.map(server => (
+          <ServerGridItem
+            key={server.id}
+            {...cardStateOf(server)}
+            editForm={editingId === server.id ? renderEditForm() : null}
+            placeholder={lazyCards ? cardPlaceholder : null}
+            holdMounted={isDragActive}
+            dragged={server.id === board.activeServerId}
+          />
+        ))}
+      </div>
     </SortableContext>
   )
 
@@ -1377,7 +1497,7 @@ export default function Servers() {
       </motion.div>
       
       {/* Infrastructure Tree */}
-      <InfraTree highlightedServerId={selectedServerId} />
+      <InfraTreeMemo highlightedServerId={selectedServerId} />
 
       <MigrationBanner onMigrated={fetchServersWithMetrics} />
 
@@ -1809,7 +1929,7 @@ export default function Servers() {
                     }
                   >
                     {members.length > 0 ? (
-                      renderServerGrid(members)
+                      renderServerGrid(name, members)
                     ) : (
                       <div className="py-6 text-center text-dark-500 text-xs">{t('dashboard.no_servers')}</div>
                     )}
@@ -1823,14 +1943,14 @@ export default function Servers() {
               hasServers={unfolderedServers.length > 0}
               hasFolders={folderNames.length > 0}
             >
-              {renderServerGrid(unfolderedServers)}
+              {renderServerGrid(null, unfolderedServers)}
             </UnfolderDropZone>
           </div>
 
           <DragOverlay>
             {activeServer && (
               <div className="opacity-90 rounded-2xl shadow-2xl shadow-accent-500/20 ring-2 ring-accent-500/30">
-                {renderServerCard(activeServer)}
+                <ServerListCard {...cardStateOf(activeServer)} />
               </div>
             )}
             {board.activeFolderName && (

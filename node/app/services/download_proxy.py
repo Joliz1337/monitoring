@@ -45,6 +45,15 @@ NODE_DIR = "/opt/monitoring-node"
 NODE_ENV = NODE_DIR + "/.env"
 AGENT_ENV_LOCATION = "monitoring-api: env"
 
+# В адресе прокси бывают логин и пароль — эти файлы читает только root. apt
+# разбирает конфиг от root и сам передаёт прокси методу загрузки (_apt).
+# Drop-in Docker сюда не входит: systemd отдаёт Environment= любому пользователю
+# через `systemctl show`, а на файл без чтения для всех ругается при каждом
+# daemon-reload — 600 там ничего не прячет
+CREDENTIAL_FILES = frozenset({
+    MONITORING_CONF, APT_OWN, GITCONFIG, NODE_ENV, DOCKER_CLIENT_CONFIG,
+})
+
 # Без кавычек, пробелов и символов, которые shell или systemd разберут по-своему:
 # адрес уходит в sourced proxy.conf, apt.conf и Environment= юнита Docker
 PROXY_URL_PATTERN = r"^https?://[A-Za-z0-9._~%!*+,=:@\[\]-]+/?$"
@@ -384,7 +393,7 @@ class DownloadProxyManager:
 
     async def _apply(self, changes: HostChanges) -> dict:
         for path, content in changes.writes.items():
-            mode = "600" if path in (MONITORING_CONF, GITCONFIG, NODE_ENV, DOCKER_CLIENT_CONFIG) else "644"
+            mode = "600" if path in CREDENTIAL_FILES else "644"
             if not await write_host_file(path, content, mode=mode, secret=True):
                 raise DownloadProxyError(f"не удалось записать {path}")
         if changes.deletes:

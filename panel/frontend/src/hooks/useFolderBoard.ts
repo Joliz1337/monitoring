@@ -28,6 +28,12 @@ const UNFOLDER_OVER_ID = '__unfolder__'
 // и сохранение порядка отправило бы на бэк неполный набор id
 const NO_SENSORS: SensorDescriptor<object>[] = []
 
+// Настройки сенсоров — константы: dnd-kit сравнивает их по ссылке, и объект, собранный
+// на каждом рендере, менял бы обработчики ручки у всех карточек сразу, в обход memo
+const POINTER_SENSOR_OPTIONS = { activationConstraint: { distance: 8 } }
+const TOUCH_SENSOR_OPTIONS = { activationConstraint: { delay: 200, tolerance: 8 } }
+const KEYBOARD_SENSOR_OPTIONS = { coordinateGetter: sortableKeyboardCoordinates }
+
 type FolderDialog =
   | { kind: 'none' }
   | { kind: 'create' }
@@ -55,9 +61,9 @@ export function useFolderBoard(servers: ServerWithMetrics[]) {
   const [dialog, setDialog] = useState<FolderDialog>({ kind: 'none' })
 
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+    useSensor(PointerSensor, POINTER_SENSOR_OPTIONS),
+    useSensor(TouchSensor, TOUCH_SENSOR_OPTIONS),
+    useSensor(KeyboardSensor, KEYBOARD_SENSOR_OPTIONS)
   )
 
   const collisionDetection: CollisionDetection = useCallback((args) => {

@@ -189,7 +189,7 @@ class XrayStatsCollector:
         if not settings or not settings.api_url or not settings.api_token:
             return
 
-        api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
+        api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret, settings.verify_tls)
         cycle_started = time.monotonic()
         try:
             nodes = await api.get_all_nodes()
@@ -364,7 +364,7 @@ class XrayStatsCollector:
         last_error = None
 
         for attempt in range(1, max_retries + 1):
-            api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
+            api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret, settings.verify_tls)
             try:
                 users = await api.get_all_users_paginated(size=200, concurrency=5)
 
@@ -508,7 +508,7 @@ class XrayStatsCollector:
             logger.debug("HWID sync skipped: API not configured")
             return
 
-        api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
+        api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret, settings.verify_tls)
         try:
             devices = await api.get_all_hwid_devices_paginated(size=200, concurrency=5)
             logger.info(f"HWID API returned {len(devices)} devices")
@@ -1008,7 +1008,7 @@ class XrayStatsCollector:
 
     async def _user_daily_traffic(self, settings: RemnawaveSettings, user_id: int, user_uuid: str | None) -> int | None:
         """Расход трафика пользователя за сутки; None — данные недоступны (уведомление тогда шлём)."""
-        api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
+        api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret, settings.verify_tls)
         try:
             return await api.get_user_traffic_bytes(user_id, user_uuid)
         except Exception as e:
@@ -1021,7 +1021,7 @@ class XrayStatsCollector:
         """Авто-очистка HWID устройств при превышении лимита."""
         limit = cached.hwid_device_limit
         who = cached.username or cached.email
-        api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret)
+        api = get_remnawave_api(settings.api_url, settings.api_token, settings.cookie_secret, settings.verify_tls)
         try:
             await api.delete_all_user_hwid_devices(cached.email, cached.uuid)
             logger.info(f"HWID auto-clear: {who} had {current}/{limit} devices, cleared")

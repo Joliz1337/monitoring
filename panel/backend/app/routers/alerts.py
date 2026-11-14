@@ -13,6 +13,10 @@ from app.services.server_alerter import get_server_alerter
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
+# Сохранённый токен бота наружу не отдаётся: вместо него уходит маска,
+# а маска, вернувшаяся в PUT, значит «токен не менять»
+SECRET_MASK = "***"
+
 
 class AlertSettingsUpdate(BaseModel):
     enabled: Optional[bool] = None
@@ -111,14 +115,13 @@ class AlertSettingsUpdate(BaseModel):
 
 
 class TelegramTestRequest(BaseModel):
-    bot_token: str
     chat_id: str
 
 
 def _settings_to_dict(s: AlertSettings) -> dict:
     return {
         "enabled": s.enabled,
-        "telegram_bot_token": s.telegram_bot_token or "",
+        "telegram_bot_token": SECRET_MASK if s.telegram_bot_token else "",
         "telegram_chat_id": s.telegram_chat_id or "",
         "language": s.language or "en",
         "check_interval": s.check_interval,
@@ -227,6 +230,8 @@ async def update_alert_settings(
         "packet_loss_excluded_server_ids", "steal_excluded_server_ids",
     }
     update_data = data.model_dump(exclude_unset=True)
+    if update_data.get("telegram_bot_token") == SECRET_MASK:
+        del update_data["telegram_bot_token"]
     for key, value in update_data.items():
         if key in json_list_fields:
             setattr(settings, key, json.dumps(value) if value is not None else None)
@@ -239,9 +244,14 @@ async def update_alert_settings(
 
 
 @router.post("/test-telegram", dependencies=[Depends(verify_auth)])
-async def test_telegram(data: TelegramTestRequest):
+async def test_telegram(data: TelegramTestRequest, db: AsyncSession = Depends(get_db)):
+    bot_token = await db.scalar(select(AlertSettings.telegram_bot_token).limit(1))
+    # Соединение возвращается в пул до похода в Telegram
+    await db.commit()
+    if not bot_token:
+        return {"success": False, "error": "Bot token is not saved"}
     alerter = get_server_alerter()
-    return await alerter.test_telegram(data.bot_token, data.chat_id)
+    return await alerter.test_telegram(bot_token, data.chat_id)
 
 
 @router.get("/status", dependencies=[Depends(verify_auth)])

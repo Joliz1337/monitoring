@@ -1232,7 +1232,8 @@ function SettingsTab() {
   const [showCookie, setShowCookie] = useState(false)
   const [showAnomalyToken, setShowAnomalyToken] = useState(false)
   const [form, setForm] = useState({
-    api_url: '', api_token: '', cookie_secret: '', enabled: false, collection_interval: 300, ip_history_days: 30,
+    api_url: '', api_token: '', cookie_secret: '', verify_tls: true,
+    enabled: false, collection_interval: 300, ip_history_days: 30,
     anomaly_enabled: false, anomaly_use_custom_bot: false,
     anomaly_ip_enabled: true, anomaly_hwid_enabled: true,
     anomaly_ua_enabled: true, anomaly_devdata_enabled: true,
@@ -1266,6 +1267,7 @@ function SettingsTab() {
         api_url: s.api_url || '',
         api_token: '',
         cookie_secret: '',
+        verify_tls: s.verify_tls ?? true,
         enabled: s.enabled,
         collection_interval: s.collection_interval,
         ip_history_days: s.ip_history_days ?? 30,
@@ -1323,6 +1325,7 @@ function SettingsTab() {
       await handleSave()
       const res = await remnawaveApi.testConnection()
       if (res.data.success) toast.success(t('remnawave.connectionOk'))
+      else if (res.data.error_code === 'tls_untrusted') toast.error(t('remnawave.tlsUntrusted'))
       else toast.error(res.data.error || 'Connection failed')
     } catch { toast.error('Error') } finally { setTesting(false) }
   }
@@ -1413,6 +1416,14 @@ function SettingsTab() {
                     {showCookie ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
+              </div>
+
+              <div>
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <Checkbox checked={form.verify_tls} onChange={e => updateField('verify_tls', e.target.checked)} />
+                  <span className="text-sm text-dark-300">{t('remnawave.verifyTls')}</span>
+                </label>
+                <p className="text-xs text-dark-500 mt-1 ml-6">{t('remnawave.verifyTlsHint')}</p>
               </div>
 
               <motion.button onClick={handleTest} disabled={testing}

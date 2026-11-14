@@ -11,9 +11,15 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+# httpx пишет на INFO каждый запрос с полным URL: сотни строк в секунду на большом
+# парке и токен Telegram-бота из адреса запроса. asyncssh на INFO пишет команду
+# установки ноды целиком, вместе с NODE_SECRET.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("asyncssh").setLevel(logging.WARNING)
 
 from app.database import init_db, async_session
-from app.config import get_settings
+from app.config import InsecureSettingsError, JWT_SECRET_MIN_LENGTH, get_settings
 from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles, reserved_ports, node_image, remnawave_install, haproxy_upgrade, xray_test, exit_proxy, source_pool, loss, port_usage
 from app.routers import gre, ip_search
 from app.services.metrics_collector import start_collector, stop_collector
@@ -68,8 +74,24 @@ async def cleanup_expired_bans():
         logger.error(f"Error cleaning up expired bans: {e}")
 
 
+def refuse_unset_secrets() -> None:
+    """Не запускать панель с паролем или секретом JWT, которые не задавали."""
+    unset = settings.unset_secrets()
+    for variable in unset:
+        logger.critical(
+            "%s is empty or left at the built-in default — set it in the panel .env, "
+            "the panel does not start without it", variable,
+        )
+    if unset:
+        raise InsecureSettingsError(unset)
+    if len(settings.jwt_secret) < JWT_SECRET_MIN_LENGTH:
+        logger.warning("JWT_SECRET is shorter than %d characters", JWT_SECRET_MIN_LENGTH)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Проверка здесь, а не при импорте: тесты импортируют модули со значениями из config.py
+    refuse_unset_secrets()
     # Гарантируем ключ шифрования до миграций/чтения секретов — бэкенд не должен
     # зависеть от того, отработал ли провижининг установщиком.
     from app import crypto
@@ -126,10 +148,12 @@ async def lifespan(app: FastAPI):
 
     # Неподтверждённую транзакцию доп. IP нода откатит сама по таймеру
     await cancel_all_jobs()
-    await close_http_clients()
     # Ядра прокси добиваются до остальных сервисов: это внешние процессы,
     # переживающие остановку панели, если их не убить явно.
     await stop_xray_test_service()
+    # Сборщик — сразу за ними: его остановка дописывает в базу хвост трафика и
+    # последние ответы нод, и в конце очереди её первой оборвал бы таймаут остановки.
+    await stop_collector()
     await stop_traffic_import()
     await stop_gre()
     await stop_source_pool()
@@ -147,8 +171,10 @@ async def lifespan(app: FastAPI):
     await stop_geoip_updater()
     await blocklist_manager.stop()
     await stop_panel_host_sampler()
-    await stop_collector()
     await stop_telegram_bot_service()
+    # HTTP-клиенты — последними: ими ходят к нодам все сервисы выше, а опрос,
+    # оборванный закрытым клиентом, записал бы ноде ложный last_error.
+    await close_http_clients()
 
 
 def get_version() -> str:

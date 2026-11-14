@@ -4,11 +4,14 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
+import tempfile
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import BinaryIO, Optional
 
 from app import crypto
 
@@ -21,10 +24,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # отдаёт базовый класс, который isinstance по наследнику не признаёт
 from starlette.datastructures import UploadFile
 
-from app.auth import verify_auth
+from app.auth import revoke_sessions_after_restore, verify_auth
 from app.config import get_settings
 from app.database import async_session, async_session_maker, database_maintenance, get_db
 from app.services import backup_telegram
+from app.services.fleet_history import forget_fleet_history
 from app.services.http_client import close_http_clients, init_http_clients
 from app.services.pki import load_or_create_keygen
 
@@ -35,11 +39,22 @@ BACKUP_DIR = Path("/app/data/backups")
 POSTGRES_CONTAINER = "panel-postgres"
 MAX_BACKUPS = 20
 PG_DUMP_TIMEOUT_SEC = 600
+PG_RESTORE_PHASE_TIMEOUT_SEC = 600
 # Сырые замеры раз в 10 секунд живут всего сутки, но при 2000 нодах это ~17 млн
 # строк и ~5 ГБ: дамп с ними не укладывался ни в таймаут, ни в память. Из дампа
 # выпадают только строки — определение таблицы остаётся, и restore создаёт её
 # пустой; часовые и суточные агрегаты едут в бэкапе целиком.
 RAW_METRICS_TABLE = "metrics_snapshots"
+# В бэкапе лежит весь .env панели, поэтому при заданном пароле архива файл
+# шифруется им целиком и получает добавочное расширение: backup_<дата>.dump.enc.
+# Без пароля бэкап остаётся открытым .dump.
+PLAIN_SUFFIX = ".dump"
+ENCRYPTED_SUFFIX = ".dump.enc"
+# Бэкап пишется под временным именем: в список, под скачивание и под чистку
+# старых попадают только готовые файлы обоих видов
+PARTIAL_SUFFIX = ".part"
+MIN_BACKUP_BYTES = 16
+COPY_CHUNK_BYTES = 1024 * 1024
 
 # Весь .env панели едет внутри .dump заголовком — чтобы бэкапом можно было
 # восстановить панель полностью (логин, секреты, ключ шифрования). Без ключа
@@ -49,6 +64,9 @@ RAW_METRICS_TABLE = "metrics_snapshots"
 PANEL_ENV_PATH = Path("/opt/monitoring-panel/.env")
 _BACKUP_MAGIC = b"MONBKP1\n"     # v1: только PANEL_ENC_KEY (легаси dev-бэкапы)
 _BACKUP_MAGIC_V2 = b"MONBKP2\n"  # v2: весь .env; сырой pg_dump начинается с "PGDMP"
+# Строка заголовка — длина .env (v2) или ключ (v1). Потолок — чтобы битый файл
+# без перевода строки не читался в память до конца.
+_FRAME_LINE_MAX_BYTES = 256
 # Не восстанавливаем из бэкапа — специфичны для конкретной установки/postgres
 _ENV_PRESERVE = {
     "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
@@ -77,29 +95,56 @@ def _pg_env() -> tuple[str, str]:
     return s.postgres_user, s.postgres_db
 
 
-def _run_pg_dump() -> tuple[bytes, str | None]:
+def _run_pg_dump(target: BinaryIO) -> tuple[int, str | None]:
+    """Снять дамп в конец target; вернуть размер дампа и причину провала.
+
+    pg_dump пишет в сам дескриптор файла: дамп в сотни мегабайт не проходит
+    через память бэкенда.
+    """
     user, db = _pg_env()
     started = time.monotonic()
+    # Дочерний процесс пишет с позиции дескриптора — буфер Python к этому
+    # моменту должен быть на диске
+    target.flush()
+    dump_start = target.tell()
     try:
         result = subprocess.run(
             [
                 "docker", "exec", POSTGRES_CONTAINER, "pg_dump", "-U", user, "-d", db, "-Fc",
                 f"--exclude-table-data={RAW_METRICS_TABLE}",
             ],
-            capture_output=True,
+            stdout=target,
+            stderr=subprocess.PIPE,
             timeout=PG_DUMP_TIMEOUT_SEC,
         )
     except subprocess.TimeoutExpired:
         # Обычный провал, а не исключение: вылетев наружу, таймаут обходил запись
         # запуска автобэкапа, и расписание стартовало новый дамп каждую минуту
-        return b"", f"pg_dump timed out after {PG_DUMP_TIMEOUT_SEC} s"
+        return 0, f"pg_dump timed out after {PG_DUMP_TIMEOUT_SEC} s"
     if result.returncode != 0:
-        return b"", result.stderr.decode(errors="replace")
-    logger.info("pg_dump finished: %d bytes in %.1f s", len(result.stdout), time.monotonic() - started)
-    return result.stdout, None
+        return 0, result.stderr.decode(errors="replace")
+    dump_bytes = target.seek(0, os.SEEK_END) - dump_start
+    logger.info("pg_dump finished: %d bytes in %.1f s", dump_bytes, time.monotonic() - started)
+    return dump_bytes, None
 
 
-def _run_pg_restore(data: bytes) -> str | None:
+def _pg_restore_phase(backup: BinaryIO, dump_offset: int, *sections: str) -> subprocess.CompletedProcess:
+    """Одна фаза pg_restore: дамп идёт на stdin прямо из файла, мимо памяти бэкенда."""
+    user, db = _pg_env()
+    # docker получает сам дескриптор и читает с его позиции — её и ставим,
+    # а не позицию буфера Python
+    os.lseek(backup.fileno(), dump_offset, os.SEEK_SET)
+    return subprocess.run(
+        [
+            "docker", "exec", "-i", POSTGRES_CONTAINER, "pg_restore", "-U", user, "-d", db, "--no-owner",
+            *(f"--section={section}" for section in sections),
+        ],
+        stdin=backup, capture_output=True, timeout=PG_RESTORE_PHASE_TIMEOUT_SEC,
+    )
+
+
+def _run_pg_restore(backup: BinaryIO, dump_offset: int) -> str | None:
+    """Восстановить базу из дампа, который начинается в файле backup с dump_offset."""
     user, db = _pg_env()
 
     subprocess.run(
@@ -126,13 +171,8 @@ def _run_pg_restore(data: bytes) -> str | None:
     if drop.returncode != 0:
         return f"Schema reset failed: {drop.stderr.decode(errors='replace')}"
 
-    base_cmd = ["docker", "exec", "-i", POSTGRES_CONTAINER, "pg_restore", "-U", user, "-d", db, "--no-owner"]
-
     # Phase 1: schema + data
-    r1 = subprocess.run(
-        base_cmd + ["--section=pre-data", "--section=data"],
-        input=data, capture_output=True, timeout=600,
-    )
+    r1 = _pg_restore_phase(backup, dump_offset, "pre-data", "data")
 
     # Phase 2: clean orphaned FK references before constraints are added
     subprocess.run(
@@ -147,10 +187,7 @@ def _run_pg_restore(data: bytes) -> str | None:
     )
 
     # Phase 3: constraints + indexes
-    r3 = subprocess.run(
-        base_cmd + ["--section=post-data"],
-        input=data, capture_output=True, timeout=600,
-    )
+    r3 = _pg_restore_phase(backup, dump_offset, "post-data")
 
     # Единственный надёжный признак провала — код возврата: свою диагностику
     # pg_restore печатает с префиксом «pg_restore:», и отсев строк по имени
@@ -189,31 +226,37 @@ def read_panel_env() -> str | None:
         return None
 
 
-def _frame_backup(dump: bytes, env_text: str | None) -> bytes:
-    """Вшить весь .env в начало дампа. Без .env — сырой pg_dump (легаси)."""
+def _frame_header(env_text: str | None) -> bytes:
+    """Заголовок с целым .env, который встаёт перед дампом. Без .env — пусто: сырой pg_dump (легаси)."""
     if not env_text:
-        return dump
+        return b""
     env_b = env_text.encode("utf-8")
-    return _BACKUP_MAGIC_V2 + str(len(env_b)).encode() + b"\n" + env_b + dump
+    return _BACKUP_MAGIC_V2 + str(len(env_b)).encode() + b"\n" + env_b
 
 
-def _unframe_backup(data: bytes) -> tuple[bytes, dict]:
-    """Вернуть чистый дамп и словарь восстанавливаемого .env.
+def write_backup(target: BinaryIO) -> tuple[int, str | None]:
+    """Бэкап в файл: заголовок с .env, следом pg_dump сам дописывает дамп.
+
+    Возвращает размер дампа без заголовка и причину провала.
+    """
+    target.write(_frame_header(read_panel_env()))
+    return _run_pg_dump(target)
+
+
+def _read_frame(backup: BinaryIO) -> tuple[int, dict]:
+    """Смещение чистого дампа в файле бэкапа и словарь восстанавливаемого .env.
 
     v2 — весь .env; v1 — только PANEL_ENC_KEY; сырой pg_dump — .env пуст."""
-    if data.startswith(_BACKUP_MAGIC_V2):
-        rest = data[len(_BACKUP_MAGIC_V2):]
-        nl = rest.index(b"\n")
-        env_len = int(rest[:nl])
-        env_b = rest[nl + 1:nl + 1 + env_len]
-        dump = rest[nl + 1 + env_len:]
-        return dump, parse_env(env_b.decode("utf-8"))
-    if data.startswith(_BACKUP_MAGIC):
-        rest = data[len(_BACKUP_MAGIC):]
-        key_line, _, dump = rest.partition(b"\n")
-        key = key_line.decode()
-        return dump, ({"PANEL_ENC_KEY": key} if key else {})
-    return data, {}
+    backup.seek(0)
+    magic = backup.read(len(_BACKUP_MAGIC_V2))
+    if magic == _BACKUP_MAGIC_V2:
+        env_len = int(backup.readline(_FRAME_LINE_MAX_BYTES))
+        env_b = backup.read(env_len)
+        return backup.tell(), parse_env(env_b.decode("utf-8"))
+    if magic == _BACKUP_MAGIC:
+        key = backup.readline(_FRAME_LINE_MAX_BYTES).removesuffix(b"\n").decode()
+        return backup.tell(), ({"PANEL_ENC_KEY": key} if key else {})
+    return 0, {}
 
 
 def apply_restored_env(env_dict: dict) -> None:
@@ -275,8 +318,18 @@ def _read_metadata(filename: str) -> dict | None:
     return None
 
 
+def _is_backup_name(name: str) -> bool:
+    return name.endswith((PLAIN_SUFFIX, ENCRYPTED_SUFFIX))
+
+
+def _ready_backups() -> list[Path]:
+    """Готовые бэкапы, открытые и зашифрованные, от старых к новым."""
+    ready = [path for path in BACKUP_DIR.iterdir() if _is_backup_name(path.name)]
+    return sorted(ready, key=lambda path: path.stat().st_mtime)
+
+
 def _cleanup_old_backups():
-    dumps = sorted(BACKUP_DIR.glob("*.dump"), key=lambda p: p.stat().st_mtime)
+    dumps = _ready_backups()
     while len(dumps) > MAX_BACKUPS:
         old = dumps.pop(0)
         old.unlink(missing_ok=True)
@@ -308,25 +361,57 @@ def _set_status(state: str, filename: str | None = None, error: str | None = Non
         _operation_status["completed_at"] = datetime.now(timezone.utc).isoformat()
 
 
-async def _create_backup_task(filename: str):
+def _write_backup_file(path: Path, password: str | None) -> tuple[int, str | None]:
+    """Бэкап в файл на томе; с паролем архива — зашифрованный им."""
+    if not password:
+        with path.open("wb") as target:
+            return write_backup(target)
+    # Открытый бэкап существует только в безымянном временном файле вне тома
+    # бэкапов: на том ложится уже шифртекст
+    with tempfile.TemporaryFile() as plain:
+        dump_bytes, err = write_backup(plain)
+        if err or not dump_bytes:
+            return dump_bytes, err
+        with path.open("wb") as target:
+            backup_telegram.encrypt_file(plain, password, target)
+    return dump_bytes, None
+
+
+async def _archive_password() -> str | None:
+    """Пароль архива из настроек автобэкапа — им же шифруются локальные бэкапы."""
+    from app.services.backup_scheduler import get_or_create_settings
+    async with async_session_maker() as db:
+        return (await get_or_create_settings(db)).archive_password
+
+
+async def _create_backup_task(filename: str, password: str | None = None):
     _ensure_dir()
+    partial = BACKUP_DIR / f"{filename}{PARTIAL_SUFFIX}"
     try:
-        data, err = await asyncio.get_event_loop().run_in_executor(None, _run_pg_dump)
-        if err or not data:
+        # Слот операции один, значит любой *.part здесь — след прерванного
+        # бэкапа (рестарт посреди дампа), сам он с тома не исчезнет
+        for leftover in BACKUP_DIR.glob(f"*{PARTIAL_SUFFIX}"):
+            leftover.unlink(missing_ok=True)
+
+        dump_bytes, err = await asyncio.get_event_loop().run_in_executor(
+            None, _write_backup_file, partial, password
+        )
+        if err or not dump_bytes:
             _set_status("idle", filename, err or "Empty dump")
             logger.error(f"Backup failed: {err}")
             return
 
-        framed = _frame_backup(data, read_panel_env())
-        dump_path = BACKUP_DIR / filename
-        dump_path.write_bytes(framed)
-        _save_metadata(filename, len(framed))
+        size = partial.stat().st_size
+        partial.replace(BACKUP_DIR / filename)
+        _save_metadata(filename, size)
         _cleanup_old_backups()
         _set_status("idle", filename)
-        logger.info(f"Backup created: {filename} ({len(data)} bytes)")
+        logger.info(f"Backup created: {filename} ({dump_bytes} bytes)")
     except Exception as e:
         _set_status("idle", filename, str(e))
         logger.error(f"Backup error: {e}")
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 async def _reload_pki(app) -> None:
@@ -341,14 +426,15 @@ async def _reload_pki(app) -> None:
         logger.error(f"Failed to reload PKI after restore: {e}")
 
 
-async def _restore_backup_task(data: bytes, filename: str, app=None):
+async def _restore_backup_task(backup: BinaryIO, filename: str, app=None):
+    """Восстановить базу из файла бэкапа; файл закрывается здесь при любом исходе."""
     try:
-        dump, env_dict = _unframe_backup(data)
+        dump_offset, env_dict = _read_frame(backup)
         # Пока идёт pg_restore, панель не должна трогать базу — иначе фоновые
         # записи попадают между фазами и ломают первичные ключи
         async with database_maintenance("database restore in progress"):
             err = await asyncio.get_event_loop().run_in_executor(
-                None, _run_pg_restore, dump
+                None, _run_pg_restore, backup, dump_offset
             )
         if err:
             _set_status("idle", filename, err)
@@ -360,20 +446,27 @@ async def _restore_backup_task(data: bytes, filename: str, app=None):
             apply_restored_env(env_dict)
             if app is not None:
                 await _reload_pki(app)
+            await revoke_sessions_after_restore()
             _set_status("idle", filename)
             logger.info(f"Restore completed: {filename}")
     except Exception as e:
         _set_status("idle", filename, str(e))
         logger.error(f"Restore error: {e}")
+    finally:
+        backup.close()
+        # Схема сбрасывается и при провале restore: бакеты истории парка,
+        # посчитанные по прежней базе, больше ничему не соответствуют
+        forget_fleet_history()
 
 
 @router.post("/create")
 async def create_backup(_: dict = Depends(verify_auth)):
+    password = await _archive_password()
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    filename = f"backup_{ts}.dump"
+    filename = f"backup_{ts}{ENCRYPTED_SUFFIX if password else PLAIN_SUFFIX}"
 
     _claim_operation("creating", filename)
-    asyncio.create_task(_create_backup_task(filename))
+    asyncio.create_task(_create_backup_task(filename, password))
     return {"success": True, "message": "Backup creation started"}
 
 
@@ -381,10 +474,11 @@ async def create_backup(_: dict = Depends(verify_auth)):
 async def list_backups(_: dict = Depends(verify_auth)):
     _ensure_dir()
     backups = []
-    for dump in sorted(BACKUP_DIR.glob("*.dump"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for dump in reversed(_ready_backups()):
         meta = _read_metadata(dump.name) or {}
         backups.append({
             "filename": dump.name,
+            "encrypted": dump.name.endswith(ENCRYPTED_SUFFIX),
             "size": dump.stat().st_size,
             "created_at": meta.get("created_at") or datetime.fromtimestamp(
                 dump.stat().st_mtime, tz=timezone.utc
@@ -400,7 +494,7 @@ async def download_backup(filename: str, _: dict = Depends(verify_auth)):
         raise HTTPException(400, "Invalid filename")
 
     path = BACKUP_DIR / filename
-    if not path.exists() or not path.suffix == ".dump":
+    if not path.exists() or not _is_backup_name(filename):
         raise HTTPException(404, "Backup not found")
 
     return FileResponse(
@@ -425,18 +519,61 @@ async def delete_backup(filename: str, _: dict = Depends(verify_auth)):
     return {"success": True}
 
 
-def _decrypt_volume_set(parts: list[bytes], filenames: list[str], password: str) -> bytes:
-    """Набор томов из Telegram → чистый бэкап. Набор распознан по сигнатуре первого тома."""
+@dataclass(frozen=True)
+class RestorePassword:
+    """Пароль к зашифрованному бэкапу: введённый в форме или взятый из настроек."""
+    value: str
+    from_settings: bool = False
+
+
+def _decrypt_archive(volumes: list[BinaryIO], filenames: list[str], password: RestorePassword, target: BinaryIO) -> None:
+    """Зашифрованный бэкап → чистый бэкап в target.
+
+    Это набор томов из Telegram или локальный .dump.enc одним файлом — формат
+    один, распознан по сигнатуре первого файла. Подлинность проверяется до
+    возврата: с неверным паролем до базы дело не доходит.
+    """
     missing = backup_telegram.missing_volume_numbers(filenames)
     if missing:
         numbers = ", ".join(f".{n:03d}" for n in missing)
         raise HTTPException(400, f"Неполный набор: не хватает тома {numbers} — выберите все тома набора")
-    if not password:
-        raise HTTPException(400, "Это набор томов из Telegram — укажите пароль архива")
+    if not password.value:
+        raise HTTPException(400, "Бэкап зашифрован — укажите пароль архива")
     try:
-        return backup_telegram.join_and_decrypt(parts, password)
+        backup_telegram.decrypt_volumes(volumes, password.value, target)
     except (InvalidTag, ValueError):
+        if password.from_settings:
+            raise HTTPException(
+                400, "Сохранённый пароль архива не подошёл — введите пароль, которым зашифрован этот бэкап"
+            )
         raise HTTPException(400, "Не удалось расшифровать: неверный пароль или неполный/перепутанный набор томов")
+
+
+def _stage_backup(uploads: list[BinaryIO], filenames: list[str], password: RestorePassword) -> BinaryIO:
+    """Загруженные файлы → один файл бэкапа на диске, с которого читает pg_restore.
+
+    Загруженное закрывается вместе с запросом, а восстановление идёт после
+    ответа, поэтому бэкап перекладывается в свой файл: зашифрованный сразу
+    расшифровывается в него, обычный дамп копируется. Файл безымянный —
+    исчезает с закрытием, даже если процесс убит посреди восстановления.
+    """
+    staged = tempfile.TemporaryFile()
+    try:
+        if backup_telegram.is_encrypted_set(uploads[0]):
+            _decrypt_archive(uploads, filenames, password, staged)
+        elif len(uploads) > 1:
+            raise HTTPException(
+                400, "Несколько файлов принимаются только как тома бэкапа из Telegram — обычный .dump загружайте одним файлом"
+            )
+        else:
+            shutil.copyfileobj(uploads[0], staged, COPY_CHUNK_BYTES)
+        if staged.tell() < MIN_BACKUP_BYTES:
+            raise HTTPException(400, "Файл слишком мал для бэкапа")
+        staged.flush()
+    except BaseException:
+        staged.close()
+        raise
+    return staged
 
 
 @router.post("/restore")
@@ -458,27 +595,23 @@ async def restore_backup(
         if not uploads:
             raise HTTPException(400, "Файл не выбран")
         raw_password = form.get("password")
-        password = str(raw_password).strip() if raw_password else ""
+        password = RestorePassword(str(raw_password).strip() if raw_password else "")
         # Тома набора идут по имени: …enc.001 < …enc.002 < …
         uploads.sort(key=lambda u: u.filename or "")
         filenames = [u.filename or "" for u in uploads]
         filename = filenames[0] or "backup"
-        parts = [await u.read() for u in uploads]
+        # Поле пароля оставили пустым: бэкап этой же панели открывается её паролем архива
+        if not password.value and backup_telegram.is_encrypted_set(uploads[0].file):
+            password = RestorePassword(await _archive_password() or "", from_settings=True)
+        # В потоке: расшифровка и запись сотен мегабайт остановили бы цикл событий
+        staged = await asyncio.to_thread(_stage_backup, [u.file for u in uploads], filenames, password)
 
-    if backup_telegram.is_encrypted_set(parts[0]):
-        data = _decrypt_volume_set(parts, filenames, password)
-    elif len(parts) > 1:
-        raise HTTPException(
-            400, "Несколько файлов принимаются только как тома бэкапа из Telegram — обычный .dump загружайте одним файлом"
-        )
-    else:
-        data = parts[0]
-
-    if len(data) < 16:
-        raise HTTPException(400, "Файл слишком мал для бэкапа")
-
-    _claim_operation("restoring", filename)
-    asyncio.create_task(_restore_backup_task(data, filename, app=request.app))
+    try:
+        _claim_operation("restoring", filename)
+    except HTTPException:
+        staged.close()
+        raise
+    asyncio.create_task(_restore_backup_task(staged, filename, app=request.app))
     return {"success": True, "message": "Restore started"}
 
 

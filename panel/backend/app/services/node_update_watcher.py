@@ -411,6 +411,7 @@ async def _notify(
                 settings.telegram_bot_token,
                 settings.telegram_chat_id,
                 f"\U0001f534 <b>{header}</b>\n\n{html.escape(message)}",
+                retry_later=True,
             )
 
         async with async_session() as db:

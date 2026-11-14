@@ -5,7 +5,7 @@ import { Shield, ShieldCheck, Plus, Trash2, RefreshCw, Server, Globe, List, Load
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
-import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource, BlocklistDirection } from '../api/client'
+import { blocklistApi, serversApi, Server as ServerType, BlocklistRule, BlocklistSource, BlocklistDirection, BlocklistRuleCounts, BlocklistServersSummary } from '../api/client'
 import { Skeleton } from '../components/ui/Skeleton'
 import AllowSourcesCard from '../components/blocklist/AllowSourcesCard'
 import PingBlockCard from '../components/blocklist/PingBlockCard'
@@ -23,14 +23,12 @@ interface SimpleSyncToast {
   message: string
 }
 
-interface ServerData {
+interface ServerRules {
   in: BlocklistRule[]
   out: BlocklistRule[]
-  globalCountIn: number
-  globalCountOut: number
-  loading: boolean
-  loaded: boolean
 }
+
+const NO_OWN_RULES: BlocklistRuleCounts = { in: 0, out: 0 }
 
 let toastIdCounter = 0
 
@@ -216,7 +214,9 @@ export default function Blocklist() {
   // Server rules (accordion)
   const [servers, setServers] = useState<ServerType[]>([])
   const [expandedServerIds, setExpandedServerIds] = useState<Set<number>>(new Set())
-  const [serverDataMap, setServerDataMap] = useState<Record<number, ServerData>>({})
+  // Счётчики для закрытых карточек приходят одним запросом, списки правил — только у раскрытой
+  const [rulesSummary, setRulesSummary] = useState<BlocklistServersSummary | null>(null)
+  const [serverRules, setServerRules] = useState<Record<number, ServerRules>>({})
   const [serverAddForms, setServerAddForms] = useState<Record<number, { ip: string; direction: BlocklistDirection }>>({})
   const [addingServerId, setAddingServerId] = useState<number | null>(null)
 
@@ -272,51 +272,35 @@ export default function Blocklist() {
   const fetchServers = useCallback(async () => {
     try {
       const response = await serversApi.list()
-      const serverList = response.data.servers
-      setServers(serverList)
-      return serverList
+      setServers(response.data.servers)
     } catch (err) {
       console.error('Failed to fetch servers:', err)
-      return []
     }
   }, [])
 
-  const fetchServerRules = useCallback(async (serverId: number) => {
-    setServerDataMap(prev => ({
-      ...prev,
-      [serverId]: {
-        in: prev[serverId]?.in ?? [],
-        out: prev[serverId]?.out ?? [],
-        globalCountIn: prev[serverId]?.globalCountIn ?? 0,
-        globalCountOut: prev[serverId]?.globalCountOut ?? 0,
-        loading: true,
-        loaded: prev[serverId]?.loaded ?? false,
-      }
-    }))
+  const fetchServersSummary = useCallback(async () => {
+    try {
+      const response = await blocklistApi.getServersSummary()
+      setRulesSummary(response.data)
+    } catch (err) {
+      console.error('Failed to fetch servers summary:', err)
+    }
+  }, [])
 
+  const fetchServerRules = useCallback(async (serverId: number): Promise<boolean> => {
     try {
       const [inResp, outResp] = await Promise.all([
         blocklistApi.getServer(serverId, 'in'),
         blocklistApi.getServer(serverId, 'out')
       ])
-
-      setServerDataMap(prev => ({
+      setServerRules(prev => ({
         ...prev,
-        [serverId]: {
-          in: inResp.data.rules,
-          out: outResp.data.rules,
-          globalCountIn: inResp.data.global_count,
-          globalCountOut: outResp.data.global_count,
-          loading: false,
-          loaded: true,
-        }
+        [serverId]: { in: inResp.data.rules, out: outResp.data.rules }
       }))
+      return true
     } catch (err) {
       console.error('Failed to fetch server rules:', err)
-      setServerDataMap(prev => ({
-        ...prev,
-        [serverId]: { ...prev[serverId], loading: false, loaded: true }
-      }))
+      return false
     }
   }, [])
 
@@ -410,75 +394,49 @@ export default function Blocklist() {
     setSyncToasts(prev => prev.filter(st => st.id !== id))
   }, [])
 
-  const fetchAllServerRules = useCallback(async (serverList: ServerType[]) => {
-    if (serverList.length === 0) return
-
-    // Promise pool concurrency=12: при 100 серверах без ограничения летит 200+ одновременных HTTP
-    // (in+out на каждый), что роняет ноды по таймаутам. Каждый воркер берёт один сервер за раз
-    // и для него выполняет два параллельных запроса (in/out) — это нагрузка на одну ноду, нормально.
-    const queue = [...serverList]
-    const map: Record<number, ServerData> = {}
-    const POOL_SIZE = 12
-
-    const worker = async () => {
-      while (queue.length > 0) {
-        const server = queue.shift()
-        if (!server) return
-        try {
-          const [inResp, outResp] = await Promise.all([
-            blocklistApi.getServer(server.id, 'in'),
-            blocklistApi.getServer(server.id, 'out')
-          ])
-          map[server.id] = {
-            in: inResp.data.rules,
-            out: outResp.data.rules,
-            globalCountIn: inResp.data.global_count,
-            globalCountOut: outResp.data.global_count,
-            loading: false,
-            loaded: true,
-          }
-        } catch {
-          map[server.id] = { in: [], out: [], globalCountIn: 0, globalCountOut: 0, loading: false, loaded: true }
-        }
-      }
-    }
-
-    const workers = Array.from({ length: Math.min(POOL_SIZE, queue.length) }, worker)
-    await Promise.all(workers)
-
-    setServerDataMap(map)
-  }, [])
-
   // === Initial load ===
 
   useEffect(() => {
     const loadData = async () => {
       setLoading(true)
-      const [, , serverList] = await Promise.all([
+      await Promise.all([
         fetchAllGlobalRules(),
         fetchAllAllowRules(),
         fetchServers(),
         fetchAllSources()
       ])
-      await fetchAllServerRules(serverList as ServerType[])
       setLoading(false)
     }
     loadData()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Счётчики перечитываются при каждом заходе на вкладку: глобальные правила могли изменить на соседних
+  useEffect(() => {
+    if (activeTab === 'servers') fetchServersSummary()
+  }, [activeTab, fetchServersSummary])
+
   // === Server accordion ===
 
-  const toggleServer = useCallback((serverId: number) => {
+  const setServerExpanded = (serverId: number, expanded: boolean) => {
     setExpandedServerIds(prev => {
       const next = new Set(prev)
-      if (next.has(serverId)) {
-        next.delete(serverId)
-      } else {
-        next.add(serverId)
-      }
+      if (expanded) next.add(serverId)
+      else next.delete(serverId)
       return next
     })
-  }, [])
+  }
+
+  const toggleServer = async (serverId: number) => {
+    const expanding = !expandedServerIds.has(serverId)
+    setServerExpanded(serverId, expanding)
+    if (!expanding) return
+
+    const loaded = await fetchServerRules(serverId)
+    if (loaded || serverRules[serverId]) return
+    // Список не пришёл, и показать нечего: карточка закрывается, повторный клик запросит его заново
+    setServerExpanded(serverId, false)
+    toast.error(t('common.action_failed'))
+  }
 
   // === Handlers: Global Rules ===
 
@@ -1067,7 +1025,10 @@ export default function Blocklist() {
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                 {servers.map((server) => {
                   const isExpanded = expandedServerIds.has(server.id)
-                  const data = serverDataMap[server.id]
+                  const rules = serverRules[server.id]
+                  const ownCounts = rules
+                    ? { in: rules.in.length, out: rules.out.length }
+                    : rulesSummary?.servers[server.id] ?? NO_OWN_RULES
                   const form = getServerForm(server.id)
 
                   return (
@@ -1091,97 +1052,105 @@ export default function Blocklist() {
                           )}
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
-                          {data?.loaded && (
+                          {rulesSummary && (
                             <div className="flex items-center gap-2 text-xs text-dark-400">
-                              <span className="text-blue-400/70">{data.in.length} IN</span>
-                              <span className="text-orange-400/70">{data.out.length} OUT</span>
+                              <span className="text-blue-400/70">{ownCounts.in} IN</span>
+                              <span className="text-orange-400/70">{ownCounts.out} OUT</span>
                               <span className="text-dark-500">|</span>
-                              <span>{data.globalCountIn + data.globalCountOut} G</span>
+                              <span>{rulesSummary.global.in + rulesSummary.global.out} G</span>
                             </div>
                           )}
                           <ChevronDown className={`w-4 h-4 text-dark-400 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`} />
                         </div>
                       </button>
 
-                      {/* Body (collapsible) */}
-                      <div className={`collapse-grid ${isExpanded ? 'open' : ''}`}>
-                        <div className="collapse-content">
-                          <div className="px-4 pb-4 pt-1 border-t border-dark-700/50 space-y-4">
-                            {data?.loaded ? (
-                              <>
-                                {/* Add Rule Form */}
-                                <div className="flex gap-2 items-center pt-3">
-                                  <input
-                                    type="text"
-                                    value={form.ip}
-                                    onChange={(e) => updateServerForm(server.id, { ip: e.target.value })}
-                                    placeholder="192.168.1.0/24"
-                                    className="input flex-1 font-mono text-sm"
-                                    onKeyDown={(e) => e.key === 'Enter' && handleAddServerRule(server.id)}
-                                  />
-                                  <select
-                                    value={form.direction}
-                                    onChange={(e) => updateServerForm(server.id, { direction: e.target.value as BlocklistDirection })}
-                                    className="input w-28 text-sm"
-                                  >
-                                    <option value="in">{t('blocklist.direction_incoming')}</option>
-                                    <option value="out">{t('blocklist.direction_outgoing')}</option>
-                                  </select>
-                                  <motion.button
-                                    onClick={() => handleAddServerRule(server.id)}
-                                    disabled={addingServerId === server.id || !form.ip.trim()}
-                                    className="btn btn-primary text-sm"
-                                    whileHover={{ scale: 1.02 }}
-                                    whileTap={{ scale: 0.98 }}
-                                  >
-                                    {addingServerId === server.id ? (
-                                      <Loader2 className="w-4 h-4 animate-spin" />
-                                    ) : (
-                                      <Plus className="w-4 h-4" />
-                                    )}
-                                    {t('blocklist.add')}
-                                  </motion.button>
-                                </div>
+                      {/* Тело есть в DOM только у раскрытой карточки: на парке в тысячи серверов закрытых — почти все */}
+                      <AnimatePresence initial={false}>
+                        {isExpanded && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-4 pb-4 pt-1 border-t border-dark-700/50 space-y-4">
+                              {rules ? (
+                                <>
+                                  {/* Add Rule Form */}
+                                  <div className="flex gap-2 items-center pt-3">
+                                    <input
+                                      type="text"
+                                      value={form.ip}
+                                      onChange={(e) => updateServerForm(server.id, { ip: e.target.value })}
+                                      placeholder="192.168.1.0/24"
+                                      className="input flex-1 font-mono text-sm"
+                                      onKeyDown={(e) => e.key === 'Enter' && handleAddServerRule(server.id)}
+                                    />
+                                    <select
+                                      value={form.direction}
+                                      onChange={(e) => updateServerForm(server.id, { direction: e.target.value as BlocklistDirection })}
+                                      className="input w-28 text-sm"
+                                    >
+                                      <option value="in">{t('blocklist.direction_incoming')}</option>
+                                      <option value="out">{t('blocklist.direction_outgoing')}</option>
+                                    </select>
+                                    <motion.button
+                                      onClick={() => handleAddServerRule(server.id)}
+                                      disabled={addingServerId === server.id || !form.ip.trim()}
+                                      className="btn btn-primary text-sm"
+                                      whileHover={{ scale: 1.02 }}
+                                      whileTap={{ scale: 0.98 }}
+                                    >
+                                      {addingServerId === server.id ? (
+                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                      ) : (
+                                        <Plus className="w-4 h-4" />
+                                      )}
+                                      {t('blocklist.add')}
+                                    </motion.button>
+                                  </div>
 
-                                {/* Two columns: IN and OUT */}
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                  <div>
-                                    <div className="flex items-center gap-2 mb-2">
-                                      <ArrowDownToLine className="w-3.5 h-3.5 text-blue-400" />
-                                      <span className="text-sm font-medium text-dark-200">{t('blocklist.rules_in')}</span>
-                                      <span className="text-xs text-dark-500">{data.in.length}</span>
+                                  {/* Two columns: IN and OUT */}
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div>
+                                      <div className="flex items-center gap-2 mb-2">
+                                        <ArrowDownToLine className="w-3.5 h-3.5 text-blue-400" />
+                                        <span className="text-sm font-medium text-dark-200">{t('blocklist.rules_in')}</span>
+                                        <span className="text-xs text-dark-500">{rules.in.length}</span>
+                                      </div>
+                                      <RulesList
+                                        rules={rules.in}
+                                        onDelete={(ruleId) => handleDeleteServerRule(server.id, ruleId)}
+                                        onBulkDelete={(ruleIds) => handleBulkDeleteServerRules(server.id, ruleIds)}
+                                        emptyMessage={t('blocklist.no_server_rules')}
+                                      />
                                     </div>
-                                    <RulesList
-                                      rules={data.in}
-                                      onDelete={(ruleId) => handleDeleteServerRule(server.id, ruleId)}
-                                      onBulkDelete={(ruleIds) => handleBulkDeleteServerRules(server.id, ruleIds)}
-                                      emptyMessage={t('blocklist.no_server_rules')}
-                                    />
-                                  </div>
-                                  <div>
-                                    <div className="flex items-center gap-2 mb-2">
-                                      <ArrowUpFromLine className="w-3.5 h-3.5 text-orange-400" />
-                                      <span className="text-sm font-medium text-dark-200">{t('blocklist.rules_out')}</span>
-                                      <span className="text-xs text-dark-500">{data.out.length}</span>
+                                    <div>
+                                      <div className="flex items-center gap-2 mb-2">
+                                        <ArrowUpFromLine className="w-3.5 h-3.5 text-orange-400" />
+                                        <span className="text-sm font-medium text-dark-200">{t('blocklist.rules_out')}</span>
+                                        <span className="text-xs text-dark-500">{rules.out.length}</span>
+                                      </div>
+                                      <RulesList
+                                        rules={rules.out}
+                                        onDelete={(ruleId) => handleDeleteServerRule(server.id, ruleId)}
+                                        onBulkDelete={(ruleIds) => handleBulkDeleteServerRules(server.id, ruleIds)}
+                                        emptyMessage={t('blocklist.no_server_rules')}
+                                      />
                                     </div>
-                                    <RulesList
-                                      rules={data.out}
-                                      onDelete={(ruleId) => handleDeleteServerRule(server.id, ruleId)}
-                                      onBulkDelete={(ruleIds) => handleBulkDeleteServerRules(server.id, ruleIds)}
-                                      emptyMessage={t('blocklist.no_server_rules')}
-                                    />
                                   </div>
+                                </>
+                              ) : (
+                                <div className="flex items-center gap-2 py-4 justify-center text-dark-400">
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                  <span className="text-sm">{t('blocklist.loading_rules')}</span>
                                 </div>
-                              </>
-                            ) : (
-                              <div className="flex items-center gap-2 py-4 justify-center text-dark-400">
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                                <span className="text-sm">{t('blocklist.loading_rules')}</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
+                              )}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
                   )
                 })}

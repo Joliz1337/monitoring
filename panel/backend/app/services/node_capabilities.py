@@ -74,6 +74,12 @@ READ_ONLY_WRITES: frozenset[str] = frozenset({
     "/api/ssh/config/test",
 })
 
+# Запросы, тело которых нода исполняет от root: кроме своего домена им нужен exec
+EXEC_REQUIRED_WRITES: frozenset[str] = frozenset({
+    "/api/antiddos/install",
+    "/api/system/optimizations/apply",
+})
+
 READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 
 DENIAL_ERROR = "capability_denied"
@@ -185,7 +191,11 @@ def server_allows_path(server, path: str, method: str = "GET") -> tuple[bool, Op
     capability, write = resolve_route(path, method)
     if capability is None:
         return True, None, False
-    return server_allows(server, capability, write=write), capability, write
+    if not server_allows(server, capability, write=write):
+        return False, capability, write
+    if write and normalize_path(path) in EXEC_REQUIRED_WRITES and not server_allows(server, Capability.EXEC, write=True):
+        return False, Capability.EXEC, True
+    return True, capability, write
 
 
 def is_restricted(raw: Optional[str]) -> bool:

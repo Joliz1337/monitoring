@@ -6,6 +6,8 @@
 """
 import asyncio
 import logging
+import os
+import tempfile
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -60,19 +62,6 @@ def should_run(s: BackupSettings, now: datetime) -> bool:
     return True
 
 
-def _dump_and_frame() -> tuple[bytes, str | None]:
-    """Дамп с вшитым .env или причина провала — целиком в потоке executor'а.
-
-    Сырой дамп из потока не выходит: результат executor'а остаётся в памяти,
-    пока корутина не уступит циклу событий, то есть до самой заливки, и дамп
-    пролежал бы всё шифрование рядом со своей копией с .env и шифртекстом.
-    """
-    data, err = backup_router._run_pg_dump()
-    if err or not data:
-        return b"", err or "Пустой дамп"
-    return backup_router._frame_backup(data, backup_router.read_panel_env()), None
-
-
 async def run_backup_to_telegram(s: BackupSettings) -> tuple[bool, str | None]:
     """Снять дамп, зашифровать паролем, разбить на тома и залить в Telegram."""
     token, chat_id, password = s.bot_token, s.chat_id, s.archive_password
@@ -81,29 +70,31 @@ async def run_backup_to_telegram(s: BackupSettings) -> tuple[bool, str | None]:
     if not password:
         return False, "Не задан пароль архива"
 
-    loop = asyncio.get_event_loop()
-    framed, err = await loop.run_in_executor(None, _dump_and_frame)
-    if err:
-        await backup_telegram.send_message(token, chat_id, f"🔴 Бэкап панели не выполнен: {err}")
-        return False, err
-    size_mb = len(framed) // _BYTES_PER_MB
+    # Бэкап лежит на диске, а не в памяти; файл безымянный — исчезает сам,
+    # даже если процесс убит посреди заливки
+    with tempfile.TemporaryFile() as archive:
+        loop = asyncio.get_event_loop()
+        dump_bytes, err = await loop.run_in_executor(None, backup_router.write_backup, archive)
+        if err or not dump_bytes:
+            err = err or "Пустой дамп"
+            await backup_telegram.send_message(token, chat_id, f"🔴 Бэкап панели не выполнен: {err}")
+            return False, err
 
-    volume_bytes = max(1, s.volume_size_mb or 45) * _BYTES_PER_MB
-    try:
-        parts = backup_telegram.encrypt_and_split(framed, password, volume_bytes)
-        # У шифртекста своя копия архива — открытый текст на время заливки не нужен
-        del framed
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        caption = (
-            f"🗄 Бэкап панели\n📅 {ts} UTC\n"
-            f"📦 {size_mb} МБ · томов: {len(parts)}\n🔐 AES-256"
-        )
-        await backup_telegram.send_volumes(token, chat_id, parts, f"panel-backup_{ts}.enc", caption)
-    except Exception as exc:  # noqa: BLE001 — граница: крипто/сеть Telegram
-        await backup_telegram.send_message(token, chat_id, f"🔴 Бэкап панели: {exc}")
-        return False, str(exc)
+        volume_bytes = max(1, s.volume_size_mb or 45) * _BYTES_PER_MB
+        try:
+            volumes = backup_telegram.EncryptedVolumes(archive, password, volume_bytes)
+            size_mb = archive.seek(0, os.SEEK_END) // _BYTES_PER_MB
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            caption = (
+                f"🗄 Бэкап панели\n📅 {ts} UTC\n"
+                f"📦 {size_mb} МБ · томов: {len(volumes)}\n🔐 AES-256"
+            )
+            await backup_telegram.send_volumes(token, chat_id, volumes, f"panel-backup_{ts}.enc", caption)
+        except Exception as exc:  # noqa: BLE001 — граница: крипто/сеть Telegram
+            await backup_telegram.send_message(token, chat_id, f"🔴 Бэкап панели: {exc}")
+            return False, str(exc)
 
-    logger.info("Auto-backup delivered to Telegram (%d volumes)", len(parts))
+    logger.info("Auto-backup delivered to Telegram (%d volumes)", len(volumes))
     return True, None
 
 

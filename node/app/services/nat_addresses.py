@@ -38,6 +38,10 @@ UNREACHABLE_RETRY_SEC = 600
 STALE_AFTER_SEC = 900
 MAX_BODY_BYTES = 1024
 USER_AGENT = "monitoring-node"
+# Каждый адрес — до четырёх запросов по REQUEST_TIMEOUT_SEC в потоке общего пула
+# asyncio.to_thread, а потоков там на ноде с 1 vCPU всего пять: адреса без выхода
+# наружу, опрошенные разом, заняли бы пул на 20 секунд
+MAX_PARALLEL_ADDRESSES = 3
 
 # Разные владельцы: сбой или подмена ответа у одного не подтверждает адрес сама
 ECHO_SERVICES: tuple[tuple[str, str], ...] = (
@@ -132,7 +136,13 @@ class NatAddressProbe:
 
         now = self._clock()
         due = sorted(address for address in local if self._retry_at.get(address, 0) <= now)
-        results = await asyncio.gather(*(self._resolve(address) for address in due))
+        limiter = asyncio.Semaphore(MAX_PARALLEL_ADDRESSES)
+
+        async def resolve(address: str) -> Optional[str]:
+            async with limiter:
+                return await self._resolve(address)
+
+        results = await asyncio.gather(*(resolve(address) for address in due))
 
         now = self._clock()
         for address, public in zip(due, results):

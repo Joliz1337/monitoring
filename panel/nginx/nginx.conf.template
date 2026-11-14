@@ -42,6 +42,12 @@ http {
         default                  0;
     }
 
+    # Настройки этой установки, которые обновление не перезаписывает. Сюда
+    # deploy.sh кладёт cloudflare-realip.conf, когда домен проксируется Cloudflare:
+    # без него лимит запросов ниже и бан входа считали бы всех посетителей одним
+    # адресом. Маска вместо имени файла: пустой каталог nginx не ломает
+    include /etc/nginx/extra/*.conf;
+
     # Точки входа, доступные без авторизации: подбор пароля/UID и заливка дампа
     # должны упираться в nginx, а не в счётчик банов и диск бэкенда.
     # Отказ отдаётся 444 — тем же «молча закрыть соединение», что и остальной конфиг.
@@ -119,6 +125,11 @@ http {
         add_header X-XSS-Protection "1; mode=block" always;
         add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        # Разрешено ровно то, чем пользуется собранный фронтенд: свои скрипты без
+        # inline, inline-стили (framer-motion, apexcharts), шрифты Google Fonts,
+        # подложка карты с tiles.openfreemap.org (стиль, тайлы, шрифты и спрайты —
+        # все через fetch), картинки MapLibre из data: и blob:, его воркер
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://tiles.openfreemap.org; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
 
         # Health check - internal only (for update scripts)
         location = /health {

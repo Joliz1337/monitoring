@@ -1,7 +1,8 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRememberedState } from '../hooks/useRememberedState'
 import { useOpenIds } from '../hooks/useOpenIds'
 import { useProfileRollout, type RolloutProgress } from '../hooks/useProfileRollout'
+import { useStableHandler } from '../hooks/useStableHandler'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
@@ -53,6 +54,7 @@ import {
 } from '../api/client'
 import { FAQIcon } from '../components/FAQ'
 import { writeStorage } from '../utils/storage'
+import { reuseUnchanged } from '../utils/reuseUnchanged'
 
 type TabKey = 'rules' | 'servers' | 'log'
 
@@ -1231,6 +1233,108 @@ function RulesTab({
 }
 
 
+function toggleInSet(setter: React.Dispatch<React.SetStateAction<Set<number>>>, id: number) {
+  setter(prev => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+}
+
+// Строки серверов — memo с общими для всех строк обработчиками: опрос профиля и клик по
+// одной галочке перерисовывают только строки, у которых что-то изменилось, а не весь список
+const LinkedServerRow = memo(function LinkedServerRow({
+  server,
+  selected,
+  syncing,
+  forceSync,
+  onToggleSelect,
+  onSyncOne,
+  onUnlink,
+}: {
+  server: FirewallProfileServerInfo
+  selected: boolean
+  syncing: boolean
+  forceSync: boolean
+  onToggleSelect: (serverId: number) => void
+  onSyncOne: (serverId: number) => void
+  onUnlink: (serverId: number) => void
+}) {
+  return (
+    <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
+      <div className="flex items-center gap-3 min-w-0">
+        <Checkbox checked={selected} onChange={() => onToggleSelect(server.server_id)} />
+        <Server className="w-4 h-4 text-dark-400 shrink-0" />
+        <div className="min-w-0">
+          <div className="text-sm text-dark-200 truncate">{server.server_name}</div>
+          <div className="text-xs text-dark-500 truncate">{server.server_url}</div>
+        </div>
+        {syncStatusBadge(server.sync_status)}
+      </div>
+      <div className="flex items-center gap-1 shrink-0">
+        <span className="hidden sm:inline text-xs text-dark-500 mr-2">
+          {server.last_sync_at ? `Синхр: ${formatDateTime(server.last_sync_at)}` : 'Не синхронизирован'}
+        </span>
+        <Tooltip label={forceSync ? 'Принудительная синхронизация' : 'Синхронизировать'}>
+          <button
+            onClick={() => onSyncOne(server.server_id)}
+            disabled={syncing}
+            className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors disabled:opacity-50"
+          >
+            {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+          </button>
+        </Tooltip>
+        <Tooltip label="Отвязать">
+          <button
+            onClick={() => {
+              if (confirm(`Отвязать ${server.server_name}? Правила на ноде НЕ откатываются.`)) onUnlink(server.server_id)
+            }}
+            className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+          >
+            <Unlink className="w-4 h-4" />
+          </button>
+        </Tooltip>
+      </div>
+    </div>
+  )
+})
+
+const CandidateServerRow = memo(function CandidateServerRow({
+  server,
+  selected,
+  onToggleSelect,
+  onLink,
+}: {
+  server: FirewallAvailableServer
+  selected: boolean
+  onToggleSelect: (serverId: number) => void
+  onLink: (serverId: number) => void
+}) {
+  return (
+    <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
+      <div className="flex items-center gap-3 min-w-0">
+        <Checkbox checked={selected} onChange={() => onToggleSelect(server.id)} />
+        <Server className="w-4 h-4 text-dark-400 shrink-0" />
+        <div className="min-w-0">
+          <div className="text-sm text-dark-200 truncate">{server.name}</div>
+          <div className="text-xs text-dark-500 truncate">{server.url}</div>
+        </div>
+        {server.active_profile_id && (
+          <span className="text-xs text-yellow-400/80 shrink-0">Уже в другом профиле</span>
+        )}
+      </div>
+      <button
+        onClick={() => onLink(server.id)}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-accent-400 hover:text-accent-300 bg-accent-500/10 hover:bg-accent-500/20 transition-colors"
+      >
+        <Link2 className="w-3.5 h-3.5" /> Привязать
+      </button>
+    </div>
+  )
+})
+
+
 function ServersTab({
   profile,
   availableServers,
@@ -1353,14 +1457,11 @@ function ServersTab({
     [selectedCandidates, visibleCandidateIds]
   )
 
-  const toggleInSet = (setter: React.Dispatch<React.SetStateAction<Set<number>>>, id: number) => {
-    setter(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
+  const toggleLinked = useCallback((serverId: number) => toggleInSet(setSelectedLinked, serverId), [])
+  const toggleCandidate = useCallback((serverId: number) => toggleInSet(setSelectedCandidates, serverId), [])
+  const syncOne = useStableHandler(onSyncOne)
+  const unlink = useStableHandler(onUnlink)
+  const link = useStableHandler(onLink)
 
   const allLinkedSelected =
     filteredLinked.length > 0 && filteredLinked.every(s => selectedLinked.has(s.server_id))
@@ -1400,28 +1501,13 @@ function ServersTab({
         : 'Все доступные серверы уже привязаны'
 
   const renderCandidate = (srv: FirewallAvailableServer) => (
-    <div key={srv.id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
-      <div className="flex items-center gap-3 min-w-0">
-        <Checkbox
-          checked={selectedCandidates.has(srv.id)}
-          onChange={() => toggleInSet(setSelectedCandidates, srv.id)}
-        />
-        <Server className="w-4 h-4 text-dark-400 shrink-0" />
-        <div className="min-w-0">
-          <div className="text-sm text-dark-200 truncate">{srv.name}</div>
-          <div className="text-xs text-dark-500 truncate">{srv.url}</div>
-        </div>
-        {srv.active_profile_id && (
-          <span className="text-xs text-yellow-400/80 shrink-0">Уже в другом профиле</span>
-        )}
-      </div>
-      <button
-        onClick={() => onLink(srv.id)}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-accent-400 hover:text-accent-300 bg-accent-500/10 hover:bg-accent-500/20 transition-colors"
-      >
-        <Link2 className="w-3.5 h-3.5" /> Привязать
-      </button>
-    </div>
+    <CandidateServerRow
+      key={srv.id}
+      server={srv}
+      selected={selectedCandidates.has(srv.id)}
+      onToggleSelect={toggleCandidate}
+      onLink={link}
+    />
   )
 
   const renderCandidateGroup = (
@@ -1546,45 +1632,17 @@ function ServersTab({
           </div>
         ) : (
           <div className="space-y-1.5">
-            {filteredLinked.map((srv: FirewallProfileServerInfo) => (
-              <div key={srv.server_id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50">
-                <div className="flex items-center gap-3 min-w-0">
-                  <Checkbox
-                    checked={selectedLinked.has(srv.server_id)}
-                    onChange={() => toggleInSet(setSelectedLinked, srv.server_id)}
-                  />
-                  <Server className="w-4 h-4 text-dark-400 shrink-0" />
-                  <div className="min-w-0">
-                    <div className="text-sm text-dark-200 truncate">{srv.server_name}</div>
-                    <div className="text-xs text-dark-500 truncate">{srv.server_url}</div>
-                  </div>
-                  {syncStatusBadge(srv.sync_status)}
-                </div>
-                <div className="flex items-center gap-1 shrink-0">
-                  <span className="hidden sm:inline text-xs text-dark-500 mr-2">
-                    {srv.last_sync_at ? `Синхр: ${formatDateTime(srv.last_sync_at)}` : 'Не синхронизирован'}
-                  </span>
-                  <Tooltip label={forceSync ? 'Принудительная синхронизация' : 'Синхронизировать'}>
-                    <button
-                      onClick={() => onSyncOne(srv.server_id)}
-                      disabled={syncingServerId === srv.server_id}
-                      className="p-1.5 rounded-lg text-dark-400 hover:text-accent-400 hover:bg-accent-500/10 transition-colors disabled:opacity-50"
-                    >
-                      {syncingServerId === srv.server_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                    </button>
-                  </Tooltip>
-                  <Tooltip label="Отвязать">
-                    <button
-                      onClick={() => {
-                        if (confirm(`Отвязать ${srv.server_name}? Правила на ноде НЕ откатываются.`)) onUnlink(srv.server_id)
-                      }}
-                      className="p-1.5 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                    >
-                      <Unlink className="w-4 h-4" />
-                    </button>
-                  </Tooltip>
-                </div>
-              </div>
+            {filteredLinked.map(srv => (
+              <LinkedServerRow
+                key={srv.server_id}
+                server={srv}
+                selected={selectedLinked.has(srv.server_id)}
+                syncing={syncingServerId === srv.server_id}
+                forceSync={forceSync}
+                onToggleSelect={toggleLinked}
+                onSyncOne={syncOne}
+                onUnlink={unlink}
+              />
             ))}
           </div>
         )}
@@ -1732,7 +1790,7 @@ function ProfileDetail({
   const fetchProfile = useCallback(async () => {
     try {
       const res = await firewallProfilesApi.get(profileId)
-      setProfile(res.data)
+      setProfile(prev => reuseUnchanged(prev, res.data))
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Не удалось загрузить профиль'))
     } finally {
@@ -1743,7 +1801,7 @@ function ProfileDetail({
   const refreshProfileSilent = useCallback(async () => {
     try {
       const res = await firewallProfilesApi.get(profileId)
-      setProfile(res.data)
+      setProfile(prev => reuseUnchanged(prev, res.data))
     } catch { /* silent */ }
   }, [profileId])
 
@@ -2129,7 +2187,7 @@ export default function FirewallProfiles() {
   const fetchProfiles = useCallback(async () => {
     try {
       const res = await firewallProfilesApi.list()
-      setProfiles(res.data)
+      setProfiles(prev => reuseUnchanged(prev, res.data))
       // На первом заходе справа сразу виден первый профиль, а не пустая заглушка
       if (!initialLoadDone.current && res.data.length > 0) {
         setOpenIds(prev => (prev.length > 0 ? prev : [res.data[0].id]))
@@ -2149,8 +2207,9 @@ export default function FirewallProfiles() {
   }, [fetchProfiles])
 
   // Автообновление списка профилей (счётчики synced/linked) каждые 3 секунды
+  // (пропускаем, когда вкладка скрыта — не долбим бэкенд в фоне)
   useEffect(() => {
-    const id = setInterval(fetchProfiles, 3000)
+    const id = setInterval(() => { if (!document.hidden) fetchProfiles() }, 3000)
     return () => clearInterval(id)
   }, [fetchProfiles])
 

@@ -4,6 +4,7 @@ import asyncio
 import csv
 import ipaddress
 import logging
+import os
 import re
 import shutil
 import socket
@@ -213,8 +214,26 @@ class HAProxyManager:
         # Кто бы ни переписал файл, загружен ли он в HAProxy — агенту уже неизвестно
         self._loaded_config = None
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(self._normalize_config(content), encoding='utf-8')
-    
+        self._replace_config(self._normalize_config(content).encode('utf-8'))
+
+    def _replace_config(self, data: bytes) -> None:
+        """Конфиг целиком или никак: запись во временный файл рядом и rename.
+
+        Запись поверх файла при сбое питания или падении агента оставляла конфиг
+        обрезанным — HAProxy не поднимался после перезагрузки, а читающие в этот
+        момент видели пустой файл."""
+        tmp_path = self.config_path.with_name(f"{self.config_path.name}.{uuid4().hex}.tmp")
+        try:
+            with open(tmp_path, 'wb') as tmp:
+                tmp.write(data)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            if self.config_path.exists():
+                shutil.copymode(self.config_path, tmp_path)
+            os.replace(tmp_path, self.config_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
     @contextmanager
     def _config_rollback(self) -> Iterator[Callable[[], None]]:
         """Снимок конфига на время правки; отдаёт функцию отката и удаляет снимок
@@ -230,7 +249,7 @@ class HAProxyManager:
 
         def rollback() -> None:
             if backup_path and backup_path.exists():
-                shutil.copy(backup_path, self.config_path)
+                self._replace_config(backup_path.read_bytes())
 
         try:
             yield rollback
@@ -394,7 +413,6 @@ defaults
     option dontlognull
     option redispatch
     option tcp-smart-accept
-    option tcp-smart-connect
     option splice-request
     option splice-response
     option clitcpka

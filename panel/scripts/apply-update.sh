@@ -35,6 +35,14 @@ remove_stale_panel_images() {
         | while read -r stale; do docker rmi "$stale" >/dev/null 2>&1 || true; done
 }
 
+# Клон, из которого запущен этот скрипт. update.sh до своей уборки не доходит:
+# он уходит сюда через exec
+remove_update_clone() {
+    case "$TMP_DIR" in
+        /tmp/panel-update-*) rm -rf "$TMP_DIR" 2>/dev/null || true ;;
+    esac
+}
+
 # Любой сбой после остановки контейнеров не должен оставить панель лежать:
 # поднимаем то, что есть на диске (старую или уже скопированную версию)
 cleanup() {
@@ -51,6 +59,7 @@ cleanup() {
             fi
         fi
     fi
+    remove_update_clone
     exit $exit_code
 }
 trap cleanup EXIT
@@ -174,8 +183,7 @@ fi
 
 # ==================== Configuration ====================
 
-# Таймаут одной попытки pull. Панель на это время уже остановлена, поэтому запас
-# меньше, чем у ноды (там pull идёт до остановки контейнеров).
+# Таймаут одной попытки pull. Панель всё это время работает на прежних образах
 DOCKER_PULL_TIMEOUT="${DOCKER_PULL_TIMEOUT:-240}"
 DOCKER_PULL_RETRIES=5
 DOCKER_PULL_RETRY_DELAY=10
@@ -183,6 +191,15 @@ DOCKER_PULL_RETRY_DELAY=10
 # Сколько ждать, пока панель доделает фоновые задачи перед остановкой. Должно быть
 # больше, чем модули панели сами ждут свои задачи, иначе ответ не дождёмся.
 PREPARE_SHUTDOWN_TIMEOUT=200
+
+# Сколько ждать остановки контейнера: бэкенд при остановке дописывает в базу
+# учёт трафика всех нод. Флаг --timeout перекрывает stop_grace_period из
+# docker-compose.yml, а у compose-файла прежних версий его и нет
+STOP_TIMEOUT=60
+
+HEALTH_MAX_ATTEMPTS=30
+HEALTH_RETRY_DELAY=2
+HEALTH_PROBE_TIMEOUT=5
 
 # Arguments
 TMP_DIR="$1"
@@ -229,55 +246,6 @@ set +e
 ensure_rsync || exit 1
 set -e
 
-# Начатое в фоне панель доделывает, пока ещё целиком работает: при остановке
-# контейнера её подпроцессы умирают по SIGKILL посреди шага. Код 404 — у старой
-# версии панели такого входа нет, тогда просто останавливаем.
-log_info "Finishing panel background tasks..."
-prepare_status=$(docker exec panel-backend curl -s -o /dev/null -w '%{http_code}' \
-    -m "$PREPARE_SHUTDOWN_TIMEOUT" -X POST http://127.0.0.1:8000/system/prepare-shutdown 2>/dev/null) || true
-case "$prepare_status" in
-    200) log_success "Background tasks finished" ;;
-    404) ;;
-    *)   log_warn "Panel did not confirm background tasks finished (${prepare_status:-no answer}), stopping anyway" ;;
-esac
-
-# Stop containers
-log_info "Stopping containers..."
-cd "$PANEL_DIR"
-docker compose down --timeout 30 || true
-CONTAINERS_STOPPED=1
-
-# Wait for ports to be released
-log_info "Waiting for ports to be released..."
-for i in {1..15}; do
-    if ! ss -tlnp 2>/dev/null | grep -qE ':(80|443|8000) '; then
-        break
-    fi
-    sleep 1
-done
-log_success "Containers stopped"
-
-# Copy files (preserve .env and database)
-log_info "Copying new files..."
-rsync -av --delete \
-    --exclude='.env' \
-    --exclude='.env.backup' \
-    --exclude='backend/.env' \
-    --exclude='backend/.env.backup' \
-    --exclude='backend/data' \
-    "$TMP_DIR/panel/" "$PANEL_DIR/"
-
-# Restore .env files from backup if they exist
-if [ -f "$PANEL_DIR/.env.backup" ]; then
-    mv "$PANEL_DIR/.env.backup" "$PANEL_DIR/.env"
-    log_success ".env restored"
-fi
-
-if [ -f "$PANEL_DIR/backend/.env.backup" ]; then
-    mv "$PANEL_DIR/backend/.env.backup" "$PANEL_DIR/backend/.env"
-    log_success "backend/.env restored"
-fi
-
 # Тег версии из скачанного чекаута, если такой образ есть в реестре.
 # Пустой ответ означает «оставить действующий тег» — тогда pull промахнётся мимо
 # нужной версии и сработает локальная сборка ниже, которая соберёт ровно этот код.
@@ -298,13 +266,91 @@ case "$TARGET_REF" in
     main) IMAGE_TAG="latest" ;;
     *)    IMAGE_TAG=$(resolve_pinned_tag "$NEW_VERSION") ;;
 esac
+
+# Образы нового выпуска качаются и собираются из скачанного клона, пока панель
+# работает на прежних: простой сводится к перезапуску контейнеров, а сорвавшаяся
+# загрузка оставляет панель как была — её файлы ещё не тронуты. Переменные
+# compose берутся из действующего .env; новый тег образов передаётся окружением,
+# в .env он попадёт позже, вместе с остальными файлами
+CLONE_COMPOSE=(docker compose -f "$TMP_DIR/panel/docker-compose.yml")
+if [ -f "$PANEL_DIR/.env" ]; then
+    CLONE_COMPOSE+=(--env-file "$PANEL_DIR/.env")
+fi
+if [ -n "$IMAGE_TAG" ]; then
+    CLONE_COMPOSE=(env "MON_IMAGE_TAG=$IMAGE_TAG" "${CLONE_COMPOSE[@]}")
+    log_info "Docker image tag: $IMAGE_TAG"
+fi
+
+cleanup_docker_leftovers
+
+set +e
+if ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RETRY_DELAY" \
+    "Pulling Docker images" "${CLONE_COMPOSE[@]}" pull; then
+    log_warn "Failed to pull from registry, building locally..."
+    spin "Pulling base images" "${CLONE_COMPOSE[@]}" pull --ignore-buildable
+    spin_retry 600 2 10 "Building images from source" "${CLONE_COMPOSE[@]}" build || {
+        log_error "Failed to get new images — update cancelled, panel keeps running the old version"
+        exit 1
+    }
+fi
+set -e
+
+# Начатое в фоне панель доделывает, пока ещё целиком работает: при остановке
+# контейнера её подпроцессы умирают по SIGKILL посреди шага. Код 404 — у старой
+# версии панели такого входа нет, тогда просто останавливаем.
+log_info "Finishing panel background tasks..."
+prepare_status=$(docker exec panel-backend curl -s -o /dev/null -w '%{http_code}' \
+    -m "$PREPARE_SHUTDOWN_TIMEOUT" -X POST http://127.0.0.1:8000/system/prepare-shutdown 2>/dev/null) || true
+case "$prepare_status" in
+    200) log_success "Background tasks finished" ;;
+    404) ;;
+    *)   log_warn "Panel did not confirm background tasks finished (${prepare_status:-no answer}), stopping anyway" ;;
+esac
+
+# Stop containers
+log_info "Stopping containers..."
+cd "$PANEL_DIR"
+docker compose down --timeout "$STOP_TIMEOUT" || true
+CONTAINERS_STOPPED=1
+
+# Wait for ports to be released
+log_info "Waiting for ports to be released..."
+for i in {1..15}; do
+    if ! ss -tlnp 2>/dev/null | grep -qE ':(80|443|8000) '; then
+        break
+    fi
+    sleep 1
+done
+log_success "Containers stopped"
+
+# Copy files (preserve .env, database and this installation's nginx settings)
+log_info "Copying new files..."
+rsync -av --delete \
+    --exclude='.env' \
+    --exclude='.env.backup' \
+    --exclude='backend/.env' \
+    --exclude='backend/.env.backup' \
+    --exclude='backend/data' \
+    --exclude='nginx/extra' \
+    "$TMP_DIR/panel/" "$PANEL_DIR/"
+
+# Restore .env files from backup if they exist
+if [ -f "$PANEL_DIR/.env.backup" ]; then
+    mv "$PANEL_DIR/.env.backup" "$PANEL_DIR/.env"
+    log_success ".env restored"
+fi
+
+if [ -f "$PANEL_DIR/backend/.env.backup" ]; then
+    mv "$PANEL_DIR/backend/.env.backup" "$PANEL_DIR/backend/.env"
+    log_success "backend/.env restored"
+fi
+
 if [ -n "$IMAGE_TAG" ] && [ -f "$PANEL_DIR/.env" ]; then
     if grep -q '^MON_IMAGE_TAG=' "$PANEL_DIR/.env"; then
         sed -i "s|^MON_IMAGE_TAG=.*|MON_IMAGE_TAG=$IMAGE_TAG|" "$PANEL_DIR/.env"
     else
         echo "MON_IMAGE_TAG=$IMAGE_TAG" >> "$PANEL_DIR/.env"
     fi
-    log_info "Docker image tag: $IMAGE_TAG"
 fi
 
 # Make scripts executable
@@ -363,57 +409,46 @@ if [ -d "/opt/monitoring-node" ] && [ ! -f "/opt/monitoring-node/docker-compose.
     rmdir "/opt/monitoring-node" 2>/dev/null || true
 fi
 
-# Pull new Docker images
+# У панелей, установленных до появления каталога, его ещё нет
+mkdir -p "$PANEL_DIR/nginx/extra"
+
+# Образы уже на диске — контейнеры поднимаются на них без обращения к реестру
 cd "$PANEL_DIR"
-cleanup_docker_leftovers
-
-set +e
-# Pull ready images from GHCR (normal flow)
-if ! spin_retry "$DOCKER_PULL_TIMEOUT" "$DOCKER_PULL_RETRIES" "$DOCKER_PULL_RETRY_DELAY" \
-    "Pulling Docker images" docker compose pull 2>/dev/null; then
-    log_warn "Failed to pull from registry, building locally..."
-    spin "Pulling base images" bash -c \
-        'docker compose pull --ignore-buildable 2>/dev/null || true'
-    spin_retry 600 2 10 "Building images from source" docker compose build || {
-        log_error "Failed to build images"
-        exit 1
-    }
-fi
-set -e
-
-# Start containers
 spin "Starting containers" docker compose up -d || {
     log_error "Failed to start containers"
     exit 1
 }
 CONTAINERS_STOPPED=0
 
-# Wait for panel to be healthy
-log_info "Waiting for panel..."
-MAX_ATTEMPTS=30
-ATTEMPT=0
-
-# Load domain from .env
+# Load domain and port from .env
 if [ -f "$PANEL_DIR/.env" ]; then
     source "$PANEL_DIR/.env"
 fi
 
-while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    if curl -sfk "https://localhost/health" > /dev/null 2>&1; then
-        log_success "Panel is healthy"
-        break
-    fi
-    if [ -n "$DOMAIN" ] && curl -sfk "https://${DOMAIN}/health" > /dev/null 2>&1; then
-        log_success "Panel is healthy"
-        break
-    fi
-    ATTEMPT=$((ATTEMPT + 1))
-    sleep 2
-done
+# Порт берётся из .env: на панели с нестандартным PANEL_PORT проба порта 443
+# всегда промахивалась бы, и каждое обновление считалось бы неудачным
+wait_for_panel() {
+    local attempt port="${PANEL_PORT:-443}"
+    for ((attempt = 0; attempt < HEALTH_MAX_ATTEMPTS; attempt++)); do
+        if curl -sfk --max-time "$HEALTH_PROBE_TIMEOUT" "https://localhost:${port}/health" > /dev/null 2>&1; then
+            return 0
+        fi
+        if [ -n "$DOMAIN" ] && curl -sfk --max-time "$HEALTH_PROBE_TIMEOUT" "https://${DOMAIN}:${port}/health" > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep "$HEALTH_RETRY_DELAY"
+    done
+    return 1
+}
 
-if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-    log_warn "Health check timed out, but containers are running"
+log_info "Waiting for panel..."
+if ! wait_for_panel; then
+    # Уборка образов ниже не выполняется: прежние остаются на диске для разбора
+    log_error "Update failed: containers are started, but the panel does not answer the health check"
+    log_error "Check: cd $PANEL_DIR && docker compose ps && docker compose logs --tail 50 backend nginx"
+    exit 1
 fi
+log_success "Panel is healthy"
 
 # Контейнеры уже на новых образах — прежние остались без тега или под прежним тегом
 cleanup_docker_leftovers

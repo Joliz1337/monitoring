@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
 import { useRememberedState } from '../hooks/useRememberedState'
 import { useTranslation } from 'react-i18next'
@@ -6,14 +6,42 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import {
   Siren, ShieldAlert, ShieldCheck, Settings as SettingsIcon,
-  BookOpen, Loader2, Radar, Lock,
+  BookOpen, Loader2, Radar, Lock, AlertTriangle, RotateCw,
 } from 'lucide-react'
 import {
-  antiDdosApi, type AntiDdosSettings, type AntiDdosStatus, type NodeAntiDdosState,
+  antiDdosApi, type AntiDdosFailedNode, type AntiDdosFleetAction, type AntiDdosSettings,
+  type AntiDdosStatus, type NodeAntiDdosState,
 } from '../api/client'
 import { Toggle } from '../components/ui/Toggle'
 
 type TabType = 'control' | 'info'
+
+// Пока команда обходит парк, её ход читается чаще общего опроса страницы
+const FLEET_PROGRESS_POLL_MS = 2000
+
+function fleetActionKey(action: AntiDdosFleetAction): string {
+  if (action.action === 'install') return 'anti_ddos.fleet_action.install'
+  return `anti_ddos.fleet_action.${action.action}_${action.enabled ? 'on' : 'off'}`
+}
+
+function FailedNodes({ nodes, total }: { nodes: AntiDdosFailedNode[]; total: number }) {
+  const { t } = useTranslation()
+  return (
+    <>
+      <ul className="max-h-48 overflow-y-auto space-y-1 text-xs">
+        {nodes.map(node => (
+          <li key={node.server_id} className="flex gap-2">
+            <span className="font-medium text-dark-200 shrink-0">{node.server_name}</span>
+            <span className="text-dark-400 truncate" title={node.message}>{node.message}</span>
+          </li>
+        ))}
+      </ul>
+      {total > nodes.length && (
+        <p className="text-xs text-dark-500">{t('anti_ddos.fleet_more', { count: total - nodes.length })}</p>
+      )}
+    </>
+  )
+}
 
 function ModeBadge({ node }: { node: NodeAntiDdosState }) {
   const { t } = useTranslation()
@@ -40,12 +68,17 @@ export default function AntiDdos() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const { allows } = useNodeCapabilities()
+  // started_at команды, запущенной с этой страницы: по её завершении — тост
+  const trackedAction = useRef<string | null>(null)
 
-  const loadStatus = useCallback(async () => {
+  const loadStatus = useCallback(async (): Promise<AntiDdosStatus | null> => {
     try {
       const { data } = await antiDdosApi.getStatus()
       setStatus(data)
-    } catch { /* keep last */ }
+      return data
+    } catch {
+      return null  // keep last
+    }
   }, [])
 
   const loadSettings = useCallback(async () => {
@@ -61,13 +94,36 @@ export default function AntiDdos() {
     return () => clearInterval(id)
   }, [loadStatus, loadSettings])
 
+  const lastAction = status?.last_action ?? null
+  const fleetRunning = !!lastAction && !lastAction.finished_at
+  const rollout = status?.rollout ?? null
+
+  useEffect(() => {
+    if (!fleetRunning) return
+    const id = setInterval(() => { if (!document.hidden) loadStatus() }, FLEET_PROGRESS_POLL_MS)
+    return () => clearInterval(id)
+  }, [fleetRunning, loadStatus])
+
+  useEffect(() => {
+    if (!lastAction?.finished_at || lastAction.started_at !== trackedAction.current) return
+    trackedAction.current = null
+    // Неудачу показывает блок со списком нод, тост — только об успехе
+    if (lastAction.failed_count === 0) toast.success(t('anti_ddos.done'))
+  }, [lastAction, t])
+
   const patchSettings = async (patch: Partial<AntiDdosSettings>) => {
+    const previousAction = lastAction?.started_at
     try {
       const { data } = await antiDdosApi.updateSettings(patch)
       setSettings(data)
     } catch {
       toast.error(t('anti_ddos.save_failed'))
+      return
     }
+    if (patch.enabled === undefined) return
+    // Мастер-переключатель запускает обход парка — его ход виден в last_action
+    const started = (await loadStatus())?.last_action?.started_at
+    if (started && started !== previousAction) trackedAction.current = started
   }
 
   const runAction = async (key: string, fn: () => Promise<unknown>, okMsg: string) => {
@@ -75,6 +131,19 @@ export default function AntiDdos() {
     try {
       await fn()
       toast.success(okMsg)
+      await loadStatus()
+    } catch {
+      toast.error(t('anti_ddos.action_failed'))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const runFleetAction = async (key: string, start: () => Promise<{ data: { action: AntiDdosFleetAction } }>) => {
+    setBusy(key)
+    try {
+      const { data } = await start()
+      trackedAction.current = data.action.started_at
       await loadStatus()
     } catch {
       toast.error(t('anti_ddos.action_failed'))
@@ -159,14 +228,14 @@ export default function AntiDdos() {
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button
-                      onClick={() => runAction('emg-all-on', () => antiDdosApi.emergencyAll(true), t('anti_ddos.done'))}
+                      onClick={() => runFleetAction('emg-all-on', () => antiDdosApi.emergencyAll(true))}
                       disabled={busy === 'emg-all-on'}
                       className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-red-500/90 hover:bg-red-500 text-white disabled:opacity-50">
                       {busy === 'emg-all-on' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldAlert className="w-4 h-4" />}
                       {t('anti_ddos.enable_all')}
                     </button>
                     <button
-                      onClick={() => runAction('emg-all-off', () => antiDdosApi.emergencyAll(false), t('anti_ddos.done'))}
+                      onClick={() => runFleetAction('emg-all-off', () => antiDdosApi.emergencyAll(false))}
                       disabled={busy === 'emg-all-off'}
                       className="flex items-center gap-2 px-3 py-2 text-sm rounded bg-dark-700 hover:bg-dark-600 text-dark-100 disabled:opacity-50">
                       {busy === 'emg-all-off' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
@@ -174,6 +243,53 @@ export default function AntiDdos() {
                     </button>
                   </div>
                 </div>
+
+                {lastAction && fleetRunning && (
+                  <div className="text-sm px-3 py-2 rounded bg-dark-800/60 text-dark-300 flex items-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                    {t('anti_ddos.fleet_running', {
+                      action: t(fleetActionKey(lastAction)),
+                      done: lastAction.ok + lastAction.failed_count,
+                      total: lastAction.total,
+                    })}
+                  </div>
+                )}
+
+                {lastAction && !fleetRunning && lastAction.failed_count > 0 && (
+                  <div className="rounded border border-yellow-500/30 bg-yellow-500/10 p-3 space-y-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="text-sm text-yellow-400 flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                        {t('anti_ddos.fleet_not_applied', {
+                          action: t(fleetActionKey(lastAction)),
+                          count: lastAction.failed_count,
+                          total: lastAction.total,
+                        })}
+                      </div>
+                      <button
+                        onClick={() => runFleetAction('retry-failed', antiDdosApi.retryFailed)}
+                        disabled={busy === 'retry-failed'}
+                        className="flex items-center gap-2 px-3 py-1.5 text-xs rounded bg-dark-700 hover:bg-dark-600 text-dark-100 disabled:opacity-50 shrink-0">
+                        {busy === 'retry-failed' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCw className="w-3.5 h-3.5" />}
+                        {t('anti_ddos.retry')}
+                      </button>
+                    </div>
+                    <FailedNodes nodes={lastAction.failed} total={lastAction.failed_count} />
+                  </div>
+                )}
+
+                {rollout && rollout.failed > 0 && (
+                  <div className="rounded border border-yellow-500/30 bg-yellow-500/10 p-3 space-y-2">
+                    <div className="text-sm text-yellow-400 flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 shrink-0" />
+                      {t(rollout.halted ? 'anti_ddos.rollout_halted' : 'anti_ddos.rollout_failed', {
+                        version: rollout.version,
+                        count: rollout.failed,
+                      })}
+                    </div>
+                    <FailedNodes nodes={rollout.failed_nodes} total={rollout.failed} />
+                  </div>
+                )}
               </div>
 
               <div className="card divide-y divide-dark-800">

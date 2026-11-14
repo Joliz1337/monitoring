@@ -7,6 +7,7 @@
 # Необязательные переменные окружения:
 #   DOMAIN        — домен панели (вопрос не задаётся)
 #   CF_API_TOKEN  — API-токен Cloudflare: сертификат выпускается через DNS-01 без вопросов
+#   CF_PROXIED    — 1 или 0: домен проксируется через Cloudflare (вопрос не задаётся)
 #
 
 set +e
@@ -42,6 +43,14 @@ LETSENCRYPT_RENEWAL="/etc/letsencrypt/renewal"
 CLOUDFLARE_CREDENTIALS="/etc/letsencrypt/cloudflare.ini"
 CLOUDFLARE_PROPAGATION_SECONDS=30
 NGINX_RELOAD_CMD="docker exec panel-nginx nginx -s reload >/dev/null 2>&1 || true"
+# Каталог nginx-настроек этой установки: обновление его не перезаписывает
+NGINX_EXTRA_DIR="$SCRIPT_DIR/nginx/extra"
+CLOUDFLARE_REALIP_EXAMPLE="$SCRIPT_DIR/nginx/cloudflare-realip.conf.example"
+CLOUDFLARE_REALIP_CONF="$NGINX_EXTRA_DIR/cloudflare-realip.conf"
+
+DOCKER_APT_KEY_FPR="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+DOCKER_APT_KEYRING="/etc/apt/keyrings/docker.gpg"
+TIMEOUT_DOCKER_KEY=60
 
 # existing — подходящий сертификат уже лежит в /etc/letsencrypt
 # http      — certbot standalone (HTTP-01), нужен порт 80 и A-запись на этот сервер
@@ -114,8 +123,8 @@ MSG_EN[apt_update]="Updating package lists"
 MSG_EN[apt_deps]="Installing dependencies"
 MSG_EN[docker_installed]="Docker is installed"
 MSG_EN[docker_installing]="Installing Docker..."
-MSG_EN[docker_gpg]="Downloading Docker GPG key"
-MSG_EN[docker_gpg_failed]="Failed to download Docker GPG key"
+MSG_EN[docker_gpg]="Downloading and verifying Docker GPG key"
+MSG_EN[docker_gpg_failed]="Could not download the Docker repository key or its fingerprint does not match — repository not added"
 MSG_EN[docker_engine]="Installing Docker Engine"
 MSG_EN[docker_failed]="Failed to install Docker"
 MSG_EN[docker_done]="Docker installed"
@@ -161,6 +170,11 @@ MSG_EN[cf_token_ok]="Token is valid"
 MSG_EN[cf_token_invalid]="Cloudflare rejected the token"
 MSG_EN[cf_token_unverified]="Could not reach the Cloudflare API to verify the token — continuing"
 MSG_EN[cf_creds_saved]="Cloudflare credentials saved to"
+MSG_EN[cf_proxied_hint]="If the domain is proxied through Cloudflare (orange cloud), nginx has to take visitor addresses from Cloudflare. Otherwise every visitor arrives from Cloudflare's addresses, and five wrong passwords from anyone lock the login for everybody."
+MSG_EN[cf_proxied_prompt]="Is the domain proxied through Cloudflare? (y/N): "
+MSG_EN[cf_realip_installed]="Visitor addresses will be taken from Cloudflare:"
+MSG_EN[cf_realip_later]="Left as is. To enable later: cp nginx/cloudflare-realip.conf.example nginx/extra/cloudflare-realip.conf && docker exec panel-nginx nginx -s reload"
+MSG_EN[cf_realip_failed]="Could not install the Cloudflare address config:"
 MSG_EN[certbot_installed]="Certbot is installed"
 MSG_EN[certbot_installing]="Installing Certbot"
 MSG_EN[certbot_failed]="Failed to install Certbot"
@@ -246,8 +260,8 @@ MSG_RU[apt_update]="Обновление списка пакетов"
 MSG_RU[apt_deps]="Установка зависимостей"
 MSG_RU[docker_installed]="Docker установлен"
 MSG_RU[docker_installing]="Установка Docker..."
-MSG_RU[docker_gpg]="Загрузка GPG-ключа Docker"
-MSG_RU[docker_gpg_failed]="Не удалось загрузить GPG-ключ Docker"
+MSG_RU[docker_gpg]="Загрузка и проверка GPG-ключа Docker"
+MSG_RU[docker_gpg_failed]="Ключ репозитория Docker не скачался или его отпечаток не совпал — репозиторий не подключён"
 MSG_RU[docker_engine]="Установка Docker Engine"
 MSG_RU[docker_failed]="Не удалось установить Docker"
 MSG_RU[docker_done]="Docker установлен"
@@ -293,6 +307,11 @@ MSG_RU[cf_token_ok]="Токен действителен"
 MSG_RU[cf_token_invalid]="Cloudflare отклонил токен"
 MSG_RU[cf_token_unverified]="Не удалось проверить токен через API Cloudflare — продолжаем"
 MSG_RU[cf_creds_saved]="Данные Cloudflare сохранены в"
+MSG_RU[cf_proxied_hint]="Если домен проксируется через Cloudflare (оранжевое облако), nginx должен брать адреса посетителей у Cloudflare. Иначе все посетители приходят с адресов Cloudflare, и пять неверных паролей от кого угодно закрывают вход всем."
+MSG_RU[cf_proxied_prompt]="Домен проксируется через Cloudflare? (y/N): "
+MSG_RU[cf_realip_installed]="Адреса посетителей берутся у Cloudflare:"
+MSG_RU[cf_realip_later]="Оставлено как есть. Включить позже: cp nginx/cloudflare-realip.conf.example nginx/extra/cloudflare-realip.conf && docker exec panel-nginx nginx -s reload"
+MSG_RU[cf_realip_failed]="Не удалось установить настройку адресов Cloudflare:"
 MSG_RU[certbot_installed]="Certbot установлен"
 MSG_RU[certbot_installing]="Установка Certbot"
 MSG_RU[certbot_failed]="Не удалось установить Certbot"
@@ -510,10 +529,14 @@ configure_apt_proxy() {
     [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || { rm -f /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null; return 0; }
 
     mkdir -p /etc/apt/apt.conf.d 2>/dev/null || true
+    # В адресе прокси бывают логин и пароль, а apt.conf.d по умолчанию читают
+    # все: файл заводится закрытым ещё до записи
+    install -m 600 /dev/null /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null || true
     cat > /etc/apt/apt.conf.d/99monitoring-proxy << PROXYEOF
 Acquire::http::Proxy "$PROXY_URL";
 Acquire::https::Proxy "$PROXY_URL";
 PROXYEOF
+    chmod 600 /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null || true
 }
 
 configure_docker_proxy() {
@@ -595,6 +618,25 @@ check_os() {
     exit 1
 }
 
+# Ключ репозитория Docker закреплён отпечатком: в доверенные apt уходит только он,
+# даже если по дороге ключ подменили или подложили лишний. На место файл ключа
+# встаёт только после сверки
+install_docker_apt_key() {
+    local os_id="$1" gnupg_home rc=1
+    gnupg_home=$(mktemp -d) || return 1
+    if curl -fsSL --max-time "$TIMEOUT_DOCKER_KEY" "https://download.docker.com/linux/${os_id}/gpg" -o "$gnupg_home/key" \
+        && GNUPGHOME="$gnupg_home" gpg --batch --quiet --import "$gnupg_home/key" \
+        && GNUPGHOME="$gnupg_home" gpg --batch --with-colons --list-keys 2>/dev/null \
+            | awk -F: '$1 == "fpr" {print $10}' | grep -qx "$DOCKER_APT_KEY_FPR" \
+        && GNUPGHOME="$gnupg_home" gpg --batch --export "$DOCKER_APT_KEY_FPR" > "$gnupg_home/docker.gpg" \
+        && [ -s "$gnupg_home/docker.gpg" ] \
+        && install -D -m 0644 "$gnupg_home/docker.gpg" "$DOCKER_APT_KEYRING"; then
+        rc=0
+    fi
+    rm -rf "$gnupg_home"
+    return $rc
+}
+
 install_docker() {
     print_info "$(msg docker_installing)"
 
@@ -608,16 +650,12 @@ install_docker() {
         return 1
     }
 
-    install -m 0755 -d /etc/apt/keyrings 2>/dev/null || true
-    rm -f /etc/apt/keyrings/docker.gpg
-    if ! spin "$(msg docker_gpg)" bash -c \
-        "curl -fsSL 'https://download.docker.com/linux/${os_id}/gpg' | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg 2>/dev/null"; then
+    if ! spin "$(msg docker_gpg)" install_docker_apt_key "$os_id"; then
         print_error "$(msg docker_gpg_failed)"
         return 1
     fi
-    chmod a+r /etc/apt/keyrings/docker.gpg 2>/dev/null || true
 
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${os_id} ${os_codename} stable" \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=${DOCKER_APT_KEYRING}] https://download.docker.com/linux/${os_id} ${os_codename} stable" \
         > /etc/apt/sources.list.d/docker.list
 
     apt_update || true
@@ -1191,6 +1229,34 @@ setup_cert_renewal_cron() {
     print_status "$(msg cron_added)"
 }
 
+# ==================== Cloudflare proxy ====================
+
+# Вопрос задаётся только там, где сертификат выпущен через DNS Cloudflare: при
+# HTTP-проверке домен обязан вести прямо на этот сервер. Уже установленный файл
+# повторный запуск не трогает
+setup_cloudflare_realip() {
+    mkdir -p "$NGINX_EXTRA_DIR" 2>/dev/null || true
+    [ -f "$CLOUDFLARE_REALIP_CONF" ] && return 0
+    [ "$SSL_MODE" = "cloudflare" ] || [ "$(cert_authenticator)" = "dns-cloudflare" ] || return 0
+
+    local proxied="${CF_PROXIED:-}"
+    if [ -z "$proxied" ]; then
+        echo ""
+        echo -e "$(msg cf_proxied_hint)"
+        proxied=$(safe_read "$(msg cf_proxied_prompt)" "n" 120)
+    fi
+    if [ "$proxied" != "1" ] && [ "$proxied" != "y" ] && [ "$proxied" != "Y" ]; then
+        print_info "$(msg cf_realip_later)"
+        return 0
+    fi
+
+    if install -m 0644 "$CLOUDFLARE_REALIP_EXAMPLE" "$CLOUDFLARE_REALIP_CONF" 2>/dev/null; then
+        print_status "$(msg cf_realip_installed) ${CLOUDFLARE_REALIP_CONF}"
+    else
+        print_warning "$(msg cf_realip_failed) ${CLOUDFLARE_REALIP_CONF}"
+    fi
+}
+
 # ==================== .env ====================
 
 # Расчёт настроек PostgreSQL живёт в общем scripts/pg-tune.sh — тот же файл
@@ -1374,6 +1440,7 @@ main() {
 
     setup_ssl_certificate || exit 1
     setup_cert_renewal_cron
+    setup_cloudflare_realip
 
     generate_env
     tune_postgres_env .env

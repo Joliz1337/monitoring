@@ -15,7 +15,10 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +98,33 @@ READ_ONLY_WRITES: frozenset[str] = frozenset({
 
 READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 
+# Тело этих запросов — скрипты и юниты, которые нода ставит и запускает от root.
+# Одной записи в свой домен для них мало: иначе `antiddos` или `system` без
+# `exec` были бы тем же root. Запросы, где исполняемое есть не всегда (конфиг
+# HAProxy, раскладка сертификата), проверяет по телу сам обработчик —
+# через exec_denial_response().
+EXEC_REQUIRED_WRITES: frozenset[str] = frozenset({
+    "/api/antiddos/install",
+    "/api/system/optimizations/apply",
+})
+
+# Чем haproxy.cfg заставляет HAProxy запускать программы и чужой код: секция
+# program, Lua, внешние проверки и снятие запрета на fork/setuid.
+HAPROXY_EXEC_KEYWORDS: frozenset[str] = frozenset({
+    "program",
+    "lua-load",
+    "lua-load-per-thread",
+    "external-check",
+    "insecure-fork-wanted",
+    "insecure-setuid-wanted",
+})
+# HAProxy снимает кавычки и экранирование и подставляет переменные окружения до
+# того, как узнаёт ключевое слово: «"lua-load"» и «lua\x2dload» для него то же
+# самое. Слово с такими символами на месте ключевого считается исполняемым.
+_HAPROXY_QUOTING = frozenset("\"'\\$")
+# «option external-check», «no option …», «default option …»: ключевое слово дальше
+_HAPROXY_KEYWORD_PREFIXES = frozenset({"no", "default", "option"})
+
 PRESETS: dict[str, dict[Domain, Access]] = {
     "full": {domain: Access.WRITE for domain in Domain},
     "readonly": {domain: Access.READ for domain in Domain},
@@ -161,9 +191,18 @@ class CapabilityPolicy:
 
         writes = method.upper() not in READ_METHODS and normalized not in READ_ONLY_WRITES
         granted = self.grants.get(domain, Access.NONE)
-        if granted is Access.WRITE or (granted is Access.READ and not writes):
+        allowed = granted is Access.WRITE or (granted is Access.READ and not writes)
+        if not allowed:
+            return Denial(domain=domain, required=Access.WRITE if writes else Access.READ)
+        if writes and normalized in EXEC_REQUIRED_WRITES:
+            return self.exec_denial()
+        return None
+
+    def exec_denial(self) -> Optional[Denial]:
+        """Отказ запросу, содержимое которого исполняется на хосте; None — exec выдан."""
+        if self.unrestricted or self.grants.get(Domain.EXEC, Access.NONE) is Access.WRITE:
             return None
-        return Denial(domain=domain, required=Access.WRITE if writes else Access.READ)
+        return Denial(domain=Domain.EXEC, required=Access.WRITE)
 
     def published(self) -> Optional[dict[str, str]]:
         """Карта прав для панели: либо все домены разом, либо None.
@@ -195,6 +234,20 @@ UNRESTRICTED = CapabilityPolicy(
     unknown_tokens=(),
     unrestricted=True,
 )
+
+
+def haproxy_config_runs_code(config: str) -> bool:
+    """Есть ли в haproxy.cfg директива, которой HAProxy запускает программу или код."""
+    for line in config.splitlines():
+        words = line.split("#", 1)[0].split()
+        while words and words[0] in _HAPROXY_KEYWORD_PREFIXES:
+            words.pop(0)
+        if not words:
+            continue
+        keyword = words[0]
+        if keyword in HAPROXY_EXEC_KEYWORDS or not _HAPROXY_QUOTING.isdisjoint(keyword):
+            return True
+    return False
 
 
 def _grant(grants: dict[Domain, Access], domain: Domain, access: Access) -> None:
@@ -350,3 +403,29 @@ def get_policy() -> CapabilityPolicy:
         # чинится только по SSH — открытый агент лучше недоступного.
         logger.error("NODE_CAPABILITIES unreadable, agent stays fully open", exc_info=True)
         return UNRESTRICTED
+
+
+_handler_deny_log = DenyLog()
+
+
+def exec_denial_response() -> Optional["JSONResponse"]:
+    """403 обработчику, получившему исполняемое содержимое без права exec; None — можно.
+
+    Тело запроса слой прав не видит, поэтому решение по содержимому — за
+    обработчиком: он зовёт это, когда запрос несёт команду, скрипт или запись
+    файла за пределами своего раздела.
+    """
+    policy = get_policy()
+    denial = policy.exec_denial()
+    if denial is None:
+        return None
+
+    _handler_deny_log.record(denial)
+    # Не на верхнем уровне: панель грузит этот файл без рантайма агента
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=403,
+        content=policy.denial_body(denial),
+        headers={DENIAL_HEADER: f"{denial.domain.value}:{denial.required.value}"},
+    )

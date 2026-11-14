@@ -160,19 +160,6 @@ def _read_text(path: Path, parse):
         return None
 
 
-def scan_listening_ports(content: str) -> set[str]:
-    """Hex-порты слушающих сокетов. Предфильтр по подстроке: столбец st — единственное
-    место строки, где двухсимвольный токен «0A» стоит между пробелами."""
-    ports: set[str] = set()
-    for line in content.split("\n"):
-        if " 0A " not in line:
-            continue
-        parts = line.split(None, 4)
-        if len(parts) >= 4 and parts[3] == STATE_LISTEN:
-            ports.add(parts[1].rpartition(":")[2])
-    return ports
-
-
 def decode_address(hex_ip: str) -> str:
     """Адрес из /proc/net/tcp{,6} в текст."""
     words = [bytes.fromhex(hex_ip[offset:offset + 8]) for offset in range(0, len(hex_ip), 8)]

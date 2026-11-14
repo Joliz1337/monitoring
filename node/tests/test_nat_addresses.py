@@ -7,6 +7,7 @@ Runnable with plain stdlib:  python -m unittest discover -s node/tests
 порты на всех нодах.
 """
 
+import asyncio
 import os
 import sys
 import unittest
@@ -15,6 +16,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services.nat_addresses import (  # noqa: E402
+    MAX_PARALLEL_ADDRESSES,
     STALE_AFTER_SEC,
     UNREACHABLE_RETRY_SEC,
     NatAddressProbe,
@@ -148,6 +150,30 @@ class NatAddressProbeTest(unittest.IsolatedAsyncioTestCase):
         await self.probe.probe_once([])
 
         self.assertIsNone(self.probe.public_address("192.168.0.106"))
+
+
+class ProbeConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    """Каждый адрес занимает поток общего пула агента на всё время опроса сервисов:
+    десяток адресов без выхода наружу, опрошенных разом, занял бы пул целиком."""
+
+    async def test_no_more_than_three_addresses_are_resolved_at_once(self):
+        addresses = [f"10.0.0.{host}" for host in range(1, 11)]
+        running = 0
+        peak = 0
+
+        async def resolve(source: str):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            await asyncio.sleep(0)
+            running -= 1
+            return "89.232.163.73"
+
+        probe = NatAddressProbe(resolve=resolve)
+        await probe.probe_once(addresses)
+
+        self.assertEqual(peak, MAX_PARALLEL_ADDRESSES)
+        self.assertEqual([probe.public_address(address) for address in addresses], ["89.232.163.73"] * 10)
 
 
 class FetchEchoTest(unittest.TestCase):

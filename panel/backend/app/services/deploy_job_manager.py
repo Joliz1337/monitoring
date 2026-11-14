@@ -86,6 +86,8 @@ class DeployJob:
     proxy_url: Optional[str] = None  # SOCKS5 панель→нода, наследуется созданным сервером
     folder: Optional[str] = None
     ssh_port: Optional[int] = None  # порт, по которому шёл деплой — сохраняется в креды сервера
+    # Ключ хоста, принятый при установке по SSH, — закрепляется за созданным сервером
+    ssh_host_key: Optional[str] = None
     status: str = "running"  # running | success | error
     log: list[str] = field(default_factory=list)
     # Сквозной номер первой строки в буфере: при переполнении старые строки
@@ -208,8 +210,10 @@ class DeployJobManager:
                 etype = event.get("type")
                 if etype == "done":
                     if event.get("rescue"):
+                        # Ключ хоста Rescue System установленной ОС не принадлежит — не запоминаем
                         await self._on_rescue_reboot(job, params, post_opts)
                     else:
+                        job.ssh_host_key = event.get("host_key")
                         await self._on_install_done(job, event.get("exit_code", 1), post_opts)
                     return
                 if etype == "error":
@@ -242,6 +246,7 @@ class DeployJobManager:
                 job.name, job.server_url, job.proxy_url, job.ssh_port,
                 folder=job.folder,
                 dedicated_cert=post_opts.dedicated_cert,
+                ssh_host_key=job.ssh_host_key,
             )
         except Exception as exc:  # noqa: BLE001 — финальная граница создания сервера
             logger.error("Deploy job %s: create server failed: %s", job.id, exc)
@@ -386,6 +391,7 @@ class DeployJobManager:
         ssh_port: Optional[int] = None,
         folder: Optional[str] = None,
         dedicated_cert: bool = False,
+        ssh_host_key: Optional[str] = None,
     ) -> int:
         """Создаёт запись ноды после успешной установки (mTLS: shared cert или
         одноразовый персональный сертификат)."""
@@ -402,6 +408,7 @@ class DeployJobManager:
                 uses_shared_cert=not dedicated_cert,
                 dedicated_cert=dedicated_cert,
                 ssh_port=ssh_port,
+                ssh_host_key=ssh_host_key,
                 position=(last.position + 1) if last else 0,
             )
             db.add(server)

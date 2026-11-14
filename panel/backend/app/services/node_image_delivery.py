@@ -33,7 +33,13 @@ import asyncssh
 
 from app.services.http_client import sanitize_proxy
 from app.services.node_image_cache import NodeImageArchive, ensure_image, image_ref
-from app.services.ssh_target import CONNECT_TIMEOUT, SSHTarget, open_ssh_connection, ssh_connect_kwargs
+from app.services.ssh_target import (
+    CONNECT_TIMEOUT,
+    HostKeyChangedError,
+    SSHTarget,
+    open_ssh_connection,
+    ssh_connect_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -314,9 +320,12 @@ async def _connect(target: SSHTarget, connect_kwargs: dict) -> AsyncIterator:
     не подключился — событие error."""
     for attempt in range(1, SSH_CONNECT_ATTEMPTS + 1):
         try:
-            conn = await open_ssh_connection(connect_kwargs, target.socks5_proxy)
+            conn = await open_ssh_connection(connect_kwargs, target.socks5_proxy, target.server_id)
         except asyncssh.PermissionDenied:
             yield {"type": "error", "message": "SSH: неверный логин, пароль или ключ"}
+            return
+        except HostKeyChangedError as exc:
+            yield {"type": "error", "message": str(exc)}
             return
         except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
             reason = _connect_error_text(target, exc)

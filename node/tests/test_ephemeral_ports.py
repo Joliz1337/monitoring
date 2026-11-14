@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.ephemeral_ports import (  # noqa: E402
+    STATE_LISTEN,
     EphemeralPortsAggregator,
     KernelPortSettings,
     count_reserved_fast,
@@ -25,7 +26,6 @@ from app.services.ephemeral_ports import (  # noqa: E402
     parse_port_range,
     parse_reserved_ports,
     read_kernel_settings,
-    scan_listening_ports,
 )
 
 # 203.0.113.10 и 203.0.113.11 — адреса ноды; 142.250.185.78 — Google, 1.1.1.1 — второе направление
@@ -70,14 +70,18 @@ FAST_CAPACITY = 32256 - 6
 
 
 def summarize(dumps, settings=SETTINGS):
-    listening = set()
-    for dump in dumps:
-        listening |= scan_listening_ports(dump)
+    # Как в разборе таблицы сокетов: слушающие порты копятся по ходу того же
+    # прохода — ядро печатает слушателей раньше соединений
+    listening: set[str] = set()
     aggregator = EphemeralPortsAggregator(settings, listening)
     for dump in dumps:
         for line in dump.strip().split("\n")[1:]:
             parts = line.split()
-            aggregator.add(parts[1], parts[2], parts[3].upper())
+            state = parts[3].upper()
+            if state == STATE_LISTEN:
+                listening.add(parts[1].rpartition(":")[2])
+            else:
+                aggregator.add(parts[1], parts[2], state)
     return aggregator.summarize()
 
 
@@ -145,14 +149,6 @@ class KernelSettingsTests(unittest.TestCase):
         self.assertEqual((settings.low, settings.high), (32768, 60999))
         self.assertEqual(settings.reserved_in_range, 0)
         self.assertEqual(settings.tw_reuse, 2)
-
-
-class ListeningPortsTests(unittest.TestCase):
-    def test_listen_rows_collected(self):
-        self.assertEqual(scan_listening_ports(TCP_DUMP), {"01BB"})
-
-    def test_established_rows_ignored(self):
-        self.assertEqual(scan_listening_ports(TCP6_DUMP), set())
 
 
 class AggregationTests(unittest.TestCase):

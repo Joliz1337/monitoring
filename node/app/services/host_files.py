@@ -62,7 +62,7 @@ def _permissions_are_safe(actual: str, wanted: str) -> bool:
     )
 
 
-def _write_command(path: str, content: str, mode: Optional[str]) -> str:
+def _write_command(path: str, content: str, mode: Optional[str], in_place: bool = False) -> str:
     """Команда записи файла на хост.
 
     Uses base64 rather than a heredoc: the old `cat > path << 'EOFCONFIG'` form
@@ -70,27 +70,52 @@ def _write_command(path: str, content: str, mode: Optional[str]) -> str:
     truncating the file. Now that the *inputs* (shell scripts, templates) are
     what get pushed, that is no longer a theoretical concern.
 
-    Пишет строго in-place (`> path`): inode сохраняется, что критично для
-    файлов, смонтированных в контейнеры как single-file bind-mount.
+    Файл собирается во временном рядом с целью и встаёт на место одним rename:
+    сбой посреди записи (кончилось место, убит nsenter) оставляет прежний файл
+    целым, а читатель — в том числе bash, исполняющий этот скрипт прямо сейчас —
+    не видит половину нового. Запись на месте шла сквозь симлинк и не трогала
+    владельца и права существующего файла, поэтому симлинк разыменовывается,
+    владелец переносится всегда, права — когда `mode` не задан.
+
+    in_place — писать прямо в файл (`> path`), сохраняя inode: rename оставил
+    бы контейнер с single-file bind-mount на старом файле, а на pmxcfs
+    (`/etc/pve`) поведение rename не проверено.
     """
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    cmd = (
-        f"mkdir -p $(dirname {path}) && "
-        f"printf '%s' '{encoded}' | base64 -d > {path}"
-    )
-    if not mode:
-        return cmd
-
+    decode = f"printf '%s' '{encoded}' | base64 -d"
+    prepare = f"mkdir -p $(dirname {path})"
     # Права даёт umask при создании файла, а chmod лишь доводит их на уже
     # существующем: отдельный chmod после записи оставлял бы приватный ключ
     # читаемым всем в промежутке между двумя шагами. Провал самого chmod не
     # фатален — есть ФС, где права фиксированы и chmod запрещён (pmxcfs), а
     # запись при этом проходит; итог оценивается по фактическим правам.
-    return (
-        f"umask {_umask_for(mode)} && {cmd} || exit 1; "
-        f"chmod {mode} {path} 2>/dev/null; "
-        f"stat -c '%a' {path}"
-    )
+    if mode:
+        prepare = f"umask {_umask_for(mode)} && {prepare}"
+
+    if in_place:
+        write = f"{prepare} && {decode} > {path}"
+        if not mode:
+            return write
+        return f"{write} || exit 1; chmod {mode} {path} 2>/dev/null; stat -c '%a' {path}"
+
+    inherit = 'chown --reference="$target" "$tmp"'
+    if not mode:
+        inherit += '; chmod --reference="$target" "$tmp"'
+    steps = [
+        f'{prepare} && target=$(readlink -f {path}) || exit 1',
+        # Замаскированный юнит — симлинк на /dev/null: rename подменил бы само устройство
+        '[ ! -e "$target" ] || [ -f "$target" ] || { echo "not a regular file: $target" >&2; exit 1; }',
+        'tmp="$target.tmp.$$"',
+        f'{decode} > "$tmp" || {{ rm -f "$tmp"; exit 1; }}',
+        f'[ -e "$target" ] && {{ {inherit}; }} 2>/dev/null',
+    ]
+    if mode:
+        steps.append(f'chmod {mode} "$tmp" 2>/dev/null')
+    # -T: каталог на месте цели — ошибка, а не повод положить файл внутрь него
+    steps.append('mv -fT "$tmp" "$target" || { rm -f "$tmp"; exit 1; }')
+    if mode:
+        steps.append("stat -c '%a' \"$target\"")
+    return "\n".join(steps)
 
 
 def _write_succeeded(result, path: str, mode: Optional[str]) -> bool:
@@ -110,13 +135,16 @@ def _write_succeeded(result, path: str, mode: Optional[str]) -> bool:
     return True
 
 
-async def write_host_file(path: str, content: str, mode: Optional[str] = None, secret: bool = False) -> bool:
-    """Write a file to the host filesystem via nsenter.
+async def write_host_file(
+    path: str, content: str, mode: Optional[str] = None, secret: bool = False, in_place: bool = False,
+) -> bool:
+    """Write a file to the host filesystem via nsenter: атомарно, через rename.
 
     secret — содержимое не попадает в лог: исполнитель логирует начало команды,
-    а в нём начало base64 файла (.env ноды, учётки реестров, пароль прокси)."""
+    а в нём начало base64 файла (.env ноды, учётки реестров, пароль прокси).
+    in_place — см. _write_command: для файлов, чей inode должен пережить запись."""
     result = await get_host_executor().execute(
-        _write_command(path, content, mode), timeout=20, shell="bash",
+        _write_command(path, content, mode, in_place), timeout=20, shell="bash",
         log_label=f"write {path}" if secret else None,
     )
     return _write_succeeded(result, path, mode)

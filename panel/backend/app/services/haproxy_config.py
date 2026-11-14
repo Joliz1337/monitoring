@@ -292,7 +292,6 @@ defaults
     option dontlognull
     option redispatch
     option tcp-smart-accept
-    option tcp-smart-connect
     option splice-request
     option splice-response
     option clitcpka
@@ -569,7 +568,7 @@ backend {backend_name}
     def replace_rule_in_config(self, config: str, old_rule: HAProxyRule, new_rule: HAProxyRule,
                                old_options: ProfileOptions, new_options: ProfileOptions) -> str:
         """Секция, чей шаблон не изменился, остаётся байт-в-байт; изменившаяся
-        собирается заново, и свои строки из неё (например `no option tcp-smart-connect`
+        собирается заново, и свои строки из неё (например `timeout server 2h`
         поверх defaults) переезжают в новую."""
         lines = config.split("\n")
         spans = self._rule_spans(lines, old_rule)

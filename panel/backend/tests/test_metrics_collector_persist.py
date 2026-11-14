@@ -1,6 +1,6 @@
 """Тесты хранения последних ответов нод коллектором (app/services/metrics_collector.py).
 
-Голый unittest, без PostgreSQL и без сети: сессия базы и клиент ноды подменены.
+Голый unittest, без PostgreSQL и без сети: сессия базы, запрос метрик и клиент ноды подменены.
 
 Последний ответ ноды (~18 КБ JSON) переписывался в `servers.last_metrics` у всего
 парка каждый цикл сбора — основной объём журнала WAL. Читатели берут ответ из
@@ -54,10 +54,6 @@ class FakeResponse:
         return self._payload
 
 
-def node_id(url: str) -> int:
-    return int(url.removeprefix("https://10.0.0.").split(":")[0])
-
-
 class FakeNodes:
     """Парк нод: каждая отвечает на опрос метрик новым ответом с номером опроса."""
 
@@ -65,10 +61,14 @@ class FakeNodes:
         self.polls = 0
         self.malformed: set[int] = set()
 
-    async def get(self, url: str, **kwargs) -> FakeResponse:
+    async def answer(self, server: SimpleNamespace, window_seconds: int) -> tuple[int, dict]:
         self.polls += 1
-        cpu = None if node_id(url) in self.malformed else {"usage_percent": 12.5, "load_avg_1": 0.5}
-        return FakeResponse({"cpu": cpu, "poll": self.polls})
+        cpu = None if server.id in self.malformed else {"usage_percent": 12.5, "load_avg_1": 0.5}
+        return 200, {"cpu": cpu, "poll": self.polls}
+
+    async def get(self, url: str, **kwargs) -> FakeResponse:
+        """Кэш HAProxy и проверка Xray ходят к ноде её клиентом, а не запросом метрик."""
+        return FakeResponse({})
 
 
 class FakeResult:
@@ -163,6 +163,7 @@ class CollectorCase(unittest.IsolatedAsyncioTestCase):
         self.quarantine_runner = mock.Mock(start=mock.AsyncMock(), stop=mock.AsyncMock())
         for name, replacement in (
             ("async_session", self.db),
+            ("request_metrics", self.nodes.answer),
             ("get_node_client", mock.Mock(return_value=self.nodes)),
             ("get_latest_metrics", mock.Mock(return_value=self.latest)),
             ("get_traffic_ingest", mock.Mock(return_value=traffic)),

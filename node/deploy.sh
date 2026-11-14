@@ -228,10 +228,14 @@ configure_apt_proxy() {
     [ "$PROXY_ENABLED" = "1" ] && [ -n "$PROXY_URL" ] || { rm -f /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null; return 0; }
 
     mkdir -p /etc/apt/apt.conf.d 2>/dev/null || true
+    # В адресе прокси бывают логин и пароль, а apt.conf.d по умолчанию читают
+    # все: файл заводится закрытым ещё до записи
+    install -m 600 /dev/null /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null || true
     cat > /etc/apt/apt.conf.d/99monitoring-proxy << PROXYEOF
 Acquire::http::Proxy "$PROXY_URL";
 Acquire::https::Proxy "$PROXY_URL";
 PROXYEOF
+    chmod 600 /etc/apt/apt.conf.d/99monitoring-proxy 2>/dev/null || true
 }
 
 configure_docker_proxy() {
@@ -352,6 +356,29 @@ check_os() {
     fi
 }
 
+DOCKER_APT_KEY_FPR="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+DOCKER_APT_KEYRING="/etc/apt/keyrings/docker.gpg"
+TIMEOUT_DOCKER_KEY=60
+
+# Ключ репозитория Docker закреплён отпечатком: в доверенные apt уходит только он,
+# даже если по дороге ключ подменили или подложили лишний. На место файл ключа
+# встаёт только после сверки
+install_docker_apt_key() {
+    local os_id="$1" gnupg_home rc=1
+    gnupg_home=$(mktemp -d) || return 1
+    if curl -fsSL --max-time "$TIMEOUT_DOCKER_KEY" "https://download.docker.com/linux/${os_id}/gpg" -o "$gnupg_home/key" \
+        && GNUPGHOME="$gnupg_home" gpg --batch --quiet --import "$gnupg_home/key" \
+        && GNUPGHOME="$gnupg_home" gpg --batch --with-colons --list-keys 2>/dev/null \
+            | awk -F: '$1 == "fpr" {print $10}' | grep -qx "$DOCKER_APT_KEY_FPR" \
+        && GNUPGHOME="$gnupg_home" gpg --batch --export "$DOCKER_APT_KEY_FPR" > "$gnupg_home/docker.gpg" \
+        && [ -s "$gnupg_home/docker.gpg" ] \
+        && install -D -m 0644 "$gnupg_home/docker.gpg" "$DOCKER_APT_KEYRING"; then
+        rc=0
+    fi
+    rm -rf "$gnupg_home"
+    return $rc
+}
+
 install_docker() {
     if command -v docker &> /dev/null; then
         local docker_version
@@ -385,18 +412,13 @@ install_docker() {
         return 1
     }
 
-    install -m 0755 -d /etc/apt/keyrings 2>/dev/null || true
-
-    rm -f /etc/apt/keyrings/docker.gpg
-    if ! spin "Downloading Docker GPG key" bash -c \
-        "curl -fsSL 'https://download.docker.com/linux/$OS/gpg' | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg 2>/dev/null"; then
-        log_error "Failed to download Docker GPG key"
+    if ! spin "Downloading and verifying Docker GPG key" install_docker_apt_key "$OS"; then
+        log_error "Docker repository key was not downloaded or its fingerprint does not match — repository not added"
         return 1
     fi
-    chmod a+r /etc/apt/keyrings/docker.gpg 2>/dev/null || true
 
     echo \
-        "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS \
+        "deb [arch=$(dpkg --print-architecture) signed-by=${DOCKER_APT_KEYRING}] https://download.docker.com/linux/$OS \
         $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
     spin_retry "$TIMEOUT_APT_UPDATE" "$MAX_RETRIES" "$RETRY_DELAY" "Updating package lists (Docker repo)" \

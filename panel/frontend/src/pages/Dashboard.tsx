@@ -29,7 +29,7 @@ import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { useFolderBoard, FOLDER_SORTABLE_PREFIX } from '../hooks/useFolderBoard'
 import { useCollapsedFolders } from '../hooks/useCollapsedFolders'
 import ServerCard, { ServerCardOverlay } from '../components/Dashboard/ServerCard'
-import LazyServerCard, { useCardPlaceholder } from '../components/Dashboard/LazyServerCard'
+import LazyServerCard, { LAZY_CARDS_MIN_SERVERS, useCardPlaceholder } from '../components/Dashboard/LazyServerCard'
 import FleetSummary from '../components/Dashboard/FleetSummary'
 import { FolderLoadBadges, FolderLoadChart, FolderStatusCounts } from '../components/Dashboard/FolderStats'
 import type { LoadMetric } from '../components/Dashboard/LoadHistoryPanel'
@@ -43,11 +43,6 @@ import { collectFolders, groupByFolder } from '../utils/folders'
 import { matchesServerSearch } from '../utils/serverSearch'
 
 const COLLAPSED_KEY = 'dashboard_collapsed_folders'
-
-// Больше стольких показанных серверов карточки монтируются только рядом с экраном:
-// каждая — это useSortable, тултипы и сотня DOM-узлов, и пара тысяч разом вешают
-// вкладку на секунды. До порога дашборд работает как раньше, без наблюдателей
-const LAZY_CARDS_MIN_SERVERS = 300
 
 type StatusFilter = 'online' | 'offline' | 'disabled'
 
@@ -63,7 +58,7 @@ const NO_IDS: number[] = []
 export default function Dashboard() {
   const { uid } = useParams()
   const navigate = useNavigate()
-  const { servers, fetchServersWithMetrics, isLoading } = useServersStore()
+  const { servers, fetchServersWithMetrics, isLoading, error, metricsUpdatedAt } = useServersStore()
   const { refreshInterval, compactView, setCompactView, detailLevel, cardScale, setDetailLevel, setCardScale } = useSettingsStore()
   const { t } = useTranslation()
 
@@ -144,7 +139,9 @@ export default function Dashboard() {
     [statusServers, isSearching, normalizedQuery],
   )
 
-  const lazyCards = visibleServers.length > LAZY_CARDS_MIN_SERVERS
+  // По размеру парка, а не по числу показанных: иначе поиск, сузив список до порога,
+  // переключал бы режим и разом монтировал сотни карточек
+  const lazyCards = servers.length > LAZY_CARDS_MIN_SERVERS
   const cardPlaceholder = useCardPlaceholder(compactView, detailLevel, cardScale)
 
   // При поиске и фильтре пустые папки не показываем — в них нечего искать
@@ -330,6 +327,20 @@ export default function Dashboard() {
           </button>
         </div>
       </div>
+
+      {/* Пока опрос панели не проходит, цифры и статусы ниже — от последнего удачного ответа */}
+      {error && (
+        <div role="alert" className="flex items-center gap-3 p-3 mb-6 bg-danger/10 border border-danger/30 rounded-xl text-sm text-danger">
+          <WifiOff className="w-4 h-4 flex-shrink-0" />
+          <span>
+            {metricsUpdatedAt
+              ? t('dashboard.panel_unreachable_since', {
+                  time: metricsUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                })
+              : t('dashboard.panel_unreachable')}
+          </span>
+        </div>
+      )}
 
       {/* Fleet summary */}
       <FleetSummary servers={servers} />

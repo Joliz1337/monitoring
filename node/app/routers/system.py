@@ -69,6 +69,9 @@ logger = logging.getLogger(__name__)
 VERSION_FILE = Path("/app/VERSION")
 UPDATER_CONTAINER_NAME = "monitoring-updater"
 UPDATER_CLONE_DIR = "/tmp/monitoring-fresh"
+HOST_STAGING_TEMPLATE = "/tmp/monitoring-staging.XXXXXX"
+HOST_STAGING_GLOB = "/tmp/monitoring-staging.??????"
+_NODE_VERSION = re.compile(r"\d+\.\d+\.\d+")
 # apply-update.sh качает образы ДО рестарта контейнеров: на медленной сети pull
 # занимает десятки минут (наблюдалось 755с на слой) — ждём до 2 часов
 UPDATER_WAIT_TIMEOUT = 7200
@@ -299,6 +302,107 @@ async def _current_update_state() -> tuple[Optional[UpdateAttempt], bool, Option
         return attempt, in_progress, stage
 
 
+def render_downgrade_guard(clone_dir: str, running_version: str) -> str:
+    """sh-фрагмент апдейтера: отказ, если версия ноды в клоне ниже работающей.
+
+    /api/system/update открыт при любых правах, а версия до появления
+    NODE_CAPABILITIES о них не знает — откат к ней снимал бы ограничения
+    целиком. Версию видно только в клоне: ни ветка, ни тег её не называют
+    (теги выпуска нумеруются по панели), поэтому отказ — здесь, а не ответом 403.
+    """
+    if not _NODE_VERSION.fullmatch(running_version):
+        # Своя версия неизвестна — сравнивать не с чем, а обновление остаётся
+        # единственным способом починить такую ноду удалённо
+        return ""
+    return f"""NEW_VERSION=$(cat "{clone_dir}/node/VERSION" 2>/dev/null | tr -d '[:space:]')
+printf '%s' "$NEW_VERSION" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' || NEW_VERSION=""
+OLDEST_VERSION=$(printf '%s\\n%s\\n' "$NEW_VERSION" "{running_version}" | sort -t. -k1,1n -k2,2n -k3,3n | head -n 1)
+if [ -z "$NEW_VERSION" ] || {{ [ "$NEW_VERSION" != "{running_version}" ] && [ "$OLDEST_VERSION" = "$NEW_VERSION" ]; }}; then
+    echo "[ERROR] Downgrade from {running_version} to ${{NEW_VERSION:-a tree without node/VERSION}} needs the 'exec' capability (NODE_CAPABILITIES)"
+    rm -rf "{clone_dir}"
+    exit 1
+fi"""
+
+
+def _downgrade_guard() -> str:
+    if get_policy().exec_denial() is None:
+        return ""
+    return render_downgrade_guard(UPDATER_CLONE_DIR, get_current_version())
+
+
+def render_updater_script(ref: str, clone_step: str, allow_local_build: bool, downgrade_guard: str = "") -> str:
+    """Скрипт контейнера-апдейтера: зависимости (git, nsenter) → клон → файлы в
+    каталог хоста → apply-update.sh на самом хосте через nsenter (apt-get и
+    systemctl там работают как обычно).
+
+    Каталог на хосте создаёт mktemp: 0700 root и непредсказуемое имя. С общим
+    /tmp/monitoring-staging локальный пользователь успевал подложить свой каталог
+    между rm и mv, и apply-update.sh запускался от root уже из него.
+    """
+    allow_build_val = "1" if allow_local_build else "0"
+    return f"""#!/bin/sh
+set -e
+
+echo "[STAGE] download"
+echo "[INFO] Installing dependencies..."
+if ! timeout {UPDATER_DEPS_TIMEOUT} apk add --no-cache git curl rsync bash >/dev/null 2>&1; then
+    echo "[ERROR] Failed to install updater dependencies: Alpine package mirror unreachable"
+    exit 1
+fi
+command -v nsenter >/dev/null 2>&1 || timeout {UPDATER_DEPS_TIMEOUT} apk add --no-cache util-linux-misc >/dev/null 2>&1 || timeout {UPDATER_DEPS_TIMEOUT} apk add --no-cache util-linux >/dev/null 2>&1
+
+echo "[INFO] Docker Compose version:"
+docker compose version
+
+echo "[INFO] Cloning repository..."
+TMP_CLONE={UPDATER_CLONE_DIR}
+{clone_step}
+{downgrade_guard}
+
+echo "[INFO] Staging update files..."
+STAGING=/opt/monitoring-node/.update-staging
+rm -rf $STAGING
+cp -r $TMP_CLONE $STAGING
+rm -rf $TMP_CLONE
+
+CURRENT_VERSION="unknown"
+if [ -f /opt/monitoring-node/VERSION ]; then
+    CURRENT_VERSION=$(cat /opt/monitoring-node/VERSION)
+fi
+echo "[INFO] Current version: $CURRENT_VERSION"
+
+if [ -f /opt/monitoring-node/.env ]; then
+    cp /opt/monitoring-node/.env /opt/monitoring-node/.env.backup
+    echo "[INFO] Configuration backed up"
+fi
+
+echo "[INFO] Preparing host filesystem..."
+HOST_TMP=$(nsenter -t 1 -m -u -n -i -p -- mktemp -d {HOST_STAGING_TEMPLATE}) || HOST_TMP=""
+case "$HOST_TMP" in
+    {HOST_STAGING_GLOB}) ;;
+    *) echo "[ERROR] Failed to create a staging directory on the host"; exit 1 ;;
+esac
+trap 'nsenter -t 1 -m -u -n -i -p -- rm -rf "$HOST_TMP" 2>/dev/null || true' EXIT
+HOST_STAGING="$HOST_TMP/src"
+nsenter -t 1 -m -u -n -i -p -- sh -c "mv /opt/monitoring-node/.update-staging $HOST_STAGING 2>/dev/null || (cp -r /opt/monitoring-node/.update-staging $HOST_STAGING && rm -rf /opt/monitoring-node/.update-staging)"
+
+nsenter -t 1 -m -u -n -i -p -- chmod +x "$HOST_STAGING/node/scripts/apply-update.sh" 2>/dev/null || true
+
+echo "[INFO] Running update on host via nsenter..."
+set +e
+nsenter -t 1 -m -u -n -i -p -- env MON_ALLOW_LOCAL_BUILD={allow_build_val} bash "$HOST_STAGING/node/scripts/apply-update.sh" "$HOST_STAGING" /opt/monitoring-node "$CURRENT_VERSION" "{ref}"
+UPDATE_RC=$?
+set -e
+
+if [ $UPDATE_RC -ne 0 ]; then
+    echo "[ERROR] Update failed (exit code: $UPDATE_RC)"
+    exit $UPDATE_RC
+fi
+
+echo "[SUCCESS] Update completed!"
+"""
+
+
 async def run_update_in_container(
     attempt_id: str,
     target_ref: str | None = None,
@@ -337,73 +441,11 @@ async def run_update_in_container(
         await ensure_updater_image(client)
 
         ref_arg = target_ref if target_ref else "main"
-        allow_build_val = "1" if allow_local_build else "0"
         proxy_info = f" (via proxy: {proxy})" if proxy else ""
         logger.info(f"Starting update to: {ref_arg}{proxy_info}")
         clone_step = render_clone_step(ref_arg, UPDATER_CLONE_DIR, expected_commit, proxy)
+        updater_script = render_updater_script(ref_arg, clone_step, allow_local_build, _downgrade_guard())
 
-        # Updater script:
-        # 1. Install dependencies (git for clone, nsenter for host access)
-        # 2. Clone repo inside Alpine container
-        # 3. Stage files to bind-mounted volume
-        # 4. Run apply-update.sh ON THE HOST via nsenter (apt-get, systemctl work natively)
-        updater_script = f"""#!/bin/sh
-set -e
-
-echo "[STAGE] download"
-echo "[INFO] Installing dependencies..."
-if ! timeout {UPDATER_DEPS_TIMEOUT} apk add --no-cache git curl rsync bash >/dev/null 2>&1; then
-    echo "[ERROR] Failed to install updater dependencies: Alpine package mirror unreachable"
-    exit 1
-fi
-command -v nsenter >/dev/null 2>&1 || timeout {UPDATER_DEPS_TIMEOUT} apk add --no-cache util-linux-misc >/dev/null 2>&1 || timeout {UPDATER_DEPS_TIMEOUT} apk add --no-cache util-linux >/dev/null 2>&1
-
-echo "[INFO] Docker Compose version:"
-docker compose version
-
-echo "[INFO] Cloning repository..."
-TMP_CLONE={UPDATER_CLONE_DIR}
-{clone_step}
-
-echo "[INFO] Staging update files..."
-STAGING=/opt/monitoring-node/.update-staging
-rm -rf $STAGING
-cp -r $TMP_CLONE $STAGING
-rm -rf $TMP_CLONE
-
-CURRENT_VERSION="unknown"
-if [ -f /opt/monitoring-node/VERSION ]; then
-    CURRENT_VERSION=$(cat /opt/monitoring-node/VERSION)
-fi
-echo "[INFO] Current version: $CURRENT_VERSION"
-
-if [ -f /opt/monitoring-node/.env ]; then
-    cp /opt/monitoring-node/.env /opt/monitoring-node/.env.backup
-    echo "[INFO] Configuration backed up"
-fi
-
-echo "[INFO] Preparing host filesystem..."
-nsenter -t 1 -m -u -n -i -p -- sh -c "rm -rf /tmp/monitoring-staging && mv /opt/monitoring-node/.update-staging /tmp/monitoring-staging 2>/dev/null || (cp -r /opt/monitoring-node/.update-staging /tmp/monitoring-staging && rm -rf /opt/monitoring-node/.update-staging)"
-
-nsenter -t 1 -m -u -n -i -p -- chmod +x /tmp/monitoring-staging/node/scripts/apply-update.sh 2>/dev/null || true
-
-echo "[INFO] Running update on host via nsenter..."
-set +e
-nsenter -t 1 -m -u -n -i -p -- env MON_ALLOW_LOCAL_BUILD={allow_build_val} bash /tmp/monitoring-staging/node/scripts/apply-update.sh /tmp/monitoring-staging /opt/monitoring-node "$CURRENT_VERSION" "{ref_arg}"
-UPDATE_RC=$?
-set -e
-
-echo "[INFO] Cleanup..."
-nsenter -t 1 -m -u -n -i -p -- rm -rf /tmp/monitoring-staging 2>/dev/null || true
-
-if [ $UPDATE_RC -ne 0 ]; then
-    echo "[ERROR] Update failed (exit code: $UPDATE_RC)"
-    exit $UPDATE_RC
-fi
-
-echo "[SUCCESS] Update completed!"
-"""
-        
         # Build environment variables for container
         env_vars = {}
         if proxy:

@@ -25,7 +25,10 @@ def make_server(**overrides) -> SimpleNamespace:
     fields = {
         "id": 1,
         "name": "node-1",
+        "wildcard_ssl_deploy_path": None,
         "wildcard_ssl_reload_cmd": RELOAD,
+        "wildcard_ssl_fullchain_name": None,
+        "wildcard_ssl_privkey_name": None,
         "wildcard_ssl_custom_path_enabled": False,
         "wildcard_ssl_custom_fullchain_path": None,
         "wildcard_ssl_custom_privkey_path": None,
@@ -43,7 +46,9 @@ def make_custom_path_server() -> SimpleNamespace:
 
 
 def make_cert(cert_id: int, base_domain: str) -> SimpleNamespace:
-    return SimpleNamespace(id=cert_id, domain=f"*.{base_domain}", base_domain=base_domain)
+    return SimpleNamespace(
+        id=cert_id, domain=f"*.{base_domain}", base_domain=base_domain, fullchain_pem=f"CHAIN {base_domain}",
+    )
 
 
 FIRST = make_cert(1, "a.example")
@@ -62,7 +67,11 @@ class DeployToNodeTests(unittest.IsolatedAsyncioTestCase):
                 return False, "Reload command failed", None
             return True, "Certificate deployed successfully", None
 
+        async def remember(server_id, fingerprint):
+            pass
+
         self.manager._push_certificate = push
+        self.manager._remember_deployed = remember
 
     async def test_reload_runs_once_after_last_certificate(self):
         result = await self.manager.deploy_to_node(make_server(), [FIRST, SECOND])

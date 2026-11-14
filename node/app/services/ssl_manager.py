@@ -1,4 +1,5 @@
 import logging
+import posixpath
 import re
 import shlex
 from datetime import datetime
@@ -25,6 +26,22 @@ DEFAULT_PRIVKEY_NAME = "privkey.pem"
 # reload_command исполняется на хосте как есть — панель доверенная, но длина
 # ограничена, чтобы опечатка в её настройках не ушла в exec целой простынёй.
 MAX_RELOAD_COMMAND_LEN = 512
+
+# Каталоги, где по соглашению лежат только сертификаты и ключи. Запись мимо них
+# — уже произвольный файл от root, и не только за пределами /etc/letsencrypt и
+# /etc/ssl: renewal/*.conf и cli.ini несут хуки certbot, которые его таймер
+# исполняет от root, а openssl.cnf читает каждый процесс с TLS.
+CERT_STORES = (
+    PurePosixPath("/etc/letsencrypt/live"),
+    PurePosixPath("/etc/ssl/certs"),
+    PurePosixPath("/etc/ssl/private"),
+)
+
+
+def _inside_cert_store(path: str) -> bool:
+    # normpath: «/etc/ssl/certs/../cron.d/x» иначе прошёл бы как путь внутри каталога
+    target = PurePosixPath(posixpath.normpath(path))
+    return any(store in target.parents for store in CERT_STORES)
 
 
 def _describe_certificate(cert: x509.Certificate) -> str:
@@ -114,6 +131,17 @@ class SSLManager:
             reload_result=reload_result
         )
 
+    def needs_exec(self, request: WildcardDeployRequest) -> bool:
+        """Запрос выходит за рамки домена ssl: несёт команду для хоста или пишет
+        файлы мимо каталогов сертификатов."""
+        if request.reload_command.strip():
+            return True
+        fullchain_path, privkey_path, err = self._resolve_target_paths(request)
+        if err:
+            # Такой запрос ничего не запишет: deploy_wildcard вернёт эту же ошибку
+            return False
+        return not (_inside_cert_store(fullchain_path) and _inside_cert_store(privkey_path))
+
     def _resolve_target_paths(
         self, request: WildcardDeployRequest
     ) -> tuple[str, str, Optional[str]]:
@@ -178,11 +206,14 @@ class SSLManager:
     ) -> tuple[bool, str]:
         # Права выставляются тем же вызовом, что и запись: отдельный chmod оставлял бы
         # приватный ключ читаемым всем на время между двумя командами.
+        # in_place: путь задаёт оператор — это и pmxcfs (`/etc/pve`), и файлы,
+        # смонтированные в чужие контейнеры по одному; rename оставил бы такой
+        # контейнер на старом сертификате до его перезапуска.
         for filepath, content, mode in [
             (fullchain_path, fullchain, "644"),
             (privkey_path, privkey, "600"),
         ]:
-            if not await write_host_file(filepath, content, mode=mode):
+            if not await write_host_file(filepath, content, mode=mode, in_place=True):
                 return False, f"{filepath} (причина в логах ноды)"
 
         return True, ""

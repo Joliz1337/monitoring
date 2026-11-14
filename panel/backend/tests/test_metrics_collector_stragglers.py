@@ -1,6 +1,6 @@
 """Тесты цикла сбора на парке с медленными нодами (app/services/metrics_collector.py).
 
-Голый unittest, без PostgreSQL и без сети: сессия базы и клиент ноды подменены.
+Голый unittest, без PostgreSQL и без сети: сессия базы и запрос метрик подменены.
 
 Цикл сбора ждал ответа всех нод разом: одна нода, отвечающая дольше интервала,
 задерживала снапшоты всему парку и отнимала у него такты. На живом парке из
@@ -41,23 +41,12 @@ def node(server_id: int) -> SimpleNamespace:
     )
 
 
-def node_id(url: str) -> int:
-    return int(url.removeprefix("https://10.0.0.").split(":")[0])
-
-
 class FakeClock:
     def __init__(self) -> None:
         self.now = 1000.0
 
     def __call__(self) -> float:
         return self.now
-
-
-class FakeResponse:
-    status_code = 200
-
-    def json(self) -> dict:
-        return {"cpu": {"usage_percent": 12.5, "load_avg_1": 0.5}}
 
 
 class FakeNodes:
@@ -74,17 +63,16 @@ class FakeNodes:
     def release(self, server_id: int) -> None:
         self._silent.pop(server_id).set()
 
-    async def get(self, url: str, **kwargs) -> FakeResponse:
-        server_id = node_id(url)
-        self.asked.append(server_id)
-        gate = self._silent.get(server_id)
+    async def answer(self, server: SimpleNamespace, window_seconds: int) -> tuple[int, dict]:
+        self.asked.append(server.id)
+        gate = self._silent.get(server.id)
         if gate is not None:
             try:
                 await gate.wait()
             except asyncio.CancelledError:
-                self.dropped.append(server_id)
+                self.dropped.append(server.id)
                 raise
-        return FakeResponse()
+        return 200, {"cpu": {"usage_percent": 12.5, "load_avg_1": 0.5}}
 
 
 class FakeResult:
@@ -140,7 +128,7 @@ class StragglerCase(unittest.IsolatedAsyncioTestCase):
         quarantine_runner = mock.Mock(start=mock.AsyncMock(), stop=mock.AsyncMock())
         for name, replacement in (
             ("async_session", self.db),
-            ("get_node_client", mock.Mock(return_value=self.nodes)),
+            ("request_metrics", self.nodes.answer),
             ("get_latest_metrics", mock.Mock(return_value=LatestMetrics())),
             ("get_traffic_ingest", mock.Mock(return_value=traffic)),
             ("get_load_weights_runner", mock.Mock(return_value=weights_runner)),
