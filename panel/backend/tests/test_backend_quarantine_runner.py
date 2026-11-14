@@ -280,6 +280,23 @@ class RefusalTests(RunnerTestCase):
         await self.cycle(advance=10)
         self.assertEqual((len(self.requests), self.state()), (2, PairState.DISABLED))
 
+    async def test_failing_relay_is_retried_once_a_minute(self):
+        self.status = 503
+        await self.blocked_with()
+        for _ in range(5):
+            await self.cycle(advance=10)
+        self.assertEqual((len(self.requests), self.storage.server_loads), (1, 1))
+        await self.cycle(advance=10)
+        self.assertEqual(len(self.requests), 2)
+
+    async def test_requested_push_does_not_wait_for_the_retry(self):
+        self.status = 503
+        await self.blocked_with()
+        self.status = 200
+        self.runner.request_push(RELAY_ID)
+        await self.cycle(advance=10)
+        self.assertEqual(self.state(), PairState.DISABLED)
+
     async def test_403_is_denied(self):
         self.status = 403
         self.assertEqual(await self.blocked_with(), "denied")
@@ -391,6 +408,52 @@ class StorageTests(RunnerTestCase):
         await self.cycle(advance=30)
         self.assertEqual(self.bodies()[0]["targets"], [{"ip": "10.0.0.5", "port": 443}])
 
+    async def test_restart_with_auto_disable_switched_off_returns_what_was_disabled(self):
+        # Режим выключили, а состояние сохранить не успели: в базе пара всё ещё «отключена»
+        self.observe(("10.0.0.5", 0.0, 3))
+        await self.cycle()
+        self.storage.stored_settings = settings("off")
+        self.runner = self.make_runner()
+        await self.runner.restore()
+        self.requests.clear()
+        self.notified.clear()
+        await self.cycle(advance=30)
+        self.assertEqual([body["targets"] for body in self.bodies()], [[]])
+        self.assertEqual(self.runner.tracker.desired(), {})
+        self.assertEqual([(e.kind, e.cause) for e in self.notified], [(EventKind.RESTORED, RestoreCause.MODE)])
+        self.assertNotEqual(self.storage.rows.get((RELAY_ID, TARGET), {}).get("state"), "disabled")
+        await self.cycle(advance=60)
+        self.assertEqual(len(self.requests), 1)
+
+    async def test_restart_in_observe_mode_does_not_keep_servers_disabled(self):
+        self.observe(("10.0.0.5", 0.0, 3))
+        await self.cycle()
+        self.storage.stored_settings = settings("observe")
+        self.runner = self.make_runner()
+        await self.runner.restore()
+        self.requests.clear()
+        self.observe(("10.0.0.5", 0.0, 0))
+        await self.cycle(advance=30)
+        await self.cycle(advance=60)
+        self.assertEqual([body["targets"] for body in self.bodies()], [[]])
+
+    async def test_failed_restore_is_retried(self):
+        self.storage.stored_settings = settings()
+        original = self.storage.load_settings
+        failures = [OSError("database is not ready")]
+
+        async def flaky():
+            if failures:
+                raise failures.pop()
+            return await original()
+
+        self.storage.load_settings = flaky
+        runner = self.make_runner()
+        with self.assertLogs(runner_module.logger, level="ERROR"):
+            self.assertFalse(await runner.ensure_restored())
+        self.assertTrue(await runner.ensure_restored())
+        self.assertEqual(runner.view({})["mode"], "enforce")
+
     async def test_damaged_row_is_skipped(self):
         self.storage.rows[(RELAY_ID, TARGET)] = {"state": "disabled"}
         with self.assertLogs(runner_module.logger, level="WARNING"):
@@ -409,7 +472,7 @@ class ViewTests(RunnerTestCase):
             "server_id": RELAY_ID, "server_name": "relay10", "state": "disabled",
             "reason": {"kind": "downs", "loss_pct": 0.0, "downs": 3},
             "disabled_at": self.clock.now, "until": self.clock.now + 600,
-            "strikes": 1, "sessions": 7, "blocked_reason": None,
+            "strikes": 1, "sessions": 7, "blocked_reason": None, "partial_reason": None,
         }])
         self.assertEqual((view["chronic"], view["paused_relays"]), ([], []))
 

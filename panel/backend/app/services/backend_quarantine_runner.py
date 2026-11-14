@@ -139,6 +139,11 @@ class QuarantineRunner:
         # Нода, ответившая 404, не умеет отключать: версия агента и момент ответа
         self._unsupported: dict[int, tuple[Optional[str], float]] = {}
         self._failing: set[int] = set()
+        # Релей, до которого не дошёл запрос, спрашивается заново не раньше этого момента
+        self._retry_at: dict[int, float] = {}
+        self._restored = False
+        self._restore_failing = False
+        self._startup_events: list[Event] = []
         self._saved: dict[PairKey, dict] = {}
         self._wake = asyncio.Event()
         # run_once и ручной возврат из API меняют один трекер
@@ -169,15 +174,38 @@ class QuarantineRunner:
                 logger.warning("quarantine: stored pair %s is unreadable, skipped", key)
         self.tracker.pairs = pairs
         self._saved = self._storable()
+        if self._mode is not Mode.ENFORCE:
+            self._startup_events = self._return_everything(now)
+        self._restored = True
 
-    async def start(self) -> None:
-        if self._task is not None:
-            return
+    def _return_everything(self, now: float) -> list[Event]:
+        """Режим сменили, а состояние сохранить не успели: в базе остались отключённые
+        пары. В выключенном режиме возвращать их некому — без сброса релеи получали бы
+        их список бессрочно. Релеи запоминаются как получившие список: первый же цикл
+        пришлёт им пустой."""
+        policy = self._settings.policy
+        for relay_id, targets in self.tracker.desired().items():
+            self._sent[relay_id] = _Sent(tuple(targets), policy.max_share_pct, policy.drop_sessions, now)
+        return self.tracker.clear(now, RestoreCause.MODE)
+
+    async def ensure_restored(self) -> bool:
+        """Настройки и пары из базы; пока не поднялись, цикл ничего не решает —
+        иначе панель работала бы с режимом «выключено» при включённом в базе."""
+        if self._restored:
+            return True
         try:
             await self.restore()
         except Exception:
-            logger.exception("quarantine: state restore failed, starting clean")
-        self._task = asyncio.create_task(self._loop())
+            if not self._restore_failing:
+                logger.exception("quarantine: state restore failed, will retry")
+            self._restore_failing = True
+            return False
+        self._restore_failing = False
+        return True
+
+    async def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
         if self._task is None:
@@ -189,9 +217,12 @@ class QuarantineRunner:
 
     async def _loop(self) -> None:
         while True:
+            restored = await self.ensure_restored()
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), RESEND_SECONDS)
             self._wake.clear()
+            if not restored:
+                continue
             try:
                 await self.run_once()
             except Exception:
@@ -200,7 +231,8 @@ class QuarantineRunner:
     async def run_once(self) -> None:
         async with self._lock:
             settings, now = self._settings, self._clock()
-            events = await self._decide(settings, now)
+            events, self._startup_events = self._startup_events, []
+            events += await self._decide(settings, now)
             events += await self._push(settings, now)
             await self._save()
         await self._notify(events, settings)
@@ -238,6 +270,7 @@ class QuarantineRunner:
                 "strikes": len(pair.strikes),
                 "sessions": pair.sessions,
                 "blocked_reason": pair.node.get("error") if pair.state is PairState.BLOCKED else None,
+                "partial_reason": pair.node.get("partial") if pair.state is PairState.DISABLED else None,
             })
         chronic = self.tracker.chronic_targets(self._clock(), settings.policy)
         return {
@@ -300,11 +333,13 @@ class QuarantineRunner:
         return events
 
     def _due(self, relay_id: int, targets: list[str], settings: QuarantineSettings, now: float) -> bool:
+        if relay_id in self._forced:
+            return relay_id in self._sent or bool(targets)
+        if now < self._retry_at.get(relay_id, 0.0):
+            return False
         sent = self._sent.get(relay_id)
         if sent is None:
             return bool(targets)
-        if relay_id in self._forced:
-            return True
         current = (tuple(targets[:NODE_MAX_TARGETS]), settings.policy.max_share_pct, settings.policy.drop_sessions)
         if current != (sent.targets, sent.max_share_pct, sent.drop_sessions):
             return True
@@ -314,11 +349,14 @@ class QuarantineRunner:
                  settings: QuarantineSettings, now: float) -> list[Event]:
         events = self.tracker.apply_node_results(relay_id, outcome, settings.policy, now)
         if isinstance(outcome, NodeFailure):
+            # Сбойный релей не опрашивается каждый цикл сбора метрик
+            self._retry_at[relay_id] = now + RESEND_SECONDS
             sent = self._sent.get(relay_id)
             # Список не доставлен дольше срока ноды: она уже вернула серверы сама
             if sent is not None and now - sent.at >= TTL_SECONDS:
                 del self._sent[relay_id]
             return events
+        self._retry_at.pop(relay_id, None)
         if targets:
             self._sent[relay_id] = _Sent(
                 tuple(targets), settings.policy.max_share_pct, settings.policy.drop_sessions, now,
