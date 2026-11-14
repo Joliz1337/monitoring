@@ -32,6 +32,8 @@ class LossReading:
     loss_pct: float
     rtt_ms: Optional[float]
     samples: int
+    # Падений сервера HAProxy за полчаса; None — адреса в HAProxy релея нет или нода старая
+    downs: Optional[int] = None
 
     @property
     def key(self) -> str:
@@ -79,12 +81,14 @@ def parse_readings(metrics: dict) -> tuple[LossReading, ...]:
     for entry in metrics.get("loss_probe") or []:
         try:
             rtt = entry.get("rtt_ms")
+            downs = entry.get("downs")
             readings.append(LossReading(
                 ip=str(entry["ip"]),
                 port=int(entry["port"]),
                 loss_pct=float(entry["loss_pct"]),
                 rtt_ms=None if rtt is None else float(rtt),
                 samples=int(entry.get("samples", 0)),
+                downs=None if downs is None else int(downs),
             ))
         except (AttributeError, KeyError, TypeError, ValueError):
             continue
