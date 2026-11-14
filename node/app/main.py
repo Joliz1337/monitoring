@@ -68,6 +68,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Runtime weights expiry start failed, panel weights may outlive the panel: {e}", exc_info=True)
 
+    from app.services.haproxy_quarantine import get_quarantine
+    quarantine = get_quarantine()
+    try:
+        await quarantine.start()
+    except Exception as e:
+        logger.error(f"Quarantine loop start failed, disabled servers may outlive the panel: {e}", exc_info=True)
+
     counter_sampler = get_traffic_counter_sampler()
     try:
         await counter_sampler.init(address_source=get_collector().accounted_ipv4_addresses)
@@ -171,6 +178,10 @@ async def lifespan(app: FastAPI):
         await runtime_weights.stop()
     except Exception as e:
         logger.error(f"Runtime weights expiry stop failed: {e}", exc_info=True)
+    try:
+        await quarantine.stop()
+    except Exception as e:
+        logger.error(f"Quarantine loop stop failed: {e}", exc_info=True)
     try:
         await affinity_sync.stop()
     except Exception as e:

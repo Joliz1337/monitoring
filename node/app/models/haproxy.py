@@ -4,7 +4,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from app.models.loss_probe import ProbeStats
+from app.models.loss_probe import ProbeStats, TargetRequest
 
 # target_ip и cert_domain подставляются прямо в текст haproxy.cfg, а домен
 # сертификата ещё и в путь к файлу. Опасны здесь пробел и перевод строки
@@ -336,6 +336,7 @@ class HAProxyStatRow(BaseModel):
     downtime: Optional[int] = None
     chkdown: Optional[int] = None  # переходов UP→DOWN с запуска воркера
     probe: Optional[ProbeStats] = None  # потери до addr, только у серверов
+    quarantined: bool = False  # в обслуживание сервер перевела панель (автоотключение)
 
 
 class HAProxyProxyStats(BaseModel):
@@ -390,5 +391,48 @@ class RuntimeWeightsResponse(BaseModel):
     results: list[RuntimeWeightResult]
     # Бэкенды, где не осталось живого сервера с весом, — им возвращены веса из конфига
     guarded_backends: list[str]
+
+
+# Столько адресов нода проверяет на потери (MAX_TARGETS проверки) — больше панели знать не о чем
+QUARANTINE_MAX_TARGETS = 256
+
+
+class QuarantineTarget(TargetRequest):
+    port: int = Field(ge=1, le=65535)
+
+
+class QuarantineRequest(BaseModel):
+    # Полный список отключённых адресов релея, худшие первыми; чего в нём нет — возвращается в работу
+    targets: list[QuarantineTarget] = Field(max_length=QUARANTINE_MAX_TARGETS)
+    # Через этот срок без повторной отправки нода сама вернёт серверы в работу
+    ttl_seconds: int = Field(ge=RUNTIME_MIN_TTL_SECONDS, le=RUNTIME_MAX_TTL_SECONDS)
+    # Какую долю разных адресов одного backend можно вывести одновременно
+    max_share_pct: int = Field(ge=0, le=100)
+    drop_sessions: bool = True
+
+
+class QuarantineAppliedRow(BaseModel):
+    backend: str
+    server: str
+    # Соединений на сервере в момент отключения; 0 — отключён раньше
+    sessions: int
+
+
+class QuarantineSkippedBackend(BaseModel):
+    backend: str
+    reason: str  # last_server | share_limit | manual_maint | error
+
+
+class QuarantineTargetResult(BaseModel):
+    ip: str
+    port: int
+    # False — адреса нет среди серверов HAProxy этого релея
+    found: bool
+    applied: list[QuarantineAppliedRow]
+    skipped: list[QuarantineSkippedBackend]
+
+
+class QuarantineResponse(BaseModel):
+    results: list[QuarantineTargetResult]
 
 

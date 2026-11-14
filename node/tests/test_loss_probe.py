@@ -359,7 +359,8 @@ class RealDataPathTests(unittest.TestCase):
         probe, _ = LossProbeTests().probe({("10.0.0.5", 443): {Source.HAPROXY}}, {("10.0.0.5", 443): [7.0]})
         asyncio.run(probe.run_round())
         manager = mock.Mock(get_stats=mock.Mock(return_value=STATS_DICT))
-        with mock.patch.object(haproxy_router, "get_haproxy_manager", return_value=manager),              mock.patch.object(haproxy_router, "get_loss_probe", return_value=probe):
+        quarantine = mock.Mock(quarantined_rows=mock.Mock(return_value=frozenset()))
+        with mock.patch.object(haproxy_router, "get_haproxy_manager", return_value=manager),              mock.patch.object(haproxy_router, "get_loss_probe", return_value=probe),              mock.patch.object(haproxy_router, "get_quarantine", return_value=quarantine):
             response = asyncio.run(haproxy_router.get_haproxy_stats())
         self.assertEqual(response.proxies[0].servers[0].probe.rtt_ms, 7.0)
         # Кэш менеджера — тот же словарь, его разметка не трогает

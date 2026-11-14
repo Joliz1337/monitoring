@@ -32,11 +32,17 @@ from app.models.haproxy import (
     HAProxyStatsResponse,
     HAProxyStatusResponse,
     HAProxyValidateResponse,
+    QuarantineAppliedRow,
+    QuarantineRequest,
+    QuarantineResponse,
+    QuarantineSkippedBackend,
+    QuarantineTargetResult,
     RuntimeWeightResult,
     RuntimeWeightsRequest,
     RuntimeWeightsResponse,
 )
 from app.services.haproxy_manager import HAProxyRule, StatsSocketUnavailableError, get_haproxy_manager
+from app.services.haproxy_quarantine import get_quarantine
 from app.services.haproxy_runtime_weights import SocketPermissionError, WeightItem, get_runtime_weights
 from app.models.haproxy import BackendServerModel, BalancerOptionsModel
 from app.services.firewall_manager import get_firewall_manager
@@ -104,6 +110,10 @@ async def get_haproxy_stats():
     manager = get_haproxy_manager()
     # Менеджер отдаёт свой кэш словарём: модель — свежая копия, разметка его не трогает
     stats = HAProxyStatsResponse.model_validate(await asyncio.to_thread(manager.get_stats))
+    quarantined = get_quarantine().quarantined_rows()
+    for proxy in stats.proxies:
+        for server in proxy.servers:
+            server.quarantined = (proxy.name, server.name) in quarantined
     return get_loss_probe().annotate_haproxy(stats)
 
 
@@ -121,6 +131,31 @@ async def set_runtime_weights(request: RuntimeWeightsRequest):
         results=[RuntimeWeightResult(backend=r.backend, server=r.server, ok=r.ok, error=r.error) for r in result.results],
         guarded_backends=result.guarded_backends,
     )
+
+
+@router.put("/runtime/quarantine", response_model=QuarantineResponse)
+async def set_quarantine(request: QuarantineRequest):
+    """Адреса, выведенные панелью из балансировки: полный список релея, на лету, с ограниченным сроком"""
+    targets = [(target.ip, target.port) for target in request.targets]
+    try:
+        results = await asyncio.to_thread(
+            get_quarantine().apply, targets, request.ttl_seconds, request.max_share_pct, request.drop_sessions,
+        )
+    except SocketPermissionError:
+        raise HTTPException(status_code=409, detail="HAProxy stats socket is not admin level")
+    except OSError as e:
+        # Сокет не ответил — это не «адреса нет»: панель не должна закрыть запись по такому ответу
+        raise HTTPException(status_code=503, detail=str(e) or "HAProxy stats socket is unavailable")
+    return QuarantineResponse(results=[
+        QuarantineTargetResult(
+            ip=result.ip, port=result.port, found=result.found,
+            applied=[QuarantineAppliedRow(backend=row.backend, server=row.server, sessions=row.sessions)
+                     for row in result.applied],
+            skipped=[QuarantineSkippedBackend(backend=skip.backend, reason=skip.reason.value)
+                     for skip in result.skipped],
+        )
+        for result in results
+    ])
 
 
 @router.get("/rules", response_model=HAProxyRulesListResponse)
