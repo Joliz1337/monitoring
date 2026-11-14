@@ -24,7 +24,7 @@ import httpx
 from sqlalchemy import Delete, Select, delete, select
 
 from app.database import async_session
-from app.models import BackendQuarantine, Server
+from app.models import AlertHistory, AlertSettings, BackendQuarantine, Server
 from app.services.backend_quarantine import (
     Event,
     Mode,
@@ -35,12 +35,14 @@ from app.services.backend_quarantine import (
     QuarantineTracker,
     RestoreCause,
 )
+from app.services.backend_quarantine_messages import format_digest, history_records
 from app.services.backend_quarantine_settings import QuarantineSettings, load_quarantine_settings
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.loss_registry import LossRegistry, get_loss_registry
 from app.services.node_capabilities import Capability, server_allows
 from app.services.reserved_ports_sync import _version_tuple
+from app.services.telegram_bot import get_telegram_bot_service
 
 logger = logging.getLogger(__name__)
 
@@ -406,11 +408,46 @@ class QuarantineRunner:
             logger.exception("quarantine: notification failed")
 
 
+async def notify_events(events: list[Event], settings: QuarantineSettings) -> None:
+    """Сводка в Telegram тем же ботом и чатом, что алерты, и строки истории алертов.
+    История пишется всегда; Telegram — пока включены алерты и уведомления автоотключения."""
+    owners = get_loss_registry().owners()
+    async with async_session() as db:
+        alerts = (await db.execute(select(AlertSettings).limit(1))).scalar_one_or_none()
+    lang = ((alerts.language if alerts else None) or "en").lower()
+
+    notified = False
+    telegram_ready = alerts is not None and alerts.enabled and alerts.telegram_bot_token and alerts.telegram_chat_id
+    if settings.notify and telegram_ready:
+        service = get_telegram_bot_service()
+        sent = [
+            await service.send_message(alerts.telegram_bot_token, alerts.telegram_chat_id, text)
+            for text in format_digest(events, owners, lang)
+        ]
+        notified = all(sent)
+
+    rows = [
+        AlertHistory(
+            server_id=record.server_id,
+            server_name=record.server_name,
+            alert_type=record.alert_type,
+            severity=record.severity,
+            message=record.message,
+            details=json.dumps(record.details, ensure_ascii=False),
+            notified=notified,
+        )
+        for record in history_records(events, owners, lang)
+    ]
+    async with async_session() as db:
+        db.add_all(rows)
+        await db.commit()
+
+
 _runner: Optional[QuarantineRunner] = None
 
 
 def get_quarantine_runner() -> QuarantineRunner:
     global _runner
     if _runner is None:
-        _runner = QuarantineRunner()
+        _runner = QuarantineRunner(notifier=notify_events)
     return _runner

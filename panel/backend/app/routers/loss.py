@@ -23,6 +23,20 @@ from app.services.backend_address import (
     validate_edit,
 )
 from app.services.backend_edit_jobs import get_edit_jobs
+from app.services.backend_quarantine import Mode
+from app.services.backend_quarantine_runner import get_quarantine_runner
+from app.services.backend_quarantine_settings import (
+    CALM_SECONDS_BOUNDS,
+    CHRONIC_STRIKES_BOUNDS,
+    DOWNS_THRESHOLD_BOUNDS,
+    LOSS_THRESHOLD_BOUNDS,
+    MAX_SHARE_PCT_BOUNDS,
+    SUSTAINED_SECONDS_BOUNDS,
+    QuarantineSettings,
+    load_quarantine_settings,
+    save_quarantine_settings,
+    settings_from_dict,
+)
 from app.services.loss_exclusions import LossExclusions, load_loss_exclusions, save_loss_exclusions, target_entry
 from app.services.loss_overview import (
     TargetParseError,
@@ -99,9 +113,32 @@ class ExcludedTargetIn(BaseModel):
         return ExcludedTarget(ip, port, self.total_only)
 
 
+class QuarantineSettingsIn(BaseModel):
+    """Блок «Автоотключение»: границы — те же, что при чтении из базы."""
+    mode: Mode
+    loss_threshold: float = Field(ge=LOSS_THRESHOLD_BOUNDS[0], le=LOSS_THRESHOLD_BOUNDS[1])
+    sustained_seconds: int = Field(ge=SUSTAINED_SECONDS_BOUNDS[0], le=SUSTAINED_SECONDS_BOUNDS[1])
+    downs_threshold: int = Field(ge=DOWNS_THRESHOLD_BOUNDS[0], le=DOWNS_THRESHOLD_BOUNDS[1])
+    calm_seconds: int = Field(ge=CALM_SECONDS_BOUNDS[0], le=CALM_SECONDS_BOUNDS[1])
+    chronic_strikes: int = Field(ge=CHRONIC_STRIKES_BOUNDS[0], le=CHRONIC_STRIKES_BOUNDS[1])
+    max_share_pct: int = Field(ge=MAX_SHARE_PCT_BOUNDS[0], le=MAX_SHARE_PCT_BOUNDS[1])
+    drop_sessions: bool = True
+    notify: bool = True
+    exempt_server_ids: list[int] = Field(default_factory=list, max_length=5000)
+    # "ip" — все порты адреса, "ip:port" / "[v6]:port" — один бэкенд
+    exempt_targets: list[str] = Field(default_factory=list, max_length=MAX_EXCLUDED_TARGETS)
+
+
 class LossSettingsUpdate(BaseModel):
     excluded_server_ids: list[int] = Field(default_factory=list, max_length=5000)
     excluded_targets: list[ExcludedTargetIn] = Field(default_factory=list, max_length=MAX_EXCLUDED_TARGETS)
+    # Интерфейс прежней версии блока не шлёт — настройки автоотключения тогда не меняются
+    quarantine: Optional[QuarantineSettingsIn] = None
+
+
+class QuarantineReleaseRequest(BaseModel):
+    server_id: int
+    target: str = Field(..., min_length=1, max_length=64)
 
 
 class BackendEditBatch(BaseModel):
@@ -111,38 +148,78 @@ class BackendEditBatch(BaseModel):
 @router.get("/overview")
 async def get_overview():
     registry = get_loss_registry()
-    return {
-        "targets": build_overview(
-            registry.fresh(), registry.owners(), get_server_alerter().loss_episodes(), registry.target_rules(),
-        ),
-    }
+    targets = build_overview(
+        registry.fresh(), registry.owners(), get_server_alerter().loss_episodes(), registry.target_rules(),
+    )
+    disabled_on = get_quarantine_runner().disabled_relays()
+    for row in targets:
+        row["quarantined"] = disabled_on.get(row["target"], [])
+    return {"targets": targets}
 
 
-def _settings_response(exclusions: LossExclusions) -> dict:
+def _settings_response(exclusions: LossExclusions, quarantine: QuarantineSettings) -> dict:
     return {
         "excluded_server_ids": sorted(exclusions.server_ids),
         "excluded_targets": [target_entry(target) for target in exclusions.targets],
+        "quarantine": quarantine.to_dict(),
     }
 
 
 @router.get("/settings")
 async def get_loss_settings(db: AsyncSession = Depends(get_db)):
-    return _settings_response(await load_loss_exclusions(db))
+    return _settings_response(await load_loss_exclusions(db), await load_quarantine_settings(db))
+
+
+def _parsed_or_400(target: str) -> None:
+    try:
+        parse_endpoint(target)
+    except TargetParseError as exc:
+        raise HTTPException(status_code=400, detail=f"{target}: {exc}")
 
 
 @router.put("/settings")
 async def update_loss_settings(data: LossSettingsUpdate, db: AsyncSession = Depends(get_db)):
+    # Весь ввод проверяется до первой записи: половина настроек сохранённой остаться не должна
     targets = []
     for item in data.excluded_targets:
         try:
             targets.append(item.to_excluded())
         except TargetParseError as exc:
             raise HTTPException(status_code=400, detail=f"{item.target}: {exc}")
+    for target in data.quarantine.exempt_targets if data.quarantine else []:
+        _parsed_or_400(target)
+
     exclusions = await save_loss_exclusions(db, data.excluded_server_ids, targets)
     logger.info(
         "loss_exclusions_updated servers=%s targets=%s", len(exclusions.server_ids), len(exclusions.targets),
     )
-    return _settings_response(exclusions)
+    if data.quarantine is None:
+        return _settings_response(exclusions, await load_quarantine_settings(db))
+
+    quarantine = settings_from_dict(data.quarantine.model_dump(mode="json"))
+    await save_quarantine_settings(db, quarantine)
+    get_quarantine_runner().set_settings(quarantine)
+    logger.info(
+        "loss_quarantine_updated mode=%s exempt_servers=%s exempt_targets=%s",
+        quarantine.mode.value, len(quarantine.exempt_server_ids), len(quarantine.exempt_targets),
+    )
+    return _settings_response(exclusions, quarantine)
+
+
+@router.get("/quarantine")
+async def get_quarantine():
+    """Что автоотключение вывело из балансировки, что не смогло и почему."""
+    return get_quarantine_runner().view(get_loss_registry().owners())
+
+
+@router.post("/quarantine/release")
+async def release_quarantine(data: QuarantineReleaseRequest):
+    """Вернуть адрес на релее сейчас; час после этого пара не отключается заново."""
+    target = data.target.strip()
+    if not await get_quarantine_runner().release(data.server_id, target):
+        raise HTTPException(status_code=404, detail="no such disabled address on this relay")
+    logger.info("loss_quarantine_released server_id=%s target=%s", data.server_id, target)
+    return {"released": True}
 
 
 @router.post("/check")
