@@ -3,7 +3,14 @@ import { motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { ChevronDown, ChevronRight, EyeOff, ListChecks, Loader2, Radar, Search, Trash2 } from 'lucide-react'
-import { lossApi, type BackendEditJob, type LossCheckResult, type LossExclusions, type LossTarget } from '../api/client'
+import {
+  lossApi,
+  type BackendEditJob,
+  type LossCheckResult,
+  type LossSettingsData,
+  type LossTarget,
+  type QuarantineOverview,
+} from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import LossProbeBadge, { LOSS_WARN_PCT } from '../components/ui/LossProbeBadge'
@@ -13,6 +20,7 @@ import BackendEditModal from '../components/loss/BackendEditModal'
 import BatchEditModal, { type BatchMode } from '../components/loss/BatchEditModal'
 import ActivityStrip, { isJobRunning, type RunningCheck } from '../components/loss/ActivityStrip'
 import LossSettings from '../components/loss/LossSettings'
+import QuarantineBlock, { type BackendAddress } from '../components/loss/QuarantineBlock'
 import TraceModal from '../components/loss/TraceModal'
 import { readStorage, writeStorage } from '../utils/storage'
 
@@ -41,8 +49,8 @@ function isLossy(lossPct: number): boolean {
 }
 
 // Ключ строки `ip:port` для IPv6 неоднозначен — в список исключений IPv6 идёт в скобках
-function endpointText(target: LossTarget): string {
-  return target.ip.includes(':') ? `[${target.ip}]:${target.port}` : `${target.ip}:${target.port}`
+function endpointText({ ip, port }: BackendAddress): string {
+  return ip.includes(':') ? `[${ip}]:${port}` : `${ip}:${port}`
 }
 
 function errorDetail(err: unknown): string | undefined {
@@ -54,6 +62,7 @@ export default function Loss() {
   const { t } = useTranslation()
   const { servers, fetchServers } = useServersStore()
   const [targets, setTargets] = useState<LossTarget[] | null>(null)
+  const [quarantine, setQuarantine] = useState<QuarantineOverview | null>(null)
   const [showAll, setShowAll] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
@@ -63,7 +72,7 @@ export default function Loss() {
   const [checking, setChecking] = useState(false)
   const [checkResult, setCheckResult] = useState<{ ip: string; port: number; results: LossCheckResult[] } | null>(null)
   const checkBlockRef = useRef<HTMLDivElement>(null)
-  const [editing, setEditing] = useState<LossTarget | null>(null)
+  const [editing, setEditing] = useState<BackendAddress | null>(null)
   const [tracing, setTracing] = useState<{ serverId: number; serverName: string; target: string } | null>(null)
   const [batch, setBatch] = useState<{ mode: BatchMode; targets: LossTarget[] } | null>(null)
   const [picked, setPicked] = useState<Set<string>>(new Set())
@@ -71,28 +80,27 @@ export default function Loss() {
   const [dismissed, setDismissed] = useState<Set<string>>(readDismissed)
   const [runningCheck, setRunningCheck] = useState<RunningCheck | null>(null)
   // null, пока не загружены: сохранение с пустыми списками стёрло бы настроенные исключения
-  const [exclusions, setExclusions] = useState<LossExclusions | null>(null)
-  const [exclusionsLoadFailed, setExclusionsLoadFailed] = useState(false)
+  const [settings, setSettings] = useState<LossSettingsData | null>(null)
+  const [settingsLoadFailed, setSettingsLoadFailed] = useState(false)
 
+  // Таблица и блок отключённых адресов обновляются вместе; сбой одного запроса второму не мешает
   const fetchOverview = useCallback(async () => {
-    try {
-      const { data } = await lossApi.overview()
-      setTargets(data.targets)
-    } catch {
-      setTargets(prev => prev ?? [])
-    }
+    const [overview, quarantineView] = await Promise.allSettled([lossApi.overview(), lossApi.quarantine()])
+    if (overview.status === 'fulfilled') setTargets(overview.value.data.targets)
+    else setTargets(prev => prev ?? [])
+    if (quarantineView.status === 'fulfilled') setQuarantine(quarantineView.value.data)
   }, [])
 
   useEffect(() => {
     lossApi.settings()
-      .then(({ data }) => setExclusions(data))
-      .catch(() => setExclusionsLoadFailed(true))
+      .then(({ data }) => setSettings(data))
+      .catch(() => setSettingsLoadFailed(true))
   }, [])
 
-  const saveExclusions = async (next: LossExclusions, successMessage: string): Promise<boolean> => {
+  const saveSettings = async (next: LossSettingsData, successMessage: string): Promise<boolean> => {
     try {
       const { data } = await lossApi.updateSettings(next)
-      setExclusions(data)
+      setSettings(data)
       toast.success(successMessage)
       fetchOverview()
       return true
@@ -104,12 +112,12 @@ export default function Loss() {
   }
 
   const hideTarget = async (target: LossTarget) => {
-    if (!exclusions) return
+    if (!settings) return
     const endpoint = endpointText(target)
     // Строка с галочкой «только полные потери» скрывается целиком — запись заменяется
-    const others = exclusions.excluded_targets.filter(item => item.target !== endpoint)
-    const saved = await saveExclusions(
-      { ...exclusions, excluded_targets: [...others, { target: endpoint, total_only: false }] },
+    const others = settings.excluded_targets.filter(item => item.target !== endpoint)
+    const saved = await saveSettings(
+      { ...settings, excluded_targets: [...others, { target: endpoint, total_only: false }] },
       t('loss.target_hidden', { target: endpoint }),
     )
     if (!saved) return
@@ -118,6 +126,16 @@ export default function Loss() {
       next.delete(target.target)
       return next
     })
+  }
+
+  const exemptFromQuarantine = (address: BackendAddress) => {
+    if (!settings) return
+    const endpoint = endpointText(address)
+    const exemptTargets = [...new Set([...settings.quarantine.exempt_targets, endpoint])]
+    saveSettings(
+      { ...settings, quarantine: { ...settings.quarantine, exempt_targets: exemptTargets } },
+      t('loss.quarantine_exempted', { target: endpoint }),
+    )
   }
 
   useAutoRefresh(fetchOverview, { customInterval: REFRESH_INTERVAL_MS })
@@ -244,6 +262,15 @@ export default function Loss() {
 
       <ActivityStrip jobs={visibleJobs} check={runningCheck} onDismiss={dismissJob} />
 
+      <QuarantineBlock
+        view={quarantine}
+        sustainedSeconds={settings?.quarantine.sustained_seconds ?? null}
+        canExempt={settings !== null}
+        onReleased={fetchOverview}
+        onExempt={exemptFromQuarantine}
+        onEdit={setEditing}
+      />
+
       <div className="bg-dark-900/50 rounded-xl border border-dark-800/50">
         <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-dark-800/50 flex-wrap">
           <h2 className="text-sm font-medium text-dark-200">{t('loss.overview_title')}</h2>
@@ -318,6 +345,11 @@ export default function Loss() {
                               <div className="text-xs text-dark-500">
                                 {target.owner ?? t('loss.owner_unknown')}
                                 {target.total_only && <span title={t('loss.total_only_hint')}> · {t('loss.total_only_mark')}</span>}
+                                {target.quarantined.length > 0 && (
+                                  <span className="ml-2 px-1.5 rounded text-2xs font-medium bg-warning/10 text-warning border border-warning/20">
+                                    {t('loss.quarantined_relays', { count: target.quarantined.length })}
+                                  </span>
+                                )}
                               </div>
                             </div>
                           </div>
@@ -346,7 +378,7 @@ export default function Loss() {
                           >
                             {t('loss.check_this')}
                           </button>
-                          {exclusions && (
+                          {settings && (
                             <button
                               onClick={() => hideTarget(target)}
                               title={t('loss.hide_target_hint')}
@@ -442,9 +474,9 @@ export default function Loss() {
 
       <LossSettings
         servers={activeServers}
-        exclusions={exclusions}
-        loadFailed={exclusionsLoadFailed}
-        onSave={next => saveExclusions(next, t('loss.settings_saved'))}
+        settings={settings}
+        loadFailed={settingsLoadFailed}
+        onSave={next => saveSettings(next, t('loss.settings_saved'))}
       />
 
       {/* fixed, а не sticky: длинную страницу прокручивает окно, sticky внутри <main> не прилипал.

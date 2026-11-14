@@ -1236,10 +1236,17 @@ export default function HAProxy() {
                                     )}
                                     {row.addr && <p className="text-xs text-dark-500 font-mono">{row.addr}</p>}
                                   </td>
-                                  <td className="px-4 py-2">
+                                  <td className="px-4 py-2 whitespace-nowrap">
                                     <span className={`px-2 py-0.5 rounded text-xs font-medium border ${statsStatusClass(row.status)}`}>
                                       {row.status}
                                     </span>
+                                    {row.quarantined && (
+                                      <Tooltip label={t('haproxy.stats_quarantined_hint')} maxWidth={280}>
+                                        <span className="ml-2 px-1.5 py-0.5 rounded text-2xs font-medium bg-warning/10 text-warning border border-warning/20">
+                                          {t('haproxy.stats_quarantined_badge')}
+                                        </span>
+                                      </Tooltip>
+                                    )}
                                   </td>
                                   <td className="px-4 py-2 text-xs text-dark-400">{row.check_status || '—'}</td>
                                   <td className="px-4 py-2">

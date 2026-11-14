@@ -22,6 +22,13 @@ const PANEL_ALERT_TYPES = [
   'panel_disk_high', 'panel_disk_recovered',
 ] as const
 
+const BACKEND_QUARANTINE_ALERT_TYPES = [
+  'backend_disabled', 'backend_restored', 'backend_chronic', 'backend_quarantine_paused',
+] as const
+
+// Подпись этих типов лежит в локали под ключом alerts.type_<тип>
+const KEY_NAMED_ALERT_TYPES = [...BACKEND_QUARANTINE_ALERT_TYPES, ...PANEL_ALERT_TYPES]
+
 export default function Alerts() {
   const { t } = useTranslation()
 
@@ -181,7 +188,7 @@ export default function Alerts() {
       node_update_failed: t('alerts.type_node_update_failed'),
       gre_silent: t('alerts.type_gre_silent'),
       gre_recovered: t('alerts.type_gre_recovered'),
-      ...Object.fromEntries(PANEL_ALERT_TYPES.map(type => [type, t(`alerts.type_${type}`)])),
+      ...Object.fromEntries(KEY_NAMED_ALERT_TYPES.map(type => [type, t(`alerts.type_${type}`)])),
     }
     return map[t_] || t_
   }
@@ -662,7 +669,7 @@ export default function Alerts() {
               <option value="packet_loss">{t('alerts.type_packet_loss')}</option>
               <option value="packet_loss_recovery">{t('alerts.type_packet_loss_recovery')}</option>
               <option value="node_update_failed">{t('alerts.type_node_update_failed')}</option>
-              {PANEL_ALERT_TYPES.map(type => (
+              {KEY_NAMED_ALERT_TYPES.map(type => (
                 <option key={type} value={type}>{t(`alerts.type_${type}`)}</option>
               ))}
             </select>

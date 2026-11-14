@@ -400,6 +400,8 @@ export interface HAProxyStatRow {
   downtime: number | null
   // Потери до addr по проверке с ноды; нет у старых нод и у не-серверов
   probe?: LossProbeStats | null
+  // Сервер выведен из балансировки автоотключением панели; у старых нод поля нет
+  quarantined?: boolean
 }
 
 export interface LossProbeStats {
@@ -2218,6 +2220,8 @@ export interface LossTarget {
   worst_loss: number
   relays: LossRelay[]
   episode: { level: number; opened_at: number } | null
+  // Релеи, на которых адрес сейчас выведен из балансировки автоотключением
+  quarantined: number[]
 }
 
 export interface LossExcludedTarget {
@@ -2227,9 +2231,64 @@ export interface LossExcludedTarget {
   total_only: boolean
 }
 
-export interface LossExclusions {
+export type QuarantineMode = 'off' | 'observe' | 'enforce'
+
+export interface QuarantineSettingsData {
+  mode: QuarantineMode
+  loss_threshold: number
+  sustained_seconds: number
+  downs_threshold: number
+  calm_seconds: number
+  chronic_strikes: number
+  max_share_pct: number
+  drop_sessions: boolean
+  notify: boolean
+  exempt_server_ids: number[]
+  // Формат адресов — как у excluded_targets
+  exempt_targets: string[]
+}
+
+export interface LossSettingsData {
   excluded_server_ids: number[]
   excluded_targets: LossExcludedTarget[]
+  quarantine: QuarantineSettingsData
+}
+
+export type QuarantineBlockedReason =
+  | 'last_server'
+  | 'share_limit'
+  | 'manual_maint'
+  | 'not_found'
+  | 'unsupported'
+  | 'denied'
+  | 'offline'
+  | 'error'
+
+// Пара «релей → адрес»: одна запись на каждый релей, где адрес отключён или должен быть отключён
+export interface QuarantineItem {
+  target: string
+  ip: string
+  port: number
+  owner: string | null
+  server_id: number
+  server_name: string
+  state: 'pending' | 'disabled' | 'blocked' | 'would_disable'
+  reason: { kind: 'loss' | 'downs'; loss_pct: number; downs: number }
+  // Unix-секунды; у would_disable — когда панель так решила
+  disabled_at: number | null
+  // Раньше этого времени адрес не вернётся; есть только у disabled
+  until: number | null
+  strikes: number
+  // Сколько соединений было на сервере в момент отключения
+  sessions: number
+  blocked_reason: QuarantineBlockedReason | null
+}
+
+export interface QuarantineOverview {
+  mode: QuarantineMode
+  items: QuarantineItem[]
+  chronic: { target: string; strikes: number }[]
+  paused_relays: { server_id: number; name: string; since: number }[]
 }
 
 export type LossCheckStatus = 'ok' | 'unsupported' | 'denied' | 'unreachable'
@@ -2346,8 +2405,11 @@ export const lossApi = {
   backendsApply: (edits: BackendEditBody[]) =>
     api.post<{ job: BackendEditJob }>('/loss/backends/apply', { edits }),
   jobs: () => api.get<{ jobs: BackendEditJob[] }>('/loss/jobs'),
-  settings: () => api.get<LossExclusions>('/loss/settings'),
-  updateSettings: (data: LossExclusions) => api.put<LossExclusions>('/loss/settings', data),
+  settings: () => api.get<LossSettingsData>('/loss/settings'),
+  updateSettings: (data: LossSettingsData) => api.put<LossSettingsData>('/loss/settings', data),
+  quarantine: () => api.get<QuarantineOverview>('/loss/quarantine'),
+  releaseQuarantine: (serverId: number, target: string) =>
+    api.post<{ released: boolean }>('/loss/quarantine/release', { server_id: serverId, target }),
   check: (target: string, serverIds: number[]) =>
     api.post<{ ip: string; port: number; results: LossCheckResult[] }>('/loss/check', {
       target,
