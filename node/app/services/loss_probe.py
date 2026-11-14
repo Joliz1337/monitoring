@@ -19,6 +19,7 @@ import ipaddress
 import logging
 import time
 from collections import deque
+from dataclasses import dataclass
 from enum import Enum
 from statistics import fmean
 from typing import Awaitable, Callable, Iterable, Optional
@@ -27,6 +28,7 @@ from app.capabilities import CapabilityPolicy
 from app.models.dnat import DnatRule, DnatStateResponse
 from app.models.haproxy import HAProxyStatsResponse
 from app.models.loss_probe import ProbeStats
+from app.services.haproxy_down_counter import RowKey, Target, get_down_counter
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +47,22 @@ APPLY_SETTLE_SEC = 3.0
 # Ручная проверка стартует попытки с паузой: поток, а не один всплеск SYN,
 # который сам мог бы упереться в ограничители на пути
 CHECK_SPACING_SEC = 0.05
-
-Target = tuple[str, int]
+# Источник, который сейчас не прочитался (show stat молчит во время reload),
+# держит прежние адреса не дольше этого срока: HAProxy, остановленный насовсем,
+# не должен оставлять проверки своих бэкендов навсегда
+UNKNOWN_GRACE_SEC = 60.0
 
 
 class Source(str, Enum):
     HAPROXY = "haproxy"
     DNAT = "dnat"
+
+
+@dataclass(frozen=True)
+class Discovery:
+    targets: dict[Target, set[Source]]
+    # Источники, которые не удалось прочитать: их прежние адреса остаются
+    unknown: frozenset[Source] = frozenset()
 
 
 # Адрес уходит в метрики, только если панели можно читать раздел, откуда он
@@ -79,13 +90,18 @@ def parse_addr(addr: str) -> Optional[Target]:
     return str(ip), port
 
 
-def haproxy_targets(stats: HAProxyStatsResponse) -> set[Target]:
-    return {
-        target
+def haproxy_rows(stats: HAProxyStatsResponse) -> list[tuple[RowKey, Target, Optional[int]]]:
+    """Строки серверов с разобранным адресом и счётчиком падений HAProxy."""
+    return [
+        ((proxy.name, server.name), target, server.chkdown)
         for proxy in stats.proxies
         for server in proxy.servers
         if (target := parse_addr(server.addr or "")) is not None
-    }
+    ]
+
+
+def haproxy_targets(stats: HAProxyStatsResponse) -> set[Target]:
+    return {target for _, target, _ in haproxy_rows(stats)}
 
 
 def dnat_rule_port(rule: DnatRule) -> Optional[int]:
@@ -162,22 +178,34 @@ class AttemptWindow:
 class LossProbe:
     def __init__(
         self,
-        discover: Callable[[], dict[Target, set[Source]]],
+        discover: Callable[[], Discovery],
         attempt_fn: Callable[[str, int], Awaitable[Optional[float]]] = attempt,
+        downs_fn: Callable[[Target], int] = lambda _target: 0,
     ):
         self._discover = discover
         self._attempt = attempt_fn
+        self._downs = downs_fn
         self._windows: dict[Target, AttemptWindow] = {}
         self._sources: dict[Target, set[Source]] = {}
+        self._unknown_since: dict[Source, float] = {}
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_ATTEMPTS)
         self._task: Optional[asyncio.Task] = None
         self._next_refresh = 0.0
 
-    def refresh_targets(self, targets: dict[Target, set[Source]]) -> None:
-        """История адреса переживает обновление списка; пропавший адрес забывается."""
-        if len(targets) > MAX_TARGETS:
-            logger.warning("Loss probe: %s targets, probing the first %s", len(targets), MAX_TARGETS)
-        wanted = dict(sorted(targets.items())[:MAX_TARGETS])
+    def refresh_targets(self, targets: dict[Target, set[Source]],
+                        unknown: frozenset[Source] = frozenset(), now: float = 0.0) -> None:
+        """История адреса переживает обновление списка; пропавший адрес забывается.
+        Адреса непрочитанного источника остаются: одно неудачное чтение show stat
+        стёрло бы окна всех бэкендов."""
+        self._unknown_since = {source: self._unknown_since.get(source, now) for source in unknown}
+        held = {source for source, since in self._unknown_since.items() if now - since < UNKNOWN_GRACE_SEC}
+        merged = {target: set(sources) for target, sources in targets.items()}
+        for target, sources in self._sources.items():
+            if kept := sources & held:
+                merged.setdefault(target, set()).update(kept)
+        if len(merged) > MAX_TARGETS:
+            logger.warning("Loss probe: %s targets, probing the first %s", len(merged), MAX_TARGETS)
+        wanted = dict(sorted(merged.items())[:MAX_TARGETS])
         self._windows = {target: self._windows.get(target) or AttemptWindow() for target in wanted}
         self._sources = wanted
 
@@ -187,7 +215,8 @@ class LossProbe:
 
     async def tick(self, now: float) -> None:
         if now >= self._next_refresh:
-            self.refresh_targets(await asyncio.to_thread(self._discover))
+            discovery = await asyncio.to_thread(self._discover)
+            self.refresh_targets(discovery.targets, discovery.unknown, now)
             self._next_refresh = now + TARGETS_REFRESH_SEC
         await self.run_round()
 
@@ -226,9 +255,11 @@ class LossProbe:
         entries = []
         for (ip, port), window in self._windows.items():
             stats = window.stats()
-            if stats is None or not self._sources.get((ip, port), set()) & readable:
+            shown = self._sources.get((ip, port), set()) & readable
+            if stats is None or not shown:
                 continue
-            entries.append({"ip": ip, "port": port, **stats.model_dump()})
+            downs = self._downs((ip, port)) if Source.HAPROXY in shown else None
+            entries.append({"ip": ip, "port": port, **stats.model_dump(), "downs": downs})
         return entries
 
     async def start(self) -> None:
@@ -256,19 +287,24 @@ class LossProbe:
             await asyncio.sleep(max(0.0, ATTEMPT_INTERVAL_SEC - (time.monotonic() - started)))
 
 
-def discover_targets() -> dict[Target, set[Source]]:
+def discover_targets() -> Discovery:
     from app.services.dnat_manager import get_dnat_manager
     from app.services.haproxy_manager import get_haproxy_manager
 
     found: dict[Target, set[Source]] = {}
+    unknown: set[Source] = set()
+    stats = HAProxyStatsResponse.model_validate(get_haproxy_manager().get_stats())
+    if stats.available:
+        rows = haproxy_rows(stats)
+        get_down_counter().observe(rows)
+        for _, target, _ in rows:
+            found.setdefault(target, set()).add(Source.HAPROXY)
+    else:
+        unknown.add(Source.HAPROXY)
     rules, _ = get_dnat_manager().load_state()
-    for source, targets in (
-        (Source.HAPROXY, haproxy_targets(HAProxyStatsResponse.model_validate(get_haproxy_manager().get_stats()))),
-        (Source.DNAT, dnat_targets(rules)),
-    ):
-        for target in targets:
-            found.setdefault(target, set()).add(source)
-    return found
+    for target in dnat_targets(rules):
+        found.setdefault(target, set()).add(Source.DNAT)
+    return Discovery(found, frozenset(unknown))
 
 
 _probe: Optional[LossProbe] = None
@@ -277,5 +313,5 @@ _probe: Optional[LossProbe] = None
 def get_loss_probe() -> LossProbe:
     global _probe
     if _probe is None:
-        _probe = LossProbe(discover=discover_targets)
+        _probe = LossProbe(discover=discover_targets, downs_fn=get_down_counter().downs)
     return _probe

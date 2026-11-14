@@ -29,11 +29,14 @@ from app.models.haproxy import (  # noqa: E402
     HAProxyStatsResponse,
 )
 from app.models.loss_probe import CHECK_ATTEMPTS_MAX, LossCheckRequest  # noqa: E402
+from app.services.haproxy_down_counter import DownCounter  # noqa: E402
 from app.services.loss_probe import (  # noqa: E402
     APPLY_SETTLE_SEC,
     MAX_TARGETS,
     TARGETS_REFRESH_SEC,
+    UNKNOWN_GRACE_SEC,
     AttemptWindow,
+    Discovery,
     LossProbe,
     Source,
     attempt,
@@ -181,9 +184,9 @@ class AttemptTests(unittest.TestCase):
 
 
 class LossProbeTests(unittest.TestCase):
-    def probe(self, targets: dict, answers: dict) -> tuple[LossProbe, FakeAttempts]:
+    def probe(self, targets: dict, answers: dict, **kwargs) -> tuple[LossProbe, FakeAttempts]:
         fake = FakeAttempts(answers)
-        probe = LossProbe(discover=lambda: targets, attempt_fn=fake)
+        probe = LossProbe(discover=lambda: Discovery(targets), attempt_fn=fake, **kwargs)
         probe.refresh_targets(targets)
         return probe, fake
 
@@ -241,8 +244,65 @@ class LossProbeTests(unittest.TestCase):
         self.assertEqual(probe.snapshot({Source.DNAT}), [])
         self.assertEqual(
             probe.snapshot({Source.HAPROXY}),
-            [{"ip": "10.0.0.5", "port": 443, "loss_pct": 0.0, "rtt_ms": 6.0, "samples": 1}],
+            [{"ip": "10.0.0.5", "port": 443, "loss_pct": 0.0, "rtt_ms": 6.0, "samples": 1, "downs": 0}],
         )
+
+    def test_snapshot_reports_downs_for_haproxy_targets_only(self):
+        backend, forwarded = ("10.0.0.5", 443), ("10.0.0.6", 443)
+        probe, _ = self.probe(
+            {backend: {Source.HAPROXY}, forwarded: {Source.DNAT}}, {backend: [6.0], forwarded: [6.0]},
+            downs_fn={backend: 4, forwarded: 9}.get,
+        )
+        asyncio.run(probe.run_round())
+        downs = {entry["ip"]: entry["downs"] for entry in probe.snapshot(set(Source))}
+        # None — адреса нет среди серверов HAProxy: панель такой не отключает
+        self.assertEqual(downs, {"10.0.0.5": 4, "10.0.0.6": None})
+
+    def test_snapshot_hides_downs_when_haproxy_is_closed_to_panel(self):
+        shared = ("10.0.0.5", 443)
+        probe, _ = self.probe({shared: {Source.HAPROXY, Source.DNAT}}, {shared: [6.0]}, downs_fn=lambda target: 4)
+        asyncio.run(probe.run_round())
+        self.assertIsNone(probe.snapshot({Source.DNAT})[0]["downs"])
+
+    def test_unreadable_haproxy_keeps_its_targets_and_history(self):
+        backend, forwarded = ("10.0.0.5", 443), ("10.0.0.6", 443)
+        probe, _ = self.probe({backend: {Source.HAPROXY}, forwarded: {Source.DNAT}}, {backend: [5.0]})
+        asyncio.run(probe.run_round())
+        # show stat не ответил (reload): серверы никуда не делись, а DNAT прочитан и пуст
+        probe.refresh_targets({}, unknown=frozenset({Source.HAPROXY}), now=100.0)
+        self.assertEqual(probe.stats_for(backend).samples, 1)
+        self.assertIsNone(probe.stats_for(forwarded))
+
+    def test_unreadable_source_keeps_only_its_own_share_of_a_target(self):
+        shared = ("10.0.0.5", 443)
+        probe, _ = self.probe({shared: {Source.HAPROXY, Source.DNAT}}, {shared: [5.0]})
+        asyncio.run(probe.run_round())
+        probe.refresh_targets({}, unknown=frozenset({Source.HAPROXY}), now=100.0)
+        self.assertEqual(probe.snapshot({Source.DNAT}), [])
+        self.assertEqual(len(probe.snapshot({Source.HAPROXY})), 1)
+
+    def test_source_unreadable_for_long_loses_its_targets(self):
+        backend = ("10.0.0.5", 443)
+        probe, _ = self.probe({backend: {Source.HAPROXY}}, {backend: [5.0]})
+        asyncio.run(probe.run_round())
+        unknown = frozenset({Source.HAPROXY})
+        probe.refresh_targets({}, unknown=unknown, now=100.0)
+        probe.refresh_targets({}, unknown=unknown, now=100.0 + UNKNOWN_GRACE_SEC - 1)
+        self.assertIsNotNone(probe.stats_for(backend))
+        # HAProxy остановлен насовсем — проверять его адреса дальше незачем
+        probe.refresh_targets({}, unknown=unknown, now=100.0 + UNKNOWN_GRACE_SEC)
+        self.assertIsNone(probe.stats_for(backend))
+
+    def test_grace_restarts_after_a_successful_read(self):
+        backend = ("10.0.0.5", 443)
+        targets = {backend: {Source.HAPROXY}}
+        probe, _ = self.probe(targets, {backend: [5.0]})
+        asyncio.run(probe.run_round())
+        unknown = frozenset({Source.HAPROXY})
+        probe.refresh_targets({}, unknown=unknown, now=100.0)
+        probe.refresh_targets(targets, now=110.0)
+        probe.refresh_targets({}, unknown=unknown, now=100.0 + UNKNOWN_GRACE_SEC)
+        self.assertIsNotNone(probe.stats_for(backend))
 
 
 # Ровно то, что отдаёт HAProxyManager.get_stats(): словарь, а не модель —
@@ -263,7 +323,35 @@ class RealDataPathTests(unittest.TestCase):
         dnat = mock.Mock(load_state=mock.Mock(return_value=([dnat_rule(target_ip="10.0.0.6")], None)))
         with mock.patch("app.services.haproxy_manager.get_haproxy_manager", return_value=haproxy),              mock.patch("app.services.dnat_manager.get_dnat_manager", return_value=dnat):
             found = discover_targets()
-        self.assertEqual(found, {("10.0.0.5", 443): {Source.HAPROXY}, ("10.0.0.6", 443): {Source.DNAT}})
+        self.assertEqual(found.targets, {("10.0.0.5", 443): {Source.HAPROXY}, ("10.0.0.6", 443): {Source.DNAT}})
+        self.assertEqual(found.unknown, frozenset())
+
+    def discover_with(self, counter: DownCounter, stats: dict) -> Discovery:
+        haproxy = mock.Mock(get_stats=mock.Mock(return_value=stats))
+        dnat = mock.Mock(load_state=mock.Mock(return_value=([], None)))
+        with mock.patch("app.services.haproxy_manager.get_haproxy_manager", return_value=haproxy),              mock.patch("app.services.dnat_manager.get_dnat_manager", return_value=dnat),              mock.patch("app.services.loss_probe.get_down_counter", return_value=counter):
+            return discover_targets()
+
+    @staticmethod
+    def stats_with_chkdown(chkdown: int) -> dict:
+        server = {**STATS_DICT["proxies"][0]["servers"][0], "chkdown": chkdown}
+        return {"available": True, "proxies": [{**STATS_DICT["proxies"][0], "servers": [server]}]}
+
+    def test_discovery_feeds_the_down_counter(self):
+        counter = DownCounter()
+        self.discover_with(counter, self.stats_with_chkdown(1))
+        self.discover_with(counter, self.stats_with_chkdown(3))
+        self.assertEqual(counter.downs(("10.0.0.5", 443)), 2)
+
+    def test_failed_stats_read_is_unknown_not_empty(self):
+        counter = DownCounter()
+        self.discover_with(counter, self.stats_with_chkdown(1))
+        failed = self.discover_with(counter, {"available": False, "reason": "timeout", "proxies": []})
+        self.assertEqual(failed.unknown, frozenset({Source.HAPROXY}))
+        self.assertEqual(failed.targets, {})
+        # Неудачное чтение не стирает точку отсчёта: падения за это время не теряются
+        self.discover_with(counter, self.stats_with_chkdown(3))
+        self.assertEqual(counter.downs(("10.0.0.5", 443)), 2)
 
     def test_stats_route_annotates_manager_dict(self):
         from app.routers import haproxy as haproxy_router
@@ -315,7 +403,7 @@ class RefreshScheduleTests(unittest.TestCase):
 
         def discover():
             self.discovered.append(1)
-            return {("10.0.0.5", 443): {Source.HAPROXY}}
+            return Discovery({("10.0.0.5", 443): {Source.HAPROXY}})
 
         self.probe = LossProbe(discover=discover, attempt_fn=FakeAttempts({}))
 

@@ -111,6 +111,21 @@ class ShowStatParsingTests(unittest.TestCase):
         self.assertIsNone(proxy["servers"][0]["addr"])
         self.assertEqual(proxy["servers"][0]["scur"], 3)
 
+    def test_chkdown_counts_server_downs(self):
+        csv_with_chkdown = (
+            "# pxname,svname,scur,status,bck,chkdown,addr,\n"
+            "b,srv1,3,UP,0,4,10.0.0.5:443,\n"
+            "b,srv2,0,no check,0,,10.0.0.6:443,\n"
+        )
+        checked, unchecked = self.parse(csv_with_chkdown)["b"]["servers"]
+        self.assertEqual(checked["chkdown"], 4)
+        # Сервер без проверок HAProxy не роняет — счётчика у него нет
+        self.assertIsNone(unchecked["chkdown"])
+
+    def test_missing_chkdown_column_yields_none(self):
+        up, _ = self.parse(SHOW_STAT_CSV)["web_balancer"]["servers"]
+        self.assertIsNone(up["chkdown"])
+
     def test_garbage_and_empty_input(self):
         self.assertEqual(HAProxyManager._parse_show_stat(""), [])
         self.assertEqual(HAProxyManager._parse_show_stat("Unknown command.\n"), [])

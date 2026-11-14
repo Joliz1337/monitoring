@@ -23,6 +23,9 @@ class LossProbeEntry(ProbeStats):
     """Строка блока `loss_probe` в метриках."""
     ip: str
     port: int
+    # Падений сервера HAProxy с этим адресом за полчаса; None — адреса среди
+    # серверов HAProxy нет (цель DNAT), и вывести его из балансировки нельзя
+    downs: Optional[int] = None
 
 
 class TargetRequest(BaseModel):

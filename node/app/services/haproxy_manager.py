@@ -688,6 +688,7 @@ resolvers mydns
                 "backup": row.get("bck") == "1",
                 "lastchg": cls._stat_int(row.get("lastchg")),
                 "downtime": cls._stat_int(row.get("downtime")),
+                "chkdown": cls._stat_int(row.get("chkdown")),
             }
 
             proxy = proxies.setdefault(pxname, {

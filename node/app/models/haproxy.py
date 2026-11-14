@@ -334,6 +334,7 @@ class HAProxyStatRow(BaseModel):
     backup: bool = False
     lastchg: Optional[int] = None  # seconds since last state change
     downtime: Optional[int] = None
+    chkdown: Optional[int] = None  # переходов UP→DOWN с запуска воркера
     probe: Optional[ProbeStats] = None  # потери до addr, только у серверов
 
 
