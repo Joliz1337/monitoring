@@ -143,6 +143,7 @@ class Quarantine:
         self._leases: dict[Target, float] = {}
         # Строки, которые перевёл в обслуживание этот менеджер, и их адрес
         self._owned: dict[RowKey, Target] = {}
+        self._owned_view: frozenset[RowKey] = frozenset()
         self._max_share_pct = 0
         self._drop_sessions = False
         self._saved: Optional[str] = None
@@ -173,8 +174,9 @@ class Quarantine:
             self._enforce(self._read_proxies(), self._clock())
 
     def quarantined_rows(self) -> frozenset[RowKey]:
-        with self._lock:
-            return frozenset(self._owned)
+        """Снимок без замка: зовётся из цикла событий на каждый запрос статистики,
+        а замок на время зависшего сокета держит фоновый круг."""
+        return self._owned_view
 
     def _enforce(self, proxies: Sequence[dict], now: float) -> list[TargetResult]:
         self._leases = {target: deadline for target, deadline in self._leases.items() if deadline > now}
@@ -183,6 +185,7 @@ class Quarantine:
             self._return_rows(proxies, plan.row_keys())
             return self._disable_rows(plan)
         finally:
+            self._owned_view = frozenset(self._owned)
             self._save()
 
     def _return_rows(self, proxies: Sequence[dict], wanted: set[RowKey]) -> None:
@@ -270,6 +273,7 @@ class Quarantine:
             logger.error("Quarantine state %s is unreadable, starting clean: %s", self._state_path, e)
             return
         self._leases, self._owned = leases, owned
+        self._owned_view = frozenset(owned)
         self._max_share_pct, self._drop_sessions = max_share_pct, drop_sessions
         self._saved = self._serialized()
 
@@ -295,6 +299,10 @@ class Quarantine:
                 if not self._failing:
                     logger.warning("Quarantine round skipped, will retry: %s", e)
                 self._failing = True
+                continue
+            except Exception:
+                # Круг не должен умереть: без него серверы некому вернуть по сроку
+                logger.exception("Quarantine round failed, will retry")
                 continue
             self._failing = False
 

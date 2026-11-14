@@ -7,15 +7,20 @@ Runnable with plain stdlib:  python -m unittest discover -s node/tests
 всех клиентов, а сервер, который забыли вернуть, простаивает навсегда.
 """
 
+import asyncio
 import os
 import re
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app.services import haproxy_quarantine as quarantine_module  # noqa: E402
 from app.services.haproxy_quarantine import Quarantine, SkipReason  # noqa: E402
 from app.services.haproxy_runtime_weights import SocketPermissionError  # noqa: E402
 
@@ -383,6 +388,50 @@ class ReloadTests(QuarantineTestCase):
         self.apply()
         self.assertEqual(self.status("srv3"), "MAINT")
         self.assertNotIn(f"set server {LB}/srv3 state ready", self.haproxy.commands)
+
+
+class HungSocketTests(QuarantineTestCase):
+    def test_stats_page_does_not_wait_for_a_hung_socket(self):
+        # quarantined_rows() зовётся из цикла событий агента при каждом запросе статистики
+        self.apply(A)
+        entered, release = threading.Event(), threading.Event()
+
+        def slow_read() -> list[dict]:
+            entered.set()
+            release.wait(5)
+            return self.haproxy.read()
+
+        hung = Quarantine(self.haproxy.run, slow_read, self.state_path, clock=self.clock)
+        worker = threading.Thread(target=hung.reconcile)
+        worker.start()
+        entered.wait(5)
+        started = time.monotonic()
+        rows = hung.quarantined_rows()
+        waited = time.monotonic() - started
+        release.set()
+        worker.join(5)
+        self.assertEqual(rows, frozenset({(LB, "srv1")}))
+        self.assertLess(waited, 1.0)
+
+
+class BackgroundLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unexpected_error_does_not_stop_the_rounds(self):
+        # Умерший круг — это серверы, которые никто не вернёт по сроку
+        with tempfile.TemporaryDirectory() as folder:
+            quarantine = Quarantine(lambda command: "\n", lambda: [], Path(folder) / "state.json")
+            rounds = []
+
+            def reconcile() -> None:
+                rounds.append(len(rounds))
+                if len(rounds) == 1:
+                    raise ValueError("unexpected")
+
+            quarantine.reconcile = reconcile
+            with mock.patch.object(quarantine_module, "RECONCILE_SECONDS", 0.01),                  self.assertLogs(quarantine_module.logger, level="ERROR"):
+                await quarantine.start()
+                await asyncio.sleep(0.3)
+                await quarantine.stop()
+        self.assertGreater(len(rounds), 1)
 
 
 class RestartTests(QuarantineTestCase):

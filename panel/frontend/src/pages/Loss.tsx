@@ -111,13 +111,33 @@ export default function Loss() {
     }
   }
 
+  // Кнопки строк правят одну запись настроек. Настройки перед этим перечитываются:
+  // вкладка, открытая до чужой правки, иначе вернула бы прежние режим автоотключения и списки
+  const patchSettings = async (
+    patch: (fresh: LossSettingsData) => LossSettingsData,
+    successMessage: string,
+  ): Promise<boolean> => {
+    try {
+      const { data: fresh } = await lossApi.settings()
+      return await saveSettings(patch(fresh), successMessage)
+    } catch {
+      toast.error(t('loss.settings_save_failed'))
+      return false
+    }
+  }
+
   const hideTarget = async (target: LossTarget) => {
     if (!settings) return
     const endpoint = endpointText(target)
     // Строка с галочкой «только полные потери» скрывается целиком — запись заменяется
-    const others = settings.excluded_targets.filter(item => item.target !== endpoint)
-    const saved = await saveSettings(
-      { ...settings, excluded_targets: [...others, { target: endpoint, total_only: false }] },
+    const saved = await patchSettings(
+      fresh => ({
+        ...fresh,
+        excluded_targets: [
+          ...fresh.excluded_targets.filter(item => item.target !== endpoint),
+          { target: endpoint, total_only: false },
+        ],
+      }),
       t('loss.target_hidden', { target: endpoint }),
     )
     if (!saved) return
@@ -131,9 +151,14 @@ export default function Loss() {
   const exemptFromQuarantine = (address: BackendAddress) => {
     if (!settings) return
     const endpoint = endpointText(address)
-    const exemptTargets = [...new Set([...settings.quarantine.exempt_targets, endpoint])]
-    saveSettings(
-      { ...settings, quarantine: { ...settings.quarantine, exempt_targets: exemptTargets } },
+    patchSettings(
+      fresh => ({
+        ...fresh,
+        quarantine: {
+          ...fresh.quarantine,
+          exempt_targets: [...new Set([...fresh.quarantine.exempt_targets, endpoint])],
+        },
+      }),
       t('loss.quarantine_exempted', { target: endpoint }),
     )
   }
