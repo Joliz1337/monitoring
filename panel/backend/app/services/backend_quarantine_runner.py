@@ -200,7 +200,7 @@ class QuarantineRunner:
     async def run_once(self) -> None:
         async with self._lock:
             settings, now = self._settings, self._clock()
-            events = self._decide(settings, now)
+            events = await self._decide(settings, now)
             events += await self._push(settings, now)
             await self._save()
         await self._notify(events, settings)
@@ -253,19 +253,23 @@ class QuarantineRunner:
     def disabled_relays(self) -> dict[str, list[int]]:
         """Адрес → релеи, на которых он сейчас отключён."""
         relays: dict[str, list[int]] = {}
-        for pair in self.tracker.pairs.values():
+        for pair in list(self.tracker.pairs.values()):
             if pair.state is PairState.DISABLED:
                 relays.setdefault(pair.target, []).append(pair.relay_id)
         return {target: sorted(relay_ids) for target, relay_ids in relays.items()}
 
-    def _decide(self, settings: QuarantineSettings, now: float) -> list[Event]:
+    async def _decide(self, settings: QuarantineSettings, now: float) -> list[Event]:
         events: list[Event] = []
         if settings.mode is not self._mode:
             events += self.tracker.clear(now, RestoreCause.MODE)
             self._mode = settings.mode
         if settings.mode is Mode.OFF:
             return events
-        return events + self.tracker.evaluate(
+        # Обход замеров всего парка — десятки миллисекунд чистого Python на 2000 релеев:
+        # в потоке он не останавливает цикл событий. Реестр читается здесь, а не в потоке —
+        # коллектор пишет в него из цикла событий
+        return events + await asyncio.to_thread(
+            self.tracker.evaluate,
             self._registry.fresh(), self._registry.target_rules(), settings.exemptions(),
             settings.policy, settings.mode, now,
         )

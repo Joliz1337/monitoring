@@ -218,21 +218,28 @@ class QuarantineTracker:
                  policy: QuarantinePolicy, mode: Mode, now: float) -> list[Event]:
         events: list[Event] = []
         seen: set[PairKey] = set()
+        # Без правил и исключений каждый адрес учитывается как обычный — на парке в
+        # тысячи релеев это десятки тысяч сэкономленных проверок за цикл
+        plain = not (rules.ips or rules.endpoints or exempt.server_ids or exempt.ips or exempt.endpoints)
         for snapshot in snapshots:
-            observed = []
+            touched = []
+            considered = 0
             for reading in snapshot.readings:
                 key = (snapshot.server_id, reading.key)
-                target_mode = rules.mode(reading)
-                if target_mode is TargetMode.HIDDEN or exempt.covers(snapshot.server_id, reading):
+                target_mode = TargetMode.TRACKED if plain else rules.mode(reading)
+                if not plain and (target_mode is TargetMode.HIDDEN or exempt.covers(snapshot.server_id, reading)):
                     self._above.pop(key, None)
                     events += self._release(key, RestoreCause.EXEMPT)
                     continue
                 # downs=None — адреса нет в HAProxy релея (цель DNAT) или нода старая: отключать нечем
                 if reading.downs is None or reading.samples < MIN_SAMPLES:
                     continue
-                observed.append(_Observed(key, reading, target_mode))
-            paused = self._relay_paused(snapshot, observed, policy, now, events)
-            for item in observed:
+                considered += 1
+                # Здоровому адресу без записи и таймера считать нечего — таких почти все
+                if key in self.pairs or key in self._above or _is_bad(reading, target_mode, policy):
+                    touched.append(_Observed(key, reading, target_mode))
+            paused = self._relay_paused(snapshot, touched, considered, policy, now, events)
+            for item in touched:
                 seen.add(item.key)
                 events += self._step(item, snapshot.name, policy, mode, paused, now)
         self._close_silent(seen, now)
@@ -297,31 +304,33 @@ class QuarantineTracker:
         """Адрес → наибольшее число отключений одной его пары за сутки."""
         edge = now - STRIKE_WINDOW_SEC
         chronic: dict[str, int] = {}
-        for pair in self.pairs.values():
+        # Снимок списком: страницу читают, пока расчёт цикла идёт в другом потоке
+        for pair in list(self.pairs.values()):
             recent = sum(1 for moment in pair.strikes if moment > edge)
             if recent >= policy.chronic_strikes:
                 chronic[pair.target] = max(chronic.get(pair.target, 0), recent)
         return chronic
 
-    def _relay_paused(self, snapshot: RelaySnapshot, observed: list[_Observed], policy: QuarantinePolicy,
-                      now: float, events: list[Event]) -> bool:
-        bad = sum(1 for item in observed if self._counts_as_bad(item, policy))
+    def _relay_paused(self, snapshot: RelaySnapshot, touched: list[_Observed], considered: int,
+                      policy: QuarantinePolicy, now: float, events: list[Event]) -> bool:
+        """considered — все учитываемые пары релея; плохие бывают только среди touched."""
+        bad = sum(1 for item in touched if self._counts_as_bad(item, policy))
         pause = self._pauses.get(snapshot.server_id)
         if pause is None:
-            if bad < RELAY_TROUBLE_MIN_PAIRS or bad <= len(observed) * RELAY_TROUBLE_ENTER_SHARE:
+            if bad < RELAY_TROUBLE_MIN_PAIRS or bad <= considered * RELAY_TROUBLE_ENTER_SHARE:
                 return False
             self._pauses[snapshot.server_id] = RelayPause(snapshot.name, now, now)
             events.append(Event(EventKind.RELAY_PAUSED, snapshot.server_id, snapshot.name))
         else:
             pause.last_seen = now
-            if bad > len(observed) * RELAY_TROUBLE_EXIT_SHARE:
+            if bad > considered * RELAY_TROUBLE_EXIT_SHARE:
                 pause.calm_since = None
             else:
                 pause.calm_since = pause.calm_since if pause.calm_since is not None else now
                 if now - pause.calm_since >= policy.sustained_sec:
                     del self._pauses[snapshot.server_id]
                     return False
-        for item in observed:
+        for item in touched:
             self._above.pop(item.key, None)
         return True
 
