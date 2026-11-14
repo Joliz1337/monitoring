@@ -893,6 +893,20 @@ class PacketLossRelayIncident(Base):
     reported = Column(Integer, nullable=False)
 
 
+class BackendQuarantine(Base):
+    """Пара «релей → адрес» автоотключения (см. backend_quarantine): отключена,
+    ждёт ответа ноды или хранит счёт отключений за сутки.
+
+    Хранится, чтобы перезапуск панели не вернул всё отключённое разом и не
+    прислал уже известные отключения заново."""
+    __tablename__ = "backend_quarantines"
+
+    relay_id = Column(Integer, primary_key=True)
+    target = Column(String(64), primary_key=True)  # ip:port
+    state = Column(String(20), nullable=False)
+    payload = Column(Text, nullable=False)  # JSON записи Pair без таймеров
+
+
 class AlertHistory(Base):
     """Лог отправленных алертов мониторинга"""
     __tablename__ = "alert_history"

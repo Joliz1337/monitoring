@@ -160,12 +160,14 @@ class CollectorCase(unittest.IsolatedAsyncioTestCase):
         traffic = mock.Mock(start=mock.AsyncMock(), stop=mock.AsyncMock(), flush=mock.AsyncMock())
         traffic.observe.return_value = SimpleNamespace(rx_bytes_per_sec=0.0, tx_bytes_per_sec=0.0)
         weights_runner = mock.Mock(start=mock.AsyncMock(), stop=mock.AsyncMock())
+        self.quarantine_runner = mock.Mock(start=mock.AsyncMock(), stop=mock.AsyncMock())
         for name, replacement in (
             ("async_session", self.db),
             ("get_node_client", mock.Mock(return_value=self.nodes)),
             ("get_latest_metrics", mock.Mock(return_value=self.latest)),
             ("get_traffic_ingest", mock.Mock(return_value=traffic)),
             ("get_load_weights_runner", mock.Mock(return_value=weights_runner)),
+            ("get_quarantine_runner", mock.Mock(return_value=self.quarantine_runner)),
         ):
             patcher = mock.patch.object(metrics_collector, name, replacement)
             patcher.start()
@@ -180,6 +182,11 @@ class CollectorCase(unittest.IsolatedAsyncioTestCase):
 
 
 class LatestAnswerInMemoryTest(CollectorCase):
+    async def test_cycle_wakes_the_backend_auto_disable(self):
+        # Без этого автоотключение узнавало бы о потерях только на своём минутном повторе
+        await self.cycle()
+        self.quarantine_runner.wake.assert_called_once_with()
+
     async def test_answer_of_a_polled_node_is_readable_from_memory(self):
         await self.cycle()
         self.assertEqual(self.latest.get(1)["cpu"]["usage_percent"], 12.5)

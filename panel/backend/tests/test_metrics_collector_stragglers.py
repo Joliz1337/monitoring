@@ -137,12 +137,14 @@ class StragglerCase(unittest.IsolatedAsyncioTestCase):
         traffic = mock.Mock(start=mock.AsyncMock(), stop=mock.AsyncMock(), flush=mock.AsyncMock())
         traffic.observe.return_value = SimpleNamespace(rx_bytes_per_sec=0.0, tx_bytes_per_sec=0.0)
         weights_runner = mock.Mock(start=mock.AsyncMock(), stop=mock.AsyncMock())
+        quarantine_runner = mock.Mock(start=mock.AsyncMock(), stop=mock.AsyncMock())
         for name, replacement in (
             ("async_session", self.db),
             ("get_node_client", mock.Mock(return_value=self.nodes)),
             ("get_latest_metrics", mock.Mock(return_value=LatestMetrics())),
             ("get_traffic_ingest", mock.Mock(return_value=traffic)),
             ("get_load_weights_runner", mock.Mock(return_value=weights_runner)),
+            ("get_quarantine_runner", mock.Mock(return_value=quarantine_runner)),
         ):
             patcher = mock.patch.object(metrics_collector, name, replacement)
             patcher.start()
