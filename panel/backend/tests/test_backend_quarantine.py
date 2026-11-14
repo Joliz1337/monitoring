@@ -96,6 +96,10 @@ class TrackerTestCase(unittest.TestCase):
 
     def disable(self, relay_id: int = RELAY, ip: str = IP) -> list[Event]:
         """Падения дают решение сразу; ответ ноды его подтверждает."""
+        pair = self.tracker.pairs.get((relay_id, f"{ip}:443"))
+        if pair is not None and pair.hold_until is not None and self.now < pair.hold_until:
+            # Только что возвращённую пару модуль какое-то время не рассматривает
+            self.step(snap(reading(0.0, ip=ip), relay_id=relay_id), advance=pair.hold_until - self.now)
         self.step(snap(reading(downs=3, ip=ip), relay_id=relay_id))
         return self.answer(node_answer(f"{ip}:443"), relay_id)
 
@@ -227,12 +231,38 @@ class BlockedTests(TrackerTestCase):
         self.assertEqual(self.state(), PairState.BLOCKED)
 
     def test_reapplying_after_the_guard_is_the_same_disable(self):
-        [first] = self.disable()
+        self.disable()
         self.answer(node_answer(sessions=(), skipped=("last_server",)), advance=60)
-        [again] = self.answer(node_answer(), advance=60)
-        self.assertEqual((again.kind, again.strikes), (EventKind.DISABLED, 1))
+        self.assertEqual(self.answer(node_answer(), advance=60), [])
+        pair = self.tracker.pairs[(RELAY, TARGET)]
+        self.assertEqual((pair.state, len(pair.strikes)), (PairState.DISABLED, 1))
         # Срок считается от первого отключения, а не начинается заново
-        self.assertEqual(again.term_sec, first.term_sec - 120)
+        self.assertEqual(pair.until, pair.disabled_at + 600)
+
+    def test_flapping_neighbour_is_reported_once(self):
+        # Сосед мигает: нода то снимает отключение, то ставит снова — каждую минуту
+        self.disable()
+        events = []
+        for _ in range(5):
+            events += self.answer(node_answer(sessions=(), skipped=("last_server",)), advance=60)
+            events += self.answer(node_answer(), advance=60)
+        self.assertEqual([(e.kind, e.cause) for e in events], [(EventKind.RESTORED, RestoreCause.GUARD)])
+
+    def test_next_episode_reports_the_guard_again(self):
+        self.disable()
+        self.answer(node_answer(sessions=(), skipped=("last_server",)), advance=60)
+        self.answer(node_answer(), advance=60)
+        self.step(snap(reading(0.0)), advance=1)
+        self.step(snap(reading(0.0)), advance=600)
+        self.disable()
+        events = self.answer(node_answer(sessions=(), skipped=("last_server",)), advance=60)
+        self.assertEqual(kinds(events), [EventKind.RESTORED])
+
+    def test_partial_refusal_is_remembered_on_a_disabled_pair(self):
+        self.step(snap(reading(downs=3)))
+        self.answer(node_answer(sessions=(4,), skipped=("share_limit",)))
+        pair = self.tracker.pairs[(RELAY, TARGET)]
+        self.assertEqual((pair.state, pair.node), (PairState.DISABLED, {"partial": "share_limit"}))
 
 
 class VanishedAddressTests(TrackerTestCase):
@@ -296,6 +326,17 @@ class ReturnTests(TrackerTestCase):
         self.step(snap(reading(5.0)), advance=600)
         self.assertEqual(self.step(snap(reading(5.0)), advance=600), [])
         self.assertEqual(self.state(), PairState.DISABLED)
+
+    def test_stale_reading_right_after_return_does_not_disable_again(self):
+        # Нода обнуляет падения при возврате, но замер, снятый до него, панель ещё считает свежим 90 с
+        self.disable()
+        self.step(snap(reading(0.0, downs=3)), advance=1)
+        self.assertEqual(kinds(self.step(snap(reading(0.0, downs=3)), advance=600)), [EventKind.RESTORED])
+        self.step(snap(reading(0.0, downs=3)), advance=89)
+        self.assertEqual(self.tracker.desired(), {})
+        # Падения держатся и после этого — сервер и правда снова падает
+        self.step(snap(reading(0.0, downs=3)), advance=2)
+        self.assertEqual(self.tracker.desired(), {RELAY: [TARGET]})
 
     def test_downs_do_not_hold_a_disabled_server(self):
         # В обслуживании HAProxy сервер не проверяет: счётчик падений там молчит
@@ -399,6 +440,39 @@ class RelayTroubleTests(TrackerTestCase):
         self.assertEqual(self.tracker.desired(), {})
         self.step(self.fleet(1), advance=1)
         self.assertEqual(self.tracker.desired(), {RELAY: ["10.0.0.1:443"]})
+
+    def test_downs_gathered_during_the_pause_do_not_disable_after_it(self):
+        # Пока у релея не было сети, HAProxy ронял все серверы: падения лежат в окне ещё полчаса
+        trouble = snap(*(reading(40.0, downs=6, ip=f"10.0.0.{i + 1}") for i in range(6)))
+        self.step(trouble)
+        self.step(trouble, advance=300)
+        after = snap(*(reading(0.0, downs=6 if i == 0 else 0, ip=f"10.0.0.{i + 1}") for i in range(6)))
+        self.step(after, advance=10)
+        self.step(after, advance=180)
+        self.assertEqual(self.tracker.paused_relays(), {})
+        self.assertEqual(self.tracker.desired(), {})
+        self.step(after, advance=1790)
+        self.assertEqual(self.tracker.desired(), {})
+        # Окно падений ноды прошло: такие падения уже новые
+        self.step(after, advance=20)
+        self.assertEqual(self.tracker.desired(), {RELAY: ["10.0.0.1:443"]})
+
+    def test_loss_still_disables_while_old_downs_are_ignored(self):
+        trouble = snap(*(reading(40.0, downs=6, ip=f"10.0.0.{i + 1}") for i in range(6)))
+        self.step(trouble)
+        after = snap(*(reading(40.0 if i == 0 else 0.0, downs=0, ip=f"10.0.0.{i + 1}") for i in range(6)))
+        self.step(after, advance=10)
+        self.step(after, advance=180)
+        self.step(after, advance=180)
+        self.assertEqual(self.tracker.desired(), {RELAY: ["10.0.0.1:443"]})
+
+    def test_pending_and_blocked_pairs_do_not_apply_during_the_pause(self):
+        calm = [reading(0.0, ip=f"10.0.0.{i}") for i in range(2, 7)]
+        self.step(snap(reading(downs=3, ip="10.0.0.1"), *calm))
+        self.answer(node_answer("10.0.0.1:443", sessions=(), skipped=("share_limit",)))
+        self.assertEqual(self.tracker.desired(), {RELAY: ["10.0.0.1:443"]})
+        self.step(self.fleet(4), advance=10)
+        self.assertEqual(self.tracker.desired(), {})
 
     def test_quarter_bad_is_still_calm_enough_to_leave(self):
         self.step(self.fleet(5, total=8))
@@ -537,10 +611,10 @@ class ObserveModeTests(TrackerTestCase):
 
     def test_entries_count_towards_chronic(self):
         for _ in range(3):
-            self.step(snap(reading(downs=3)), advance=10)
+            self.step(snap(reading(downs=3)), advance=100)
             self.step(snap(reading(0.0, downs=0)), advance=10)
             self.step(snap(reading(0.0, downs=0)), advance=600)
-        self.assertEqual(kinds(self.step(snap(reading(downs=3)), advance=10)), [EventKind.DISABLED, EventKind.CHRONIC])
+        self.assertEqual(kinds(self.step(snap(reading(downs=3)), advance=100)), [EventKind.DISABLED, EventKind.CHRONIC])
 
 
 class ClearTests(TrackerTestCase):

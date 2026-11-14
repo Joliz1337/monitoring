@@ -44,6 +44,8 @@ MANUAL_HOLD_SEC = 3600
 NO_DATA_CLOSE_SEC = 3600
 # Один ответ «адреса нет» бывает и сразу после reload — запись закрывает второй подряд
 MISSING_ANSWERS_TO_CLOSE = 2
+# Столько нода помнит падения сервера (DOWNS_WINDOW_SEC счётчика падений на ноде)
+DOWNS_WINDOW_SEC = 1800
 RELAY_TROUBLE_MIN_PAIRS = 3
 RELAY_TROUBLE_ENTER_SHARE = 0.5
 RELAY_TROUBLE_EXIT_SHARE = 0.25
@@ -140,11 +142,13 @@ class Pair:
     calm_since: Optional[float] = None
     strikes: list[float] = field(default_factory=list)
     hold_until: Optional[float] = None
-    # Почему не отключено: {"error": код}; у отключённой пары пусто
+    # Почему не отключено: {"error": код}; отключено не во всех правилах: {"partial": код}
     node: dict = field(default_factory=dict)
     missing: int = 0
     sessions: int = 0
     chronic_notified: bool = False
+    # Нода уже снимала отключение в этом эпизоде (сосед упал) — второй раз об этом не пишется
+    guard_reported: bool = False
 
     def to_dict(self) -> dict:
         return {**asdict(self), "state": self.state.value, "reason_kind": self.reason_kind.value}
@@ -213,6 +217,9 @@ class QuarantineTracker:
     # Пара → с какого момента потери держатся не ниже порога
     _above: dict[PairKey, float] = field(default_factory=dict)
     _pauses: dict[int, RelayPause] = field(default_factory=dict)
+    # Релей → до какого момента его падения не повод отключать: пока у релея не было
+    # сети, HAProxy ронял все серверы, и эти падения лежат в окне ноды ещё полчаса
+    _downs_ignored_until: dict[int, float] = field(default_factory=dict)
 
     def evaluate(self, snapshots: list[RelaySnapshot], rules: TargetRules, exempt: Exemptions,
                  policy: QuarantinePolicy, mode: Mode, now: float) -> list[Event]:
@@ -294,6 +301,7 @@ class QuarantineTracker:
             events += [event for event in self._release(key, cause) if not event.observe]
         self._above.clear()
         self._pauses.clear()
+        self._downs_ignored_until.clear()
         self._forget_old(now)
         return events
 
@@ -329,6 +337,7 @@ class QuarantineTracker:
                 pause.calm_since = pause.calm_since if pause.calm_since is not None else now
                 if now - pause.calm_since >= policy.sustained_sec:
                     del self._pauses[snapshot.server_id]
+                    self._downs_ignored_until[snapshot.server_id] = now + DOWNS_WINDOW_SEC
                     return False
         for item in touched:
             self._above.pop(item.key, None)
@@ -350,6 +359,9 @@ class QuarantineTracker:
                 pair.calm_since = None
             pair.last_data_at = now
             pair.relay_name = relay_name
+            if paused and pair.state in (PairState.PENDING, PairState.BLOCKED):
+                # Ещё не отключённое при беде релея не отключается: решение примется заново после неё
+                self._idle(pair)
         if pair is None or pair.state is PairState.IDLE:
             return self._step_idle(item, pair, relay_name, policy, mode, paused, now)
         return self._step_active(item, pair, policy, now)
@@ -388,7 +400,8 @@ class QuarantineTracker:
                 return ReasonKind.LOSS
         else:
             self._above.pop(item.key, None)
-        if _counts_downs(item.mode) and (item.reading.downs or 0) >= policy.downs_threshold:
+        downs_trusted = now >= self._downs_ignored_until.get(item.key[0], 0.0)
+        if downs_trusted and _counts_downs(item.mode) and (item.reading.downs or 0) >= policy.downs_threshold:
             return ReasonKind.DOWNS
         return None
 
@@ -406,21 +419,28 @@ class QuarantineTracker:
             return []
         if pair.state is PairState.DISABLED and pair.until is not None and now < pair.until:
             return []
-        return self._release(item.key, RestoreCause.CALM)
+        events = self._release(item.key, RestoreCause.CALM)
+        # Нода обнуляет падения адреса при возврате, но замер, снятый до него, реестр
+        # считает свежим ещё STALE_AFTER_SEC: по нему пара отключилась бы заново
+        pair.hold_until = now + STALE_AFTER_SEC
+        return events
 
     def _apply_answer(self, pair: Pair, answer: dict, now: float) -> list[Event]:
         applied = answer.get("applied") or []
+        skipped = answer.get("skipped") or []
         if applied:
-            pair.missing, pair.node = 0, {}
-            if pair.state is PairState.DISABLED:
-                return []
+            pair.missing = 0
+            pair.node = {"partial": str(skipped[0].get("reason"))} if skipped else {}
             pair.state = PairState.DISABLED
-            if pair.disabled_at is None:
-                pair.disabled_at = now
-                self._strike(pair, now)
-                pair.until = now + TERMS_SEC[min(len(pair.strikes), len(TERMS_SEC)) - 1]
-                pair.sessions = sum(int(row.get("sessions") or 0) for row in applied)
-            return [self._event(EventKind.DISABLED, pair, term_sec=max(0.0, (pair.until or now) - now))]
+            if pair.disabled_at is not None:
+                # Тот же эпизод: нода сняла отключение (сосед упал) и поставила снова —
+                # мигающий сосед не должен слать сообщение и растить счёт каждую минуту
+                return []
+            pair.disabled_at = now
+            self._strike(pair, now)
+            pair.until = now + TERMS_SEC[min(len(pair.strikes), len(TERMS_SEC)) - 1]
+            pair.sessions = sum(int(row.get("sessions") or 0) for row in applied)
+            return [self._event(EventKind.DISABLED, pair, term_sec=pair.until - now)]
         if not answer.get("found"):
             pair.missing += 1
             if pair.missing >= MISSING_ANSWERS_TO_CLOSE:
@@ -429,12 +449,12 @@ class QuarantineTracker:
                 pair.state, pair.node = PairState.BLOCKED, {"error": NOT_FOUND}
             return []
         pair.missing = 0
-        skipped = answer.get("skipped") or []
         reason = str(skipped[0].get("reason")) if skipped else NodeFailure.ERROR.value
         events = []
-        if pair.state is PairState.DISABLED:
+        if pair.state is PairState.DISABLED and not pair.guard_reported:
             # Нода сняла отключение сама: сервер остался последним живым в правиле
             events.append(self._event(EventKind.RESTORED, pair, cause=RestoreCause.GUARD))
+            pair.guard_reported = True
         pair.state, pair.node = PairState.BLOCKED, {"error": reason}
         return events
 
@@ -451,7 +471,7 @@ class QuarantineTracker:
     def _idle(pair: Pair) -> None:
         pair.state = PairState.IDLE
         pair.disabled_at = pair.until = pair.calm_since = None
-        pair.node, pair.missing = {}, 0
+        pair.node, pair.missing, pair.guard_reported = {}, 0, False
 
     def _close_silent(self, seen: set[PairKey], now: float) -> None:
         """Без данных час — запись закрывается молча: что с адресом, неизвестно, а
@@ -463,6 +483,9 @@ class QuarantineTracker:
         self._pauses = {
             relay_id: pause for relay_id, pause in self._pauses.items()
             if now - pause.last_seen <= NO_DATA_CLOSE_SEC
+        }
+        self._downs_ignored_until = {
+            relay_id: until for relay_id, until in self._downs_ignored_until.items() if until > now
         }
 
     def _forget_old(self, now: float) -> None:
