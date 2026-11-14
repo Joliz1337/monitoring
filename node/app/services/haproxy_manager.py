@@ -599,7 +599,11 @@ resolvers mydns
 
     def read_live_proxies(self) -> list[dict]:
         """Срез show stat мимо кэша get_stats: после смены весов нужен текущий."""
-        return self._parse_show_stat(self.runtime_command("show stat"))
+        reply = self.runtime_command("show stat")
+        # Ответ без заголовка — сбой чтения, а не конфиг без серверов
+        if not reply.lstrip().startswith("#"):
+            raise StatsSocketUnavailableError("HAProxy did not answer 'show stat'")
+        return self._parse_show_stat(reply)
 
     def worker_pid(self) -> Optional[str]:
         """Pid воркера, ответившего на сокете: после reload он другой."""

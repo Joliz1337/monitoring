@@ -265,6 +265,21 @@ class ManagerRuntimeCommandTests(unittest.TestCase):
             [proxy] = manager.read_live_proxies()
         self.assertEqual([(s["name"], s["status"], s["weight"]) for s in proxy["servers"]], [("srv1", "UP", 6)])
 
+    def test_read_live_proxies_refuses_an_answer_without_stat_header(self):
+        # Пустой или оборванный ответ не должен читаться как «серверов нет»:
+        # по такому срезу нода сочла бы отключённые серверы удалёнными из конфига
+        manager = self.manager("global\n    stats socket /run/haproxy.sock level admin\n")
+        for reply in ("", "\n", "Unknown command.\n"):
+            with self.subTest(reply=reply):
+                with mock.patch.object(HAProxyManager, "_query_stats_socket", return_value=reply):
+                    with self.assertRaises(StatsSocketUnavailableError):
+                        manager.read_live_proxies()
+
+    def test_read_live_proxies_accepts_a_config_without_proxies(self):
+        manager = self.manager("global\n    stats socket /run/haproxy.sock level admin\n")
+        with mock.patch.object(HAProxyManager, "_query_stats_socket", return_value="# pxname,svname,status,\n"):
+            self.assertEqual(manager.read_live_proxies(), [])
+
     def test_worker_pid_from_show_info(self):
         manager = self.manager("global\n    stats socket /run/haproxy.sock level admin\n")
         info = "Name: HAProxy\nVersion: 3.2.25\nPid: 4242\nUptime: 0d 0h01m02s\n"
