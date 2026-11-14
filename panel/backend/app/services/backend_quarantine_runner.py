@@ -275,7 +275,8 @@ class QuarantineRunner:
         )
 
     async def _push(self, settings: QuarantineSettings, now: float) -> list[Event]:
-        desired = self.tracker.desired() if settings.mode is Mode.ENFORCE else {}
+        # В наблюдении и после выключения трекер ничего не хочет сам: пары «отключил бы» в набор не идут
+        desired = self.tracker.desired()
         # Релей без отключений остаётся в рассылке, пока не получит пустой список
         due = {
             relay_id: desired.get(relay_id, [])[:NODE_MAX_TARGETS]
