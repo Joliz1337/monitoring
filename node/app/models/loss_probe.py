@@ -17,6 +17,9 @@ class ProbeStats(BaseModel):
     # Средняя задержка ответивших попыток; None — не ответила ни одна
     rtt_ms: Optional[float] = None
     samples: int
+    # Ответил ли сервер на проверку «как клиент» (начало TLS-рукопожатия): подключение
+    # проходит и там, где данные не идут. None — проверка не идёт либо подключиться не удалось
+    answers: Optional[bool] = None
 
 
 class LossProbeEntry(ProbeStats):

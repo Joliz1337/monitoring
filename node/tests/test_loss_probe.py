@@ -31,7 +31,11 @@ from app.models.haproxy import (  # noqa: E402
 from app.models.loss_probe import CHECK_ATTEMPTS_MAX, LossCheckRequest  # noqa: E402
 from app.services.haproxy_down_counter import DownCounter  # noqa: E402
 from app.services.haproxy_traffic_watch import TrafficWatch  # noqa: E402
+from app.services.client_probe import ProxyHeader  # noqa: E402
 from app.services.loss_probe import (  # noqa: E402
+    CLIENT_PROBE_INTERVAL_SEC,
+    CLIENT_PROBE_LEASE_SEC,
+    CLIENT_PROBE_VALID_SEC,
     APPLY_SETTLE_SEC,
     MAX_TARGETS,
     TARGETS_REFRESH_SEC,
@@ -44,6 +48,7 @@ from app.services.loss_probe import (  # noqa: E402
     check_target,
     discover_targets,
     dnat_targets,
+    haproxy_proxy_headers,
     haproxy_targets,
     parse_addr,
     readable_sources,
@@ -246,7 +251,7 @@ class LossProbeTests(unittest.TestCase):
         self.assertEqual(
             probe.snapshot({Source.HAPROXY}),
             [{"ip": "10.0.0.5", "port": 443, "loss_pct": 0.0, "rtt_ms": 6.0, "samples": 1,
-              "downs": 0, "stalled": None}],
+              "answers": None, "downs": 0, "stalled": None}],
         )
 
     def test_snapshot_reports_downs_for_haproxy_targets_only(self):
@@ -481,6 +486,153 @@ class ReadableSourcesTests(unittest.TestCase):
     def test_follows_node_capabilities(self):
         self.assertEqual(readable_sources(parse_capabilities("haproxy:ro traffic")), {Source.HAPROXY})
         self.assertEqual(readable_sources(parse_capabilities("monitoring")), set())
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class FakeClientProbe:
+    """Подменяет проверку «как клиент»: вердикт по адресу; None — подключиться не удалось."""
+
+    def __init__(self, verdicts: dict[tuple[str, int], object]):
+        self.verdicts = verdicts
+        self.calls: list[tuple[tuple[str, int], object]] = []
+
+    async def __call__(self, ip: str, port: int, proxy=None):
+        self.calls.append(((ip, port), proxy))
+        return self.verdicts.get((ip, port))
+
+
+class ProxyHeaderDiscoveryTests(unittest.TestCase):
+    CONFIG = (
+        "defaults\n    mode tcp\n\n"
+        "backend backend_tcp_lb\n"
+        "    server srv1 10.0.0.5:443 check send-proxy check-send-proxy\n"
+        "    server srv2 10.0.0.6:443 check send-proxy-v2\n"
+        "    server srv3 10.0.0.7:443 check\n"
+        "    # server srv4 10.0.0.8:443 check send-proxy\n"
+        "backend backend_tcp_other\n"
+        "    server srv1 10.0.0.5:443 check send-proxy-v2\n"
+        "    server srv9 backend.example:443 check send-proxy\n"
+    )
+
+    def test_header_kind_is_read_from_the_server_line(self):
+        self.assertEqual(haproxy_proxy_headers(self.CONFIG), {
+            # Один адрес в двух правилах: сервер с v2 заголовок v1 не поймёт
+            ("10.0.0.5", 443): ProxyHeader.V2,
+            ("10.0.0.6", 443): ProxyHeader.V2,
+        })
+
+    def test_check_option_alone_is_not_a_header_for_clients(self):
+        config = "backend b\n    server srv1 10.0.0.5:443 check check-send-proxy\n"
+        self.assertEqual(haproxy_proxy_headers(config), {})
+
+    def test_plain_header(self):
+        config = "backend b\n    server srv1 10.0.0.5:443 send-proxy check\n"
+        self.assertEqual(haproxy_proxy_headers(config), {("10.0.0.5", 443): ProxyHeader.V1})
+
+
+class ClientProbeRoundTests(unittest.IsolatedAsyncioTestCase):
+    """Проверка «как клиент»: идёт только по просьбе панели, реже замера подключений."""
+
+    BACKEND = ("10.0.0.5", 443)
+    FORWARDED = ("10.0.0.6", 443)
+
+    def make(self, verdicts: dict, proxies: dict | None = None) -> LossProbe:
+        self.clock = FakeClock()
+        self.client = FakeClientProbe(verdicts)
+        targets = {self.BACKEND: {Source.HAPROXY}, self.FORWARDED: {Source.DNAT}}
+        self.targets = targets
+        probe = LossProbe(
+            discover=lambda: Discovery(self.targets), attempt_fn=FakeAttempts({}),
+            client_probe_fn=self.client, proxy_headers_fn=lambda: proxies or {}, clock=self.clock,
+        )
+        probe.refresh_targets(targets)
+        return probe
+
+    async def round(self, probe: LossProbe, advance: float = 0.0, ask: bool = True) -> None:
+        self.clock.now += advance
+        if ask:
+            probe.request_client_probe()
+        await probe.tick(self.clock.now)
+        if probe._client_task is not None:
+            await probe._client_task
+
+    def answers(self, probe: LossProbe) -> dict:
+        return {entry["ip"]: entry["answers"] for entry in probe.snapshot(set(Source))}
+
+    async def test_nothing_is_probed_until_the_panel_asks(self):
+        probe = self.make({self.BACKEND: True})
+        await self.round(probe, ask=False)
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.answers(probe), {"10.0.0.5": None, "10.0.0.6": None})
+
+    async def test_asked_probe_tells_who_answers(self):
+        probe = self.make({self.BACKEND: True, self.FORWARDED: False})
+        await self.round(probe)
+        self.assertEqual(self.answers(probe), {"10.0.0.5": True, "10.0.0.6": False})
+
+    async def test_badge_of_the_address_carries_the_verdict(self):
+        probe = self.make({self.BACKEND: False})
+        await self.round(probe)
+        self.assertIs(probe.stats_for(self.BACKEND).answers, False)
+
+    async def test_rounds_are_half_a_minute_apart(self):
+        probe = self.make({self.BACKEND: True})
+        await self.round(probe)
+        await self.round(probe, advance=CLIENT_PROBE_INTERVAL_SEC - 1)
+        self.assertEqual(len(self.client.calls), 2)
+        await self.round(probe, advance=1)
+        self.assertEqual(len(self.client.calls), 4)
+
+    async def test_probing_stops_when_the_panel_stops_asking(self):
+        probe = self.make({self.BACKEND: False})
+        await self.round(probe)
+        await self.round(probe, advance=CLIENT_PROBE_LEASE_SEC, ask=False)
+        self.assertEqual(len(self.client.calls), 2)
+        # Старый вердикт без проверки — не вердикт
+        self.assertEqual(self.answers(probe), {"10.0.0.5": None, "10.0.0.6": None})
+
+    async def test_failed_connection_keeps_the_last_verdict_for_a_while(self):
+        probe = self.make({self.BACKEND: False})
+        await self.round(probe)
+        self.client.verdicts = {}
+        await self.round(probe, advance=CLIENT_PROBE_INTERVAL_SEC)
+        await self.round(probe, advance=CLIENT_PROBE_VALID_SEC - CLIENT_PROBE_INTERVAL_SEC)
+        self.assertIs(self.answers(probe)["10.0.0.5"], False)
+        await self.round(probe, advance=1)
+        self.assertIsNone(self.answers(probe)["10.0.0.5"])
+
+    async def test_rule_with_proxy_protocol_is_probed_with_its_header(self):
+        probe = self.make({}, proxies={self.BACKEND: ProxyHeader.V2})
+        await self.round(probe)
+        self.assertEqual(sorted(self.client.calls), [(self.BACKEND, ProxyHeader.V2), (self.FORWARDED, None)])
+
+    async def test_verdict_of_a_removed_address_is_forgotten(self):
+        probe = self.make({self.BACKEND: False, self.FORWARDED: False})
+        await self.round(probe)
+        self.targets = {self.BACKEND: {Source.HAPROXY}}
+        probe.refresh_targets(self.targets)
+        await self.round(probe, advance=CLIENT_PROBE_INTERVAL_SEC)
+        self.targets = {self.BACKEND: {Source.HAPROXY}, self.FORWARDED: {Source.DNAT}}
+        probe.refresh_targets(self.targets)
+        await probe.run_round()
+        self.assertEqual(self.answers(probe), {"10.0.0.5": False, "10.0.0.6": None})
+
+    async def test_failing_round_does_not_stop_the_loss_probe(self):
+        async def broken(ip: str, port: int, proxy=None):
+            raise RuntimeError("probe bug")
+
+        probe = self.make({})
+        probe._client_probe = broken
+        with self.assertLogs("app.services.loss_probe", level="ERROR"):
+            await self.round(probe)
+        self.assertEqual(self.answers(probe), {"10.0.0.5": None, "10.0.0.6": None})
 
 
 if __name__ == "__main__":

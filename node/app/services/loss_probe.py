@@ -12,6 +12,11 @@
 
 Адреса нода берёт сама: серверы бэкендов из `show stat` HAProxy и цели
 TCP-правил DNAT. Ничего из этого нет — цикл простаивает.
+
+Подключение проходит и там, где данные не идут, поэтому по просьбе панели к
+замеру добавляется проверка «как клиент» (client_probe): раз в полминуты с
+каждым адресом начинается TLS-рукопожатие. Просьба приходит с каждым запросом
+метрик и действует две минуты — без панели нода серверам ничего не шлёт.
 """
 
 import asyncio
@@ -28,6 +33,8 @@ from app.capabilities import CapabilityPolicy
 from app.models.dnat import DnatRule, DnatStateResponse
 from app.models.haproxy import HAProxyStatsResponse
 from app.models.loss_probe import ProbeStats
+from app.services import client_probe
+from app.services.client_probe import ProxyHeader
 from app.services.haproxy_down_counter import RowKey, Target, get_down_counter
 from app.services.haproxy_traffic_watch import Counters, counts_bytes_continuously, get_traffic_watch
 
@@ -52,6 +59,13 @@ CHECK_SPACING_SEC = 0.05
 # держит прежние адреса не дольше этого срока: HAProxy, остановленный насовсем,
 # не должен оставлять проверки своих бэкендов навсегда
 UNKNOWN_GRACE_SEC = 60.0
+# Рукопожатие тяжелее одного SYN и на сервере с сайтом-заглушкой уходит дальше,
+# на сам сайт: полминуты хватает, чтобы заметить молчание, и не выглядит потоком
+CLIENT_PROBE_INTERVAL_SEC = 30.0
+CLIENT_PROBE_LEASE_SEC = 120.0
+# Раунд, в котором подключиться не удалось, вердикта не даёт: прежний живёт столько
+CLIENT_PROBE_VALID_SEC = 90.0
+MAX_CONCURRENT_CLIENT_PROBES = 32
 
 
 class Source(str, Enum):
@@ -109,6 +123,25 @@ def haproxy_traffic(stats: HAProxyStatsResponse) -> list[tuple[RowKey, Target, C
         for server in proxy.servers
         if (target := parse_addr(server.addr or "")) is not None
     ]
+
+
+def haproxy_proxy_headers(config: str) -> dict[Target, ProxyHeader]:
+    """Каким PROXY-заголовком правила HAProxy открывают соединение с адресом. Адрес из
+    нескольких правил берёт старший вид: сервер, ждущий v2, заголовок v1 не поймёт."""
+    headers: dict[Target, ProxyHeader] = {}
+    for line in config.splitlines():
+        words = line.split("#", 1)[0].split()
+        if len(words) < 3 or words[0] != "server":
+            continue
+        target = parse_addr(words[2])
+        if target is None:
+            continue
+        options = words[3:]
+        if any(option.startswith("send-proxy-v2") for option in options):
+            headers[target] = ProxyHeader.V2
+        elif "send-proxy" in options:
+            headers.setdefault(target, ProxyHeader.V1)
+    return headers
 
 
 def haproxy_targets(stats: HAProxyStatsResponse) -> set[Target]:
@@ -193,11 +226,23 @@ class LossProbe:
         attempt_fn: Callable[[str, int], Awaitable[Optional[float]]] = attempt,
         downs_fn: Callable[[Target], int] = lambda _target: 0,
         stalled_fn: Callable[[Target], Optional[bool]] = lambda _target: None,
+        client_probe_fn: Callable[[str, int, Optional[ProxyHeader]], Awaitable[Optional[bool]]] = client_probe.probe,
+        proxy_headers_fn: Callable[[], dict[Target, ProxyHeader]] = dict,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._discover = discover
         self._attempt = attempt_fn
         self._downs = downs_fn
         self._stalled = stalled_fn
+        self._client_probe = client_probe_fn
+        self._proxy_headers = proxy_headers_fn
+        self._clock = clock
+        # Адрес → ответил ли на последнюю проверку «как клиент» и когда она была
+        self._answers: dict[Target, tuple[bool, float]] = {}
+        self._client_wanted_until = 0.0
+        self._next_client_round = 0.0
+        self._client_task: Optional[asyncio.Task] = None
+        self._client_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLIENT_PROBES)
         self._windows: dict[Target, AttemptWindow] = {}
         self._sources: dict[Target, set[Source]] = {}
         self._unknown_since: dict[Source, float] = {}
@@ -220,6 +265,7 @@ class LossProbe:
             logger.warning("Loss probe: %s targets, probing the first %s", len(merged), MAX_TARGETS)
         wanted = dict(sorted(merged.items())[:MAX_TARGETS])
         self._windows = {target: self._windows.get(target) or AttemptWindow() for target in wanted}
+        self._answers = {target: seen for target, seen in self._answers.items() if target in wanted}
         self._sources = wanted
 
     def request_refresh(self) -> None:
@@ -231,7 +277,48 @@ class LossProbe:
             discovery = await asyncio.to_thread(self._discover)
             self.refresh_targets(discovery.targets, discovery.unknown, now)
             self._next_refresh = now + TARGETS_REFRESH_SEC
+        self._start_client_round(now)
         await self.run_round()
+
+    def request_client_probe(self) -> None:
+        """Панель просит проверять адреса как клиент; без повторной просьбы проверка прекращается."""
+        self._client_wanted_until = self._clock() + CLIENT_PROBE_LEASE_SEC
+
+    def _start_client_round(self, now: float) -> None:
+        """Раунд идёт отдельной задачей: его таймаут в разы длиннее такта замера подключений."""
+        if now >= self._client_wanted_until:
+            # Вердикт без свежей проверки вердиктом не считается
+            self._answers.clear()
+            return
+        running = self._client_task is not None and not self._client_task.done()
+        if running or now < self._next_client_round:
+            return
+        self._next_client_round = now + CLIENT_PROBE_INTERVAL_SEC
+        self._client_task = asyncio.create_task(self._run_client_round(now))
+
+    async def _run_client_round(self, now: float) -> None:
+        targets = list(self._windows)
+        try:
+            proxies = await asyncio.to_thread(self._proxy_headers)
+            verdicts = await asyncio.gather(*(
+                self._limited_client_probe(target, proxies.get(target)) for target in targets
+            ))
+        except Exception as exc:
+            logger.error("Client probe round failed: %s", exc, exc_info=True)
+            return
+        for target, answered in zip(targets, verdicts):
+            if answered is not None and target in self._windows:
+                self._answers[target] = (answered, now)
+
+    async def _limited_client_probe(self, target: Target, proxy: Optional[ProxyHeader]) -> Optional[bool]:
+        async with self._client_semaphore:
+            return await self._client_probe(target[0], target[1], proxy)
+
+    def _client_verdict(self, target: Target) -> Optional[bool]:
+        seen = self._answers.get(target)
+        if seen is None or self._clock() - seen[1] > CLIENT_PROBE_VALID_SEC:
+            return None
+        return seen[0]
 
     async def run_round(self) -> None:
         targets = list(self._windows)
@@ -247,7 +334,10 @@ class LossProbe:
 
     def stats_for(self, target: Optional[Target]) -> Optional[ProbeStats]:
         window = self._windows.get(target) if target else None
-        return window.stats() if window else None
+        stats = window.stats() if window else None
+        if stats is not None:
+            stats.answers = self._client_verdict(target)
+        return stats
 
     def annotate_haproxy(self, stats: HAProxyStatsResponse) -> HAProxyStatsResponse:
         for proxy in stats.proxies:
@@ -266,8 +356,8 @@ class LossProbe:
     def snapshot(self, readable: set[Source]) -> list[dict]:
         """Все адреса с результатами — для метрик и алертов панели."""
         entries = []
-        for (ip, port), window in self._windows.items():
-            stats = window.stats()
+        for ip, port in self._windows:
+            stats = self.stats_for((ip, port))
             shown = self._sources.get((ip, port), set()) & readable
             if stats is None or not shown:
                 continue
@@ -288,12 +378,15 @@ class LossProbe:
     async def stop(self) -> None:
         if not self._task:
             return
-        self._task.cancel()
-        try:
-            await self._task
-        except asyncio.CancelledError:
-            pass
-        self._task = None
+        for task in (self._task, self._client_task):
+            if task is None:
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._task = self._client_task = None
 
     async def _loop(self) -> None:
         while True:
@@ -329,6 +422,12 @@ def discover_targets() -> Discovery:
     return Discovery(found, frozenset(unknown))
 
 
+def live_proxy_headers() -> dict[Target, ProxyHeader]:
+    from app.services.haproxy_manager import get_haproxy_manager
+
+    return haproxy_proxy_headers(get_haproxy_manager().get_config())
+
+
 _probe: Optional[LossProbe] = None
 
 
@@ -339,5 +438,6 @@ def get_loss_probe() -> LossProbe:
             discover=discover_targets,
             downs_fn=get_down_counter().downs,
             stalled_fn=get_traffic_watch().stalled,
+            proxy_headers_fn=live_proxy_headers,
         )
     return _probe

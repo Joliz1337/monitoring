@@ -185,7 +185,7 @@ class ResponseModelTests(unittest.TestCase):
         from app.models.metrics import AllMetrics
 
         entry = {"ip": "10.0.0.5", "port": 443, "loss_pct": 40.0, "rtt_ms": 45.0, "samples": 60,
-                 "downs": 3, "stalled": True}
+                 "answers": False, "downs": 3, "stalled": True}
         serialized = AllMetrics.model_validate({**MINIMAL_PAYLOAD, "loss_probe": [entry]}).model_dump()
 
         self.assertEqual(serialized["loss_probe"], [entry])
