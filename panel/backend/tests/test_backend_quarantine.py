@@ -488,6 +488,18 @@ class TotalOnlyTests(TrackerTestCase):
         self.step(snap(reading(96.0)), advance=180, rules=self.rules)
         self.assertEqual(self.state(), PairState.PENDING)
 
+    def test_partial_loss_and_downs_stay_the_norm_for_an_address_disabled_before(self):
+        # У адреса осталась запись о прошлом отключении: его замеры разбираются каждый
+        # цикл, и правило «только полные потери» должно действовать и на этом пути
+        self.step(snap(reading(96.0)), rules=self.rules)
+        self.step(snap(reading(96.0)), advance=180, rules=self.rules)
+        self.answer(node_answer())
+        self.step(snap(reading(60.0, downs=9)), advance=600, rules=self.rules)
+        self.step(snap(reading(60.0, downs=9)), advance=600, rules=self.rules)
+        self.assertEqual(self.state(), PairState.IDLE)
+        self.step(snap(reading(60.0, downs=9)), advance=600, rules=self.rules)
+        self.assertEqual(self.tracker.desired(), {})
+
     def test_server_that_stopped_answering_is_disabled_there_too(self):
         self.step(snap(reading(60.0, stalled=True)), rules=self.rules)
         self.step(snap(reading(60.0, stalled=True)), advance=180, rules=self.rules)
