@@ -156,6 +156,25 @@ class QuarantineRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(marks, {"10.0.0.5:443": [1, 4], "10.0.0.6:443": []})
 
 
+class CheckRouteTests(unittest.IsolatedAsyncioTestCase):
+    """«Проверить адрес» делает рукопожатие «как клиент», только когда оно включено в настройках."""
+
+    async def test_check_follows_the_client_probe_setting(self):
+        servers = [SimpleNamespace(id=1, name="msk-1")]
+        found = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: servers))
+        for wanted in (True, False):
+            db = mock.Mock(execute=mock.AsyncMock(return_value=found), commit=mock.AsyncMock())
+            runner = mock.Mock(client_probe_wanted=mock.Mock(return_value=wanted))
+            fan_out = mock.AsyncMock(return_value=[])
+            with self.subTest(client_probe=wanted), \
+                    mock.patch.object(loss_router, "get_quarantine_runner", return_value=runner), \
+                    mock.patch.object(loss_router, "check_from_servers", fan_out):
+                response = await loss_router.check_target(
+                    loss_router.LossCheckRequest(target="62.50.146.225:443", server_ids=[1]), db)
+                self.assertEqual(response, {"ip": "62.50.146.225", "port": 443, "results": []})
+                fan_out.assert_awaited_once_with(servers, "62.50.146.225", 443, wanted)
+
+
 class FakeDb:
     def __init__(self, alert_settings):
         self.alert_settings = alert_settings

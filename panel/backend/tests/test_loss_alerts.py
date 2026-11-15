@@ -643,6 +643,21 @@ class CheckFanOutTests(unittest.IsolatedAsyncioTestCase):
         # Подключения доходят с обоих, но второй сервер клиенту не отвечает
         self.assertEqual([(r["name"], r["answers"]) for r in results], [("n2", False), ("n1", True)])
 
+    async def test_check_takes_only_a_plain_yes_or_no_for_the_client_probe_verdict(self):
+        import httpx
+        from app.services import loss_overview
+
+        class FakeClient:
+            async def post(self, url, **_):
+                return httpx.Response(200, json={"loss_pct": 3.0, "rtt_ms": 40.0, "samples": 20, "answers": "no"})
+
+        servers = [SimpleNamespace(id=1, name="n1", url="https://n1", node_capabilities=None)]
+        with mock.patch.object(loss_overview, "get_node_client", return_value=FakeClient()), \
+                mock.patch.object(loss_overview, "node_auth_headers", return_value={}):
+            [result] = await check_from_servers(servers, "62.50.146.225", 443, client_probe=True)
+        self.assertIsNone(result["answers"])
+        self.assertEqual(result["loss_pct"], 3.0)
+
 
 class AlerterWiringTests(unittest.IsolatedAsyncioTestCase):
     """Проверка по всему парку: реестр -> эпизоды -> одно сообщение на проверку."""

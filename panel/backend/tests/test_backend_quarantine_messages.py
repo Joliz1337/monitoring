@@ -98,6 +98,13 @@ class DisabledLineTests(unittest.TestCase):
         self.assertNotIn("<b>Отключены</b>", message)
         self.assertNotIn("на 0", message)
 
+    def test_observe_mode_promises_no_wait_for_a_server_silent_to_the_probe(self):
+        # В наблюдении адрес никуда не уходит — ждать его ответа нечего
+        message = text([disabled(observe=True, term_sec=0, sessions=0, reason_kind=ReasonKind.NO_REPLY,
+                                 loss_pct=100.0)])
+        self.assertIn("не отвечает на проверку как клиент", message)
+        self.assertNotIn("пока не начнёт отвечать", message)
+
 
 class RestoredLineTests(unittest.TestCase):
     def test_every_cause_reads_differently(self):
