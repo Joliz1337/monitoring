@@ -16,7 +16,7 @@ import httpx
 from app.models import Server
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.loss_alerts import Episode
-from app.services.loss_registry import TOTAL_LOSS_PCT, RelaySnapshot, TargetMode, TargetRules
+from app.services.loss_registry import NO_REPLY_LOSS_PCT, TOTAL_LOSS_PCT, RelaySnapshot, TargetMode, TargetRules
 from app.services.node_capabilities import learn_from_denial, server_allows_path
 
 logger = logging.getLogger(__name__)
@@ -113,18 +113,18 @@ def format_endpoint(ip: str, port: Optional[int]) -> str:
     return f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
 
 
-async def check_from_servers(servers: list[Server], ip: str, port: int) -> list[dict]:
+async def check_from_servers(servers: list[Server], ip: str, port: int, client_probe: bool = False) -> list[dict]:
     semaphore = asyncio.Semaphore(CHECK_CONCURRENCY)
 
     async def guarded(server: Server) -> dict:
         async with semaphore:
-            return await _check_one(server, ip, port)
+            return await _check_one(server, ip, port, client_probe)
 
     results = await asyncio.gather(*(guarded(server) for server in servers))
     return sorted(results, key=lambda r: (r["status"] != CheckStatus.OK, -(r.get("loss_pct") or 0), r["name"]))
 
 
-async def _check_one(server: Server, ip: str, port: int) -> dict:
+async def _check_one(server: Server, ip: str, port: int, client_probe: bool) -> dict:
     result = {"server_id": server.id, "name": server.name}
     allowed, _, _ = server_allows_path(server, CHECK_PATH, "POST")
     if not allowed:
@@ -133,7 +133,7 @@ async def _check_one(server: Server, ip: str, port: int) -> dict:
         response = await get_node_client(server).post(
             f"{server.url}{CHECK_PATH}",
             headers=node_auth_headers(server),
-            json={"ip": ip, "port": port},
+            json={"ip": ip, "port": port, **({"client_probe": True} if client_probe else {})},
             timeout=CHECK_TIMEOUT_SEC,
         )
     except httpx.HTTPError as exc:
@@ -147,10 +147,13 @@ async def _check_one(server: Server, ip: str, port: int) -> dict:
     body = _json_or_none(response)
     if response.status_code != 200 or not isinstance(body, dict):
         return {**result, "status": CheckStatus.UNREACHABLE}
+    answers = body.get("answers") if isinstance(body.get("answers"), bool) else None
     return {
         **result,
         "status": CheckStatus.OK,
-        "loss_pct": body.get("loss_pct"),
+        # Как в реестре замеров: сервер, молчащий на проверку «как клиент», не работает целиком
+        "loss_pct": NO_REPLY_LOSS_PCT if answers is False else body.get("loss_pct"),
+        "answers": answers,
         "rtt_ms": body.get("rtt_ms"),
         "samples": body.get("samples"),
     }

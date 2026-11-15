@@ -236,7 +236,7 @@ async def check_target(data: LossCheckRequest, db: AsyncSession = Depends(get_db
     servers = list(result.scalars().all())
     # Сессию отпускаем до похода по нодам: медленная нода не держит коннект пула
     await db.commit()
-    return {"ip": ip, "port": port, "results": await check_from_servers(servers, ip, port)}
+    return {"ip": ip, "port": port, "results": await check_from_servers(servers, ip, port, get_quarantine_runner().client_probe_wanted())}
 
 
 @router.post("/backends/preview")

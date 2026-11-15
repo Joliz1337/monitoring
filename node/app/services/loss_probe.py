@@ -36,7 +36,12 @@ from app.models.loss_probe import ProbeStats
 from app.services import client_probe
 from app.services.client_probe import ProxyHeader
 from app.services.haproxy_down_counter import RowKey, Target, get_down_counter
-from app.services.haproxy_traffic_watch import Counters, counts_bytes_continuously, get_traffic_watch
+from app.services.haproxy_traffic_watch import (
+    CONFIG_SECTIONS,
+    Counters,
+    counts_bytes_continuously,
+    get_traffic_watch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +83,9 @@ class Discovery:
     targets: dict[Target, set[Source]]
     # Источники, которые не удалось прочитать: их прежние адреса остаются
     unknown: frozenset[Source] = frozenset()
+    # Каким PROXY-заголовком правила HAProxy открывают соединение с адресом;
+    # None — HAProxy не прочитан, остаются прежние
+    proxy_headers: Optional[dict[Target, ProxyHeader]] = None
 
 
 # Адрес уходит в метрики, только если панели можно читать раздел, откуда он
@@ -125,22 +133,78 @@ def haproxy_traffic(stats: HAProxyStatsResponse) -> list[tuple[RowKey, Target, C
     ]
 
 
-def haproxy_proxy_headers(config: str) -> dict[Target, ProxyHeader]:
-    """Каким PROXY-заголовком правила HAProxy открывают соединение с адресом. Адрес из
-    нескольких правил берёт старший вид: сервер, ждущий v2, заголовок v1 не поймёт."""
-    headers: dict[Target, ProxyHeader] = {}
+@dataclass(frozen=True)
+class ProxyRules:
+    """Каким PROXY-заголовком правила HAProxy открывают соединение с сервером.
+
+    Ключ — правило и имя сервера, а не адрес: в конфиге сервер бывает задан
+    доменом, и его IP известен только из show stat."""
+    servers: dict[RowKey, ProxyHeader]
+    # (правило, префикс) строк server-template: их серверы зовутся <префикс><номер>
+    templates: dict[RowKey, ProxyHeader]
+
+    def header(self, row: RowKey) -> Optional[ProxyHeader]:
+        if row in self.servers:
+            return self.servers[row]
+        section, name = row
+        for (template_section, prefix), header in self.templates.items():
+            if template_section == section and name.startswith(prefix) and name[len(prefix):].isdigit():
+                return header
+        return None
+
+
+def _proxy_option(options: list[str], inherited: Optional[ProxyHeader]) -> Optional[ProxyHeader]:
+    if any(option.startswith("send-proxy-v2") for option in options):
+        return ProxyHeader.V2
+    if "send-proxy" in options:
+        return ProxyHeader.V1
+    if any(option.startswith("no-send-proxy") for option in options):
+        return None
+    return inherited
+
+
+def haproxy_proxy_headers(config: str) -> ProxyRules:
+    """Разбор строк server, server-template и default-server (она действует на серверы
+    после себя, а из секции defaults — на все правила за ней)."""
+    servers: dict[RowKey, ProxyHeader] = {}
+    templates: dict[RowKey, ProxyHeader] = {}
+    kind = section = ""
+    from_defaults = inherited = None
     for line in config.splitlines():
         words = line.split("#", 1)[0].split()
-        if len(words) < 3 or words[0] != "server":
+        if not words:
             continue
-        target = parse_addr(words[2])
-        if target is None:
+        keyword = words[0]
+        if keyword in CONFIG_SECTIONS:
+            kind, section = keyword, (words[1] if len(words) > 1 else "")
+            if kind == "defaults":
+                from_defaults = None
+            inherited = from_defaults
+        elif keyword == "default-server":
+            inherited = _proxy_option(words[1:], inherited)
+            if kind == "defaults":
+                from_defaults = inherited
+        elif kind not in ("backend", "listen"):
             continue
-        options = words[3:]
-        if any(option.startswith("send-proxy-v2") for option in options):
-            headers[target] = ProxyHeader.V2
-        elif "send-proxy" in options:
-            headers.setdefault(target, ProxyHeader.V1)
+        elif keyword == "server" and len(words) >= 3:
+            header = _proxy_option(words[3:], inherited)
+            if header is not None:
+                servers[(section, words[1])] = header
+        elif keyword == "server-template" and len(words) >= 4:
+            header = _proxy_option(words[4:], inherited)
+            if header is not None:
+                templates[(section, words[1])] = header
+    return ProxyRules(servers, templates)
+
+
+def target_proxy_headers(rows: Iterable[tuple[RowKey, Target, Optional[int]]],
+                         rules: ProxyRules) -> dict[Target, ProxyHeader]:
+    """Адрес из нескольких правил берёт старший вид: сервер, ждущий v2, заголовок v1 не поймёт."""
+    headers: dict[Target, ProxyHeader] = {}
+    for row, target, _ in rows:
+        header = rules.header(row)
+        if header is ProxyHeader.V2 or (header is ProxyHeader.V1 and target not in headers):
+            headers[target] = header
     return headers
 
 
@@ -227,7 +291,6 @@ class LossProbe:
         downs_fn: Callable[[Target], int] = lambda _target: 0,
         stalled_fn: Callable[[Target], Optional[bool]] = lambda _target: None,
         client_probe_fn: Callable[[str, int, Optional[ProxyHeader]], Awaitable[Optional[bool]]] = client_probe.probe,
-        proxy_headers_fn: Callable[[], dict[Target, ProxyHeader]] = dict,
         clock: Callable[[], float] = time.monotonic,
     ):
         self._discover = discover
@@ -235,7 +298,9 @@ class LossProbe:
         self._downs = downs_fn
         self._stalled = stalled_fn
         self._client_probe = client_probe_fn
-        self._proxy_headers = proxy_headers_fn
+        self._proxy_headers: dict[Target, ProxyHeader] = {}
+        # Источники, которые панели разрешено читать: остальные адреса не проверяются
+        self._client_sources: set[Source] = set()
         self._clock = clock
         # Адрес → ответил ли на последнюю проверку «как клиент» и когда она была
         self._answers: dict[Target, tuple[bool, float]] = {}
@@ -251,7 +316,8 @@ class LossProbe:
         self._next_refresh = 0.0
 
     def refresh_targets(self, targets: dict[Target, set[Source]],
-                        unknown: frozenset[Source] = frozenset(), now: float = 0.0) -> None:
+                        unknown: frozenset[Source] = frozenset(), now: float = 0.0,
+                        proxy_headers: Optional[dict[Target, ProxyHeader]] = None) -> None:
         """История адреса переживает обновление списка; пропавший адрес забывается.
         Адреса непрочитанного источника остаются: одно неудачное чтение show stat
         стёрло бы окна всех бэкендов."""
@@ -267,6 +333,8 @@ class LossProbe:
         self._windows = {target: self._windows.get(target) or AttemptWindow() for target in wanted}
         self._answers = {target: seen for target, seen in self._answers.items() if target in wanted}
         self._sources = wanted
+        if proxy_headers is not None:
+            self._proxy_headers = proxy_headers
 
     def request_refresh(self) -> None:
         """Конфиг HAProxy или DNAT только что сменился — перечитать адреса скоро."""
@@ -275,14 +343,21 @@ class LossProbe:
     async def tick(self, now: float) -> None:
         if now >= self._next_refresh:
             discovery = await asyncio.to_thread(self._discover)
-            self.refresh_targets(discovery.targets, discovery.unknown, now)
+            self.refresh_targets(discovery.targets, discovery.unknown, now, discovery.proxy_headers)
             self._next_refresh = now + TARGETS_REFRESH_SEC
         self._start_client_round(now)
         await self.run_round()
 
-    def request_client_probe(self) -> None:
-        """Панель просит проверять адреса как клиент; без повторной просьбы проверка прекращается."""
+    def request_client_probe(self, sources: set[Source]) -> None:
+        """Панель просит проверять адреса как клиент; без повторной просьбы проверка
+        прекращается. `sources` — разделы, которые панели разрешено читать: адреса
+        остальных она не увидит, и слать им рукопожатия незачем."""
         self._client_wanted_until = self._clock() + CLIENT_PROBE_LEASE_SEC
+        self._client_sources = sources
+
+    async def probe_as_client(self, target: Target) -> Optional[bool]:
+        """Разовая проверка по запросу панели — с тем же заголовком, что у правила."""
+        return await self._client_probe(target[0], target[1], self._proxy_headers.get(target))
 
     def _start_client_round(self, now: float) -> None:
         """Раунд идёт отдельной задачей: его таймаут в разы длиннее такта замера подключений."""
@@ -294,21 +369,23 @@ class LossProbe:
         if running or now < self._next_client_round:
             return
         self._next_client_round = now + CLIENT_PROBE_INTERVAL_SEC
-        self._client_task = asyncio.create_task(self._run_client_round(now))
+        self._client_task = asyncio.create_task(self._run_client_round())
 
-    async def _run_client_round(self, now: float) -> None:
-        targets = list(self._windows)
-        try:
-            proxies = await asyncio.to_thread(self._proxy_headers)
-            verdicts = await asyncio.gather(*(
-                self._limited_client_probe(target, proxies.get(target)) for target in targets
-            ))
-        except Exception as exc:
-            logger.error("Client probe round failed: %s", exc, exc_info=True)
-            return
+    async def _run_client_round(self) -> None:
+        targets = [target for target, sources in self._sources.items() if sources & self._client_sources]
+        verdicts = await asyncio.gather(
+            *(self._limited_client_probe(target, self._proxy_headers.get(target)) for target in targets),
+            return_exceptions=True,
+        )
+        # Раунд длится до десятков секунд: срок вердикта идёт с его конца, а не с начала
+        finished = self._clock()
+        failures = [verdict for verdict in verdicts if isinstance(verdict, BaseException)]
+        if failures:
+            # Сбой проверки одного адреса не лишает вердикта остальные
+            logger.error("Client probe failed for %s of %s targets: %r", len(failures), len(targets), failures[0])
         for target, answered in zip(targets, verdicts):
-            if answered is not None and target in self._windows:
-                self._answers[target] = (answered, now)
+            if isinstance(answered, bool) and target in self._windows:
+                self._answers[target] = (answered, finished)
 
     async def _limited_client_probe(self, target: Target, proxy: Optional[ProxyHeader]) -> Optional[bool]:
         async with self._client_semaphore:
@@ -318,7 +395,12 @@ class LossProbe:
         seen = self._answers.get(target)
         if seen is None or self._clock() - seen[1] > CLIENT_PROBE_VALID_SEC:
             return None
-        return seen[0]
+        answered = seen[0]
+        if not answered and self._stalled(target) is False:
+            # Счётчики HAProxy видят, что клиентам сервер отвечает: значит, он просто
+            # не говорит с незнакомцем, и молчание на проверку ничего не значит
+            return None
+        return answered
 
     async def run_round(self) -> None:
         targets = list(self._windows)
@@ -410,22 +492,19 @@ def discover_targets() -> Discovery:
         rows = haproxy_rows(stats)
         get_down_counter().observe(rows)
         # Без наблюдений вердикт слежения устаревает сам: признака нет, а не «не молчит»
-        if counts_bytes_continuously(haproxy.get_config()):
+        config = haproxy.get_config()
+        if counts_bytes_continuously(config):
             get_traffic_watch().observe(haproxy_traffic(stats))
+        proxy_headers = target_proxy_headers(rows, haproxy_proxy_headers(config))
         for _, target, _ in rows:
             found.setdefault(target, set()).add(Source.HAPROXY)
     else:
         unknown.add(Source.HAPROXY)
+        proxy_headers = None
     rules, _ = get_dnat_manager().load_state()
     for target in dnat_targets(rules):
         found.setdefault(target, set()).add(Source.DNAT)
-    return Discovery(found, frozenset(unknown))
-
-
-def live_proxy_headers() -> dict[Target, ProxyHeader]:
-    from app.services.haproxy_manager import get_haproxy_manager
-
-    return haproxy_proxy_headers(get_haproxy_manager().get_config())
+    return Discovery(found, frozenset(unknown), proxy_headers)
 
 
 _probe: Optional[LossProbe] = None
@@ -438,6 +517,5 @@ def get_loss_probe() -> LossProbe:
             discover=discover_targets,
             downs_fn=get_down_counter().downs,
             stalled_fn=get_traffic_watch().stalled,
-            proxy_headers_fn=live_proxy_headers,
         )
     return _probe

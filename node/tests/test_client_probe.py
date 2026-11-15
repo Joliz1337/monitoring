@@ -13,6 +13,7 @@ import socket
 import sys
 import unittest
 from contextlib import suppress
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -116,6 +117,23 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         self.assertIsNone(await probe("127.0.0.1", port, timeout=5.0))
+
+    async def test_connection_lost_before_the_header_is_silence_not_a_crash(self):
+        # Сервер оборвал соединение сразу после подключения: адресов для заголовка уже нет
+        class GoneWriter:
+            transport = mock.Mock()
+
+            def get_extra_info(self, name: str):
+                return None
+
+            def write(self, data: bytes) -> None:
+                raise AssertionError("nothing to write to")
+
+        async def connected(ip: str, port: int):
+            return asyncio.StreamReader(), GoneWriter()
+
+        with mock.patch("app.services.client_probe.asyncio.open_connection", connected):
+            self.assertIs(await probe("10.0.0.5", 443, ProxyHeader.V1), False)
 
     async def test_server_gets_a_real_client_hello(self):
         got = asyncio.get_running_loop().create_future()

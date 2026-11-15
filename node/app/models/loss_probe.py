@@ -50,3 +50,5 @@ class TargetRequest(BaseModel):
 
 class LossCheckRequest(TargetRequest):
     attempts: int = Field(CHECK_ATTEMPTS_DEFAULT, ge=1, le=CHECK_ATTEMPTS_MAX)
+    # Добавить к серии подключений проверку «как клиент» (поле answers ответа)
+    client_probe: bool = False

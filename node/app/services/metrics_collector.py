@@ -116,6 +116,11 @@ class MetricsCollector:
         self._capabilities: Optional[dict] = policy.published()
         self._loss_probe_sources = readable_sources(policy)
 
+    def request_client_probe(self) -> None:
+        """Просьба панели проверять адреса назначения как клиент — только из разделов,
+        которые ей разрешено читать."""
+        self._loss_probe.request_client_probe(self._loss_probe_sources)
+
     def _read_host_file(self, path: str) -> str:
         """Read file from host filesystem"""
         host_path = Path(self.settings.host_proc).parent / path.lstrip('/')

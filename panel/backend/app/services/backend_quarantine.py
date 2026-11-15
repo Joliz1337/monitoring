@@ -10,8 +10,8 @@
 
 - Отключить — одно из трёх: сервер не отвечает клиентам дольше удержания,
   потери не ниже порога дольше удержания, падений за полчаса не меньше порога.
-  «Не отвечает» — по проверке релея «как клиент» (`answers`), а где её нет —
-  по счётчикам трафика HAProxy (`stalled`). Порог потерь — от половины подключений: сервер, до которого
+  «Не отвечает» — молчит на проверку релея «как клиент» (`answers`) либо по
+  счётчикам трафика HAProxy клиенты ответов не получают (`stalled`). Порог потерь — от половины подключений: сервер, до которого
   теряется их часть, бывает рабочим, и по одному проценту потерь его от
   заблокированного не отличить.
 - Решение ещё не отключение: пара `pending`, пока нода не ответила, `disabled`
@@ -94,6 +94,8 @@ class RestoreCause(str, Enum):
     MANUAL = "manual"
     GUARD = "guard"
     MODE = "mode"
+    # Отключена за молчание на проверку «как клиент», а самой проверки больше нет
+    BLIND = "blind"
 
 
 class NodeFailure(str, Enum):
@@ -208,11 +210,11 @@ def _counts_downs(mode: TargetMode) -> bool:
 
 
 def _silent(reading: LossReading) -> bool:
-    """Сервер не отвечает клиентам. Проверке «как клиент» веры больше, чем счётчикам
-    трафика: она спрашивает сам сервер. Счётчики решают, только когда её нет."""
-    if reading.answers is not None:
-        return not reading.answers
-    return bool(reading.stalled)
+    """Сервер не отвечает клиентам: молчит на проверку релея «как клиент» либо по
+    счётчикам трафика клиенты ответов не получают. Счётчики решают и при пройденной
+    проверке: фильтр бывает настроен на настоящий трафик, а её пропускает. Обратный
+    спор (проверка молчит, а клиентам отвечают) нода снимает сама — вердикта не шлёт."""
+    return reading.answers is False or bool(reading.stalled)
 
 
 def _is_bad(reading: LossReading, mode: TargetMode, policy: QuarantinePolicy) -> bool:
@@ -464,7 +466,10 @@ class QuarantineTracker:
             return []
         if pair.state is PairState.DISABLED and pair.until is not None and now < pair.until:
             return []
-        events = self._release(item.key, RestoreCause.CALM)
+        # Отключённая за молчание на проверку возвращается по её ответу. Пропала сама
+        # проверка (её выключили) — возврат по сроку, и сообщение говорит об этом
+        verified = pair.reason_kind is not ReasonKind.NO_REPLY or item.reading.answers is True
+        events = self._release(item.key, RestoreCause.CALM if verified else RestoreCause.BLIND)
         # Нода обнуляет падения адреса при возврате, но замер, снятый до него, реестр
         # считает свежим ещё STALE_AFTER_SEC: по нему пара отключилась бы заново
         pair.hold_until = now + STALE_AFTER_SEC

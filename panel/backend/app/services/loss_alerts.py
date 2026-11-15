@@ -381,6 +381,14 @@ def _rtt_text(reading: LossReading, ru: bool) -> str:
     return f"{reading.rtt_ms:.0f} {'мс' if ru else 'ms'}"
 
 
+def _loss_text(reading: LossReading, ru: bool) -> str:
+    """Процент потерь; у сервера, молчащего на проверку «как клиент», процента нет —
+    подключения до него доходят."""
+    if reading.answers is False:
+        return "не отвечает как клиент" if ru else "no reply to the client check"
+    return f"{reading.loss_pct:g}%"
+
+
 def _relay_lines(event: LossEvent, policy: LossPolicy, ru: bool) -> list[str]:
     if event.kind is EventKind.RECOVERED:
         worst = max(r.reading.loss_pct for r in event.relays)
@@ -389,7 +397,7 @@ def _relay_lines(event: LossEvent, policy: LossPolicy, ru: bool) -> list[str]:
     quiet_bound = policy.recovery_bound()
     lossy = [r for r in event.relays if r.reading.loss_pct >= quiet_bound]
     lines = [
-        f"• {html.escape(r.relay_name)} — {r.reading.loss_pct:g}% ({_rtt_text(r.reading, ru)})"
+        f"• {html.escape(r.relay_name)} — {_loss_text(r.reading, ru)} ({_rtt_text(r.reading, ru)})"
         for r in lossy
     ]
     quiet = len(event.relays) - len(lossy)
@@ -548,7 +556,7 @@ def history_text(event: AlertEvent, owners: dict[str, str], lang: str) -> str:
     where = f"{event.target} ({owners[ip]})" if ip in owners else event.target
     if event.kind is EventKind.RECOVERED:
         return f"{title}: {where}"
-    parts = ", ".join(f"{r.relay_name} {r.reading.loss_pct:g}%" for r in event.relays[:5])
+    parts = ", ".join(f"{r.relay_name} {_loss_text(r.reading, ru)}" for r in event.relays[:5])
     return f"{title}: {where} — {LEVEL_NAMES[lang][event.level]} ({parts})"
 
 

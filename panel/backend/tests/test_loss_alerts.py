@@ -113,6 +113,17 @@ class RegistryTests(unittest.TestCase):
         rows = build_overview(registry.fresh(), registry.owners(), {}, registry.target_rules())
         self.assertEqual([r["target"] for r in rows], ["62.50.146.225:443"])
 
+    def test_address_silent_to_the_client_probe_tops_the_page_as_not_working(self):
+        # Подключения доходят (потери 3 %), а клиенту сервер не отвечает
+        registry = LossRegistry(clock=lambda: 0.0)
+        registry.update(1, "relay", {"loss_probe": [
+            {"ip": "62.50.146.225", "port": 443, "loss_pct": 3.0, "rtt_ms": 46.0, "samples": 60, "answers": False},
+            {"ip": "45.145.56.96", "port": 443, "loss_pct": 20.0, "rtt_ms": 46.0, "samples": 60, "answers": True},
+        ]})
+        rows = build_overview(registry.fresh(), registry.owners(), {}, registry.target_rules())
+        self.assertEqual([(r["target"], r["worst_loss"], r["relays"][0]["answers"]) for r in rows],
+                         [("62.50.146.225:443", 100.0, False), ("45.145.56.96:443", 20.0, True)])
+
     def test_excluded_targets_hide_whole_ip_or_one_backend(self):
         registry = LossRegistry(clock=lambda: 0.0)
         registry.update(1, "relay", {"loss_probe": [
@@ -408,6 +419,17 @@ class RelayProblemTests(unittest.TestCase):
         self.assertEqual(tracker.evaluate(fleet(losses), policy, 3899), [])
         self.assertEqual(relay_kinds(tracker.evaluate(fleet(losses), policy, 3900)), [(RelayEventKind.STILL, 11, 0)])
 
+    def test_address_silent_to_the_client_probe_is_named_so_not_by_a_percent(self):
+        silent = RelayReading(1, "VK relay 1", LossReading("62.50.146.225", 8443, 100.0, 45.0, 60, answers=False))
+        tracker = LossTracker()
+        tracker.evaluate(observe(silent), POLICY, 0)
+        opened = tracker.evaluate(observe(silent), POLICY, 300)
+        [text] = format_digest(opened, {}, POLICY, "ru")
+        self.assertIn("VK relay 1 — не отвечает как клиент (45 мс)", text)
+        self.assertNotIn("100%", text)
+        [record] = history_records(opened, {}, "ru")
+        self.assertIn("VK relay 1 не отвечает как клиент", record.message)
+
     def test_digest_and_history(self):
         tracker = LossTracker()
         losses = dict.fromkeys(FIRST_WAVE, 100.0)
@@ -597,6 +619,29 @@ class CheckFanOutTests(unittest.IsolatedAsyncioTestCase):
             [("n2", CheckStatus.OK), ("n1", CheckStatus.OK), ("n3", CheckStatus.UNSUPPORTED),
              ("n4", CheckStatus.UNREACHABLE), ("n5", CheckStatus.DENIED)],
         )
+
+    async def test_check_asks_for_the_client_probe_and_a_silent_server_tops_the_list(self):
+        import httpx
+        from app.services import loss_overview
+
+        asked: list[dict] = []
+        answers = {"https://n1": True, "https://n2": False}
+
+        class FakeClient:
+            async def post(self, url, json, **_):
+                asked.append(json)
+                base = url.split("/api/")[0]
+                return httpx.Response(200, json={"loss_pct": 0.0, "rtt_ms": 40.0, "samples": 20,
+                                                 "answers": answers[base]})
+
+        servers = [SimpleNamespace(id=i, name=f"n{i}", url=f"https://n{i}", node_capabilities=None) for i in (1, 2)]
+        with mock.patch.object(loss_overview, "get_node_client", return_value=FakeClient()), \
+                mock.patch.object(loss_overview, "node_auth_headers", return_value={}):
+            results = await check_from_servers(servers, "62.50.146.225", 443, client_probe=True)
+            await check_from_servers(servers[:1], "62.50.146.225", 443)
+        self.assertEqual([entry.get("client_probe") for entry in asked], [True, True, None])
+        # Подключения доходят с обоих, но второй сервер клиенту не отвечает
+        self.assertEqual([(r["name"], r["answers"]) for r in results], [("n2", False), ("n1", True)])
 
 
 class AlerterWiringTests(unittest.IsolatedAsyncioTestCase):

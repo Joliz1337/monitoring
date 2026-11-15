@@ -2357,6 +2357,7 @@ export interface LossCheckResult {
   loss_pct?: number | null
   rtt_ms?: number | null
   samples?: number | null
+  answers?: boolean | null
 }
 
 export type BackendEditAction = 'replace' | 'delete'

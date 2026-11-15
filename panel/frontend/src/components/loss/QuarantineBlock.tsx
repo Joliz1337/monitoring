@@ -94,7 +94,12 @@ function reasonText(relays: QuarantineItem[], sustainedSeconds: number | null, t
 // Отключённый сервер трафика не получает: заговорил ли молчавший, покажет только возврат в работу
 function returnText(relays: QuarantineItem[], now: number, t: Translate): string {
   // Проверка «как клиент» идёт и к отключённому серверу: вернётся он по факту ответа
-  if (relays[0].reason.kind === 'no_reply') return t('loss.quarantine_returns_when_answers')
+  if (relays[0].reason.kind === 'no_reply') {
+    const term = earliest(relays.map(relay => relay.until))
+    return term !== null && term > now
+      ? t('loss.quarantine_returns_after_answers', { span: formatSpan(term - now, t) })
+      : t('loss.quarantine_returns_when_answers')
+  }
   const silent = relays[0].reason.kind === 'stalled'
   const until = earliest(relays.map(relay => relay.until))
   if (until !== null && until > now) {

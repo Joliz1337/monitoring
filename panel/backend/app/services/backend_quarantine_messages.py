@@ -56,6 +56,7 @@ TEXTS = {
         "stalled": "данные не идут: сервер не отвечает клиентам",
         "no_reply": "не отвечает на проверку как клиент",
         "no_reply_gone": "снова отвечает на проверку",
+        "until_answers": "пока не начнёт отвечать на проверку",
         "stalled_retry": "срок вышел, сервер снова получает клиентов",
         "stalled_gone": "молчание сервера больше не наблюдается",
         "term_min": lambda minutes: f"на {minutes} мин",
@@ -68,6 +69,7 @@ TEXTS = {
             RestoreCause.EXEMPT: "адрес в списке «не отключать»",
             RestoreCause.GUARD: "сервер остался в правиле последним живым",
             RestoreCause.MODE: "автоотключение выключено",
+            RestoreCause.BLIND: "проверка недоступна, срок вышел — сервер снова получает клиентов",
         },
         "chronic_line": lambda strikes, relays: (
             f"отключений за сутки: {strikes}, релеи: {relays}. Адрес стоит заменить"
@@ -89,6 +91,7 @@ TEXTS = {
         "stalled": "no data comes back: the server does not answer clients",
         "no_reply": "does not answer the client-like check",
         "no_reply_gone": "answers the check again",
+        "until_answers": "until it answers the check",
         "stalled_retry": "term is over, the server gets clients again",
         "stalled_gone": "the server's silence is no longer observed",
         "term_min": lambda minutes: f"for {minutes} min",
@@ -101,6 +104,7 @@ TEXTS = {
             RestoreCause.EXEMPT: "address is on the never-disable list",
             RestoreCause.GUARD: "it became the last live server of the rule",
             RestoreCause.MODE: "auto-disable is switched off",
+            RestoreCause.BLIND: "the check is unavailable, term is over — the server gets clients again",
         },
         "chronic_line": lambda strikes, relays: (
             f"disables in 24 h: {strikes}, relays: {relays}. Consider replacing the address"
@@ -150,7 +154,9 @@ def _term(seconds: float, texts: dict) -> Optional[str]:
 def _facts(event: Event, texts: dict) -> list[str]:
     """Что сказать о событии помимо адреса и релея — одинаково для Telegram и истории."""
     if event.kind is EventKind.DISABLED:
-        facts = [_reason(event, texts), _term(event.term_sec, texts)]
+        # Молчащий на проверку отключён не на срок, а до ответа; в наблюдении срока нет вовсе
+        until_answers = event.reason_kind is ReasonKind.NO_REPLY and event.term_sec > 0
+        facts = [_reason(event, texts), texts["until_answers"] if until_answers else _term(event.term_sec, texts)]
         if event.sessions > 0:
             facts.append(texts["sessions"](event.sessions))
         if event.strikes > 1:

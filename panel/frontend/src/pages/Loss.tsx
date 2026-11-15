@@ -476,7 +476,7 @@ export default function Loss() {
                     <td className="px-4 py-2 text-dark-200">{result.name}</td>
                     <td className="px-4 py-2">
                       {result.status === 'ok' && result.loss_pct != null
-                        ? <LossProbeBadge probe={{ loss_pct: result.loss_pct, rtt_ms: result.rtt_ms ?? null, samples: result.samples ?? 0 }} />
+                        ? <LossProbeBadge probe={{ loss_pct: result.loss_pct, rtt_ms: result.rtt_ms ?? null, samples: result.samples ?? 0, answers: result.answers }} />
                         : <span className="text-xs text-dark-500">{t(`loss.status_${result.status}`)}</span>}
                     </td>
                     <td className="px-4 py-2 text-right">

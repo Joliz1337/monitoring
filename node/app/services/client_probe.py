@@ -73,14 +73,17 @@ async def probe(ip: str, port: int, proxy: Optional[ProxyHeader] = None,
                 timeout: float = CLIENT_PROBE_TIMEOUT_SEC) -> Optional[bool]:
     """True — сервер ответил; False — подключение есть, ответа нет; None — подключиться
     не удалось: это потери, а не молчание."""
+    hello = client_hello()
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout)
     except (asyncio.TimeoutError, OSError):
         return None
     try:
-        hello = client_hello()
         if proxy is not None:
             source, destination = writer.get_extra_info("sockname"), writer.get_extra_info("peername")
+            if source is None or destination is None:
+                # Сервер оборвал соединение сразу после подключения: адресов для заголовка уже нет
+                return False
             hello = proxy_header(proxy, source[:2], destination[:2]) + hello
         writer.write(hello)
         return bool(await asyncio.wait_for(reader.read(1), timeout))

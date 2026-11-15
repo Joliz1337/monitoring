@@ -885,10 +885,21 @@ class ClientProbeTests(TrackerTestCase):
         self.assertEqual(self.state(), PairState.PENDING)
         self.assertEqual(self.tracker.pairs[(RELAY, TARGET)].reason_kind, ReasonKind.NO_REPLY)
 
-    def test_probe_is_believed_over_the_traffic_counters(self):
-        # Счётчики говорят «молчит», а сервер на глазах отвечает: проверка точнее
-        self.step(snap(reading(stalled=True, **self.ANSWERS)), advance=3600)
-        self.assertIsNone(self.state())
+    def test_counters_still_decide_when_the_probe_answers(self):
+        # Фильтр режет только настоящий трафик клиентов, а проверку пропускает:
+        # клиенты ответов не получают — счётчики это видят
+        self.step(snap(reading(stalled=True, **self.ANSWERS)))
+        self.step(snap(reading(stalled=True, **self.ANSWERS)), advance=180)
+        self.assertEqual(self.tracker.pairs[(RELAY, TARGET)].reason_kind, ReasonKind.STALLED)
+
+    def test_pair_returns_unverified_when_the_probe_is_gone(self):
+        # Проверку выключили: ждать ответа не от кого. Пара возвращается по сроку и не
+        # утверждает, что сервер отвечает
+        self.decide()
+        self.answer(node_answer())
+        self.step(snap(reading(3.0, answers=None)), advance=1)
+        [event] = self.step(snap(reading(3.0, answers=None)), advance=600)
+        self.assertEqual((event.kind, event.cause), (EventKind.RESTORED, RestoreCause.BLIND))
 
     def test_counters_decide_where_the_probe_gives_nothing(self):
         self.step(snap(reading(stalled=True, answers=None)))

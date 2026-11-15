@@ -5,7 +5,6 @@ from typing import Optional
 from fastapi import APIRouter, Query
 
 from app.models.metrics import AllMetrics
-from app.services.loss_probe import get_loss_probe
 from app.services.metrics_collector import get_collector
 from app.services.rate_sampler import MAX_WINDOW_SEC
 
@@ -19,7 +18,7 @@ async def get_all_metrics(
 ):
     """Get all current system metrics; `window` adds averages and peaks over the last N seconds.
     `client_probe` — панель просит проверять адреса назначения как клиент (см. services/loss_probe)."""
-    if client_probe:
-        get_loss_probe().request_client_probe()
     collector = get_collector()
+    if client_probe:
+        collector.request_client_probe()
     return await collector.get_all_metrics(window)

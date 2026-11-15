@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException
 
 from app.models.loss_probe import LossCheckRequest, ProbeStats, TargetRequest
-from app.services.loss_probe import check_target
+from app.services.loss_probe import check_target, get_loss_probe
 from app.services.path_trace import TraceBusyError, get_path_trace_manager
 
 router = APIRouter(prefix="/api/loss-probe", tags=["loss-probe"])
@@ -11,8 +11,11 @@ router = APIRouter(prefix="/api/loss-probe", tags=["loss-probe"])
 
 @router.post("/check", response_model=ProbeStats)
 async def check(request: LossCheckRequest) -> ProbeStats:
-    """Серия попыток подключения к ip:port прямо сейчас."""
-    return await check_target(request.ip, request.port, request.attempts)
+    """Серия попыток подключения к ip:port прямо сейчас; по просьбе — и проверка «как клиент»."""
+    stats = await check_target(request.ip, request.port, request.attempts)
+    if request.client_probe:
+        stats.answers = await get_loss_probe().probe_as_client((request.ip, request.port))
+    return stats
 
 
 @router.post("/trace")

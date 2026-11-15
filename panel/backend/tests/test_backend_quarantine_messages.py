@@ -61,6 +61,11 @@ class DisabledLineTests(unittest.TestCase):
         self.assertIn("не отвечает на проверку как клиент", message)
         self.assertNotIn("потери", message)
 
+    def test_server_silent_to_the_probe_is_out_until_it_answers_not_for_a_term(self):
+        message = text([disabled(reason_kind=ReasonKind.NO_REPLY, loss_pct=100.0, term_sec=600)])
+        self.assertIn("пока не начнёт отвечать", message)
+        self.assertNotIn("на 10 мин", message)
+
     def test_downs_are_declined(self):
         for downs, phrase in ((3, "упал 3 раза "), (5, "упал 5 раз "), (11, "упал 11 раз "), (21, "упал 21 раз "),
                               (22, "упал 22 раза ")):
@@ -132,6 +137,11 @@ class RestoredLineTests(unittest.TestCase):
                 back = text([restored(RestoreCause.CALM, reason_kind=ReasonKind.NO_REPLY, observe=observe)])
                 self.assertIn("снова отвечает на проверку", back)
                 self.assertNotIn("потери", back)
+
+    def test_return_without_the_probe_says_so(self):
+        back = text([restored(RestoreCause.BLIND, reason_kind=ReasonKind.NO_REPLY)])
+        self.assertIn("проверка недоступна", back)
+        self.assertNotIn("снова отвечает", back)
 
     def test_other_causes_do_not_depend_on_the_reason(self):
         self.assertIn("вручную", text([restored(RestoreCause.MANUAL, reason_kind=ReasonKind.STALLED)]))
