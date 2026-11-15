@@ -64,6 +64,7 @@ def build_overview(snapshots: list[RelaySnapshot], owners: dict[str, str],
                 "loss_pct": reading.loss_pct,
                 "rtt_ms": reading.rtt_ms,
                 "samples": reading.samples,
+                "answers": reading.answers,
             })
     for key, entry in targets.items():
         entry["relays"].sort(key=lambda relay: (-relay["loss_pct"], relay["name"]))

@@ -34,6 +34,8 @@ class QuarantineSettings:
     mode: Mode = Mode.OFF
     policy: QuarantinePolicy = QuarantinePolicy()
     notify: bool = True
+    # Просить релеи проверять адреса назначения «как клиент» (TLS-рукопожатие)
+    client_probe: bool = False
     exempt_server_ids: frozenset[int] = frozenset()
     exempt_targets: tuple[ExemptTarget, ...] = ()
 
@@ -55,6 +57,7 @@ class QuarantineSettings:
             "max_share_pct": self.policy.max_share_pct,
             "drop_sessions": self.policy.drop_sessions,
             "notify": self.notify,
+            "client_probe": self.client_probe,
             "exempt_server_ids": sorted(self.exempt_server_ids),
             "exempt_targets": [format_endpoint(ip, port) for ip, port in self.exempt_targets],
         }
@@ -112,6 +115,7 @@ def settings_from_dict(data: dict) -> QuarantineSettings:
             drop_sessions=_flag(data.get("drop_sessions"), defaults.drop_sessions),
         ),
         notify=_flag(data.get("notify"), True),
+        client_probe=_flag(data.get("client_probe"), False),
         exempt_server_ids=_server_ids(data.get("exempt_server_ids")),
         exempt_targets=_targets(data.get("exempt_targets")),
     )

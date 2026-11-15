@@ -15,6 +15,16 @@ function lossClass(lossPct: number): string {
 export default function LossProbeBadge({ probe }: { probe?: LossProbeStats | null }) {
   const { t } = useTranslation()
   if (!probe) return <span className="text-dark-500">—</span>
+  if (probe.answers === false) {
+    // Подключения доходят, поэтому процент потерь здесь обманчиво мал
+    return (
+      <Tooltip label={t('loss_probe.no_reply_tooltip')} maxWidth={280}>
+        <span className="px-2 py-0.5 rounded text-xs font-medium border whitespace-nowrap bg-danger/10 text-danger border-danger/20">
+          {t('loss_probe.no_reply')}
+        </span>
+      </Tooltip>
+    )
+  }
   return (
     <Tooltip label={t('loss_probe.tooltip', { samples: probe.samples })} maxWidth={280}>
       <span className="inline-flex items-center gap-1.5 whitespace-nowrap">

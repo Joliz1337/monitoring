@@ -29,6 +29,7 @@ from app.services.loss_registry import LossRegistry  # noqa: E402
 VALID = {
     "mode": "enforce", "loss_threshold": 60.0, "sustained_seconds": 240, "downs_threshold": 4,
     "calm_seconds": 900, "chronic_strikes": 5, "max_share_pct": 40, "drop_sessions": False, "notify": True,
+    "client_probe": True,
     "exempt_server_ids": [3], "exempt_targets": ["1.2.3.4", "5.6.7.8:8443"],
 }
 NO_EXCLUSIONS = LossExclusions(server_ids=frozenset(), targets=())
@@ -47,6 +48,11 @@ class SettingsModelTests(unittest.TestCase):
                              ("mode", "wipe")):
             with self.subTest(field=field, value=value), self.assertRaises(ValidationError):
                 loss_router.QuarantineSettingsIn(**{**VALID, field: value})
+
+    def test_block_of_an_older_tab_leaves_the_client_probe_off(self):
+        older = {key: value for key, value in VALID.items() if key != "client_probe"}
+        self.assertIs(loss_router.QuarantineSettingsIn(**older).client_probe, False)
+        self.assertIs(loss_router.QuarantineSettingsIn(**VALID).client_probe, True)
 
     def test_old_interface_body_has_no_block(self):
         update = loss_router.LossSettingsUpdate(excluded_server_ids=[1], excluded_targets=[])

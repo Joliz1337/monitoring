@@ -27,6 +27,7 @@ DEFAULTS = {
     "max_share_pct": 50,
     "drop_sessions": True,
     "notify": True,
+    "client_probe": False,
     "exempt_server_ids": [],
     "exempt_targets": [],
 }
@@ -98,6 +99,11 @@ class DamagedRecordTests(unittest.TestCase):
         for raw in ("{broken", "[]", "null", '"enforce"', ""):
             with self.subTest(raw=raw):
                 self.assertEqual(parse_settings(raw), QuarantineSettings())
+
+    def test_client_probe_is_off_until_switched_on(self):
+        self.assertIs(parse_settings(stored()).client_probe, False)
+        self.assertIs(parse_settings(stored(client_probe=True)).client_probe, True)
+        self.assertIs(parse_settings(stored(client_probe="yes")).client_probe, False)
 
     def test_unknown_mode_is_off(self):
         self.assertIs(parse_settings(stored(mode="wipe")).mode, Mode.OFF)

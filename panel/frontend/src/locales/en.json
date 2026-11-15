@@ -886,11 +886,13 @@
     "quarantine_reason_downs_one": "went down {{count}} time in 30 min",
     "quarantine_reason_downs_other": "went down {{count}} times in 30 min",
     "quarantine_reason_stalled": "no data comes back: the server does not answer clients",
+    "quarantine_reason_no_reply": "does not answer the client-like check",
     "quarantine_disabled_ago": "disabled {{span}} ago",
     "quarantine_returns_after": "returns no sooner than in {{span}}, once the loss is gone",
     "quarantine_returns_when_calm": "returns once the loss is gone",
     "quarantine_returns_after_stalled": "returns to be checked again no sooner than in {{span}}",
     "quarantine_returns_soon_stalled": "returns to be checked again after the calm period",
+    "quarantine_returns_when_answers": "returns once it answers the check again",
     "quarantine_sessions_moved": "connections moved: {{count}}",
     "quarantine_pending": "disabling…",
     "quarantine_would_disable_ago": "would have been disabled {{span}} ago",
@@ -944,6 +946,8 @@
     "quarantine_drop_sessions_hint": "Clients reconnect right away and land on a healthy server. Without this, open connections stay on the bad server until they close on their own.",
     "quarantine_notify": "Telegram notifications",
     "quarantine_notify_hint": "Messages about disables, returns and chronic problems — sent by the same bot to the same chat as alerts. Events are always written to the alert history.",
+    "quarantine_client_probe": "Check servers as a client (TLS)",
+    "quarantine_client_probe_hint": "Every half a minute relays start a TLS handshake with each address like an ordinary client (with the PROXY header if the rule has it on). A connection goes through even where no data does — with this check such an address is shown as “no reply” in loss and in the alert, and auto-disable brings it back only when it answers again. Switch it on if your servers answer an ordinary TLS client (Reality or a fallback): a server that does not answer a stranger will look broken.",
     "quarantine_exempt_servers_title": "Never disable automatically — relays",
     "quarantine_exempt_servers_hint": "The panel disables nothing on these relays and immediately brings back whatever is already disabled on them.",
     "quarantine_exempt_targets_title": "Never disable automatically — addresses",
@@ -952,7 +956,9 @@
   "loss_probe": {
     "column": "Loss",
     "ms": "ms",
-    "tooltip": "Share of connection attempts from this node to the address that got no reply over the last {{samples}} checks (one every 2 seconds), and the average reply time"
+    "tooltip": "Share of connection attempts from this node to the address that got no reply over the last {{samples}} checks (one every 2 seconds), and the average reply time",
+    "no_reply": "no reply",
+    "no_reply_tooltip": "Connections reach the address, but the server does not answer the client-like check (start of a TLS handshake): clients will not work through it"
   },
   "haproxy": {
     "title": "Server Settings",

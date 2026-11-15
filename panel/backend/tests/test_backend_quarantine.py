@@ -45,8 +45,8 @@ CYCLE_SEC = 60.0
 
 
 def reading(loss: float = 0.0, downs: int | None = 0, ip: str = IP, port: int = 443, samples: int = 60,
-            stalled: bool | None = None) -> LossReading:
-    return LossReading(ip, port, loss, 40.0, samples, downs, stalled)
+            stalled: bool | None = None, answers: bool | None = None) -> LossReading:
+    return LossReading(ip, port, loss, 40.0, samples, downs, stalled, answers)
 
 
 def snap(*readings: LossReading, relay_id: int = RELAY) -> RelaySnapshot:
@@ -866,7 +866,97 @@ class StorageTests(TrackerTestCase):
         self.assertEqual(kinds(self.step(snap(reading(0.0)), advance=600)), [EventKind.RESTORED])
 
 
+class ClientProbeTests(TrackerTestCase):
+    """Проверка «как клиент»: релей сам начинает с сервером TLS-рукопожатие. Она идёт
+    и к отключённому серверу, поэтому возвращать можно по факту, а не по таймеру."""
+
+    SILENT = dict(answers=False)
+    ANSWERS = dict(answers=True)
+
+    def decide(self) -> None:
+        self.step(snap(reading(3.0, **self.SILENT)))
+        self.step(snap(reading(3.0, **self.SILENT)), advance=180)
+
+    def test_server_silent_to_the_probe_is_disabled_whatever_the_loss(self):
+        self.step(snap(reading(3.0, **self.SILENT)))
+        self.step(snap(reading(3.0, **self.SILENT)), advance=170)
+        self.assertIsNone(self.state())
+        self.step(snap(reading(3.0, **self.SILENT)), advance=10)
+        self.assertEqual(self.state(), PairState.PENDING)
+        self.assertEqual(self.tracker.pairs[(RELAY, TARGET)].reason_kind, ReasonKind.NO_REPLY)
+
+    def test_probe_is_believed_over_the_traffic_counters(self):
+        # Счётчики говорят «молчит», а сервер на глазах отвечает: проверка точнее
+        self.step(snap(reading(stalled=True, **self.ANSWERS)), advance=3600)
+        self.assertIsNone(self.state())
+
+    def test_counters_decide_where_the_probe_gives_nothing(self):
+        self.step(snap(reading(stalled=True, answers=None)))
+        self.step(snap(reading(stalled=True, answers=None)), advance=180)
+        self.assertEqual(self.tracker.pairs[(RELAY, TARGET)].reason_kind, ReasonKind.STALLED)
+
+    def test_silent_server_stays_out_with_no_trial_returns(self):
+        self.decide()
+        self.answer(node_answer())
+        self.assertEqual(self.step(snap(reading(3.0, **self.SILENT)), advance=6 * 3600), [])
+        pair = self.tracker.pairs[(RELAY, TARGET)]
+        self.assertEqual((pair.state, len(pair.strikes)), (PairState.DISABLED, 1))
+
+    def test_returns_once_the_probe_answers_through_the_calm(self):
+        self.decide()
+        self.answer(node_answer())
+        self.step(snap(reading(3.0, **self.SILENT)), advance=3600)
+        self.assertEqual(self.step(snap(reading(3.0, **self.ANSWERS)), advance=599), [])
+        [event] = self.step(snap(reading(3.0, **self.ANSWERS)), advance=61)
+        self.assertEqual((event.kind, event.cause, event.reason_kind),
+                         (EventKind.RESTORED, RestoreCause.CALM, ReasonKind.NO_REPLY))
+
+    def test_one_silent_probe_restarts_the_calm(self):
+        self.decide()
+        self.answer(node_answer())
+        self.step(snap(reading(3.0, **self.ANSWERS)), advance=500)
+        self.step(snap(reading(3.0, **self.SILENT)), advance=1)
+        self.assertEqual(self.step(snap(reading(3.0, **self.ANSWERS)), advance=590), [])
+        self.assertEqual(self.state(), PairState.DISABLED)
+
+    def test_relay_with_most_servers_silent_to_the_probe_disables_nothing(self):
+        fleet = snap(*(reading(answers=i >= 4, ip=f"10.0.0.{i + 1}") for i in range(6)))
+        self.assertEqual(kinds(self.step(fleet)), [EventKind.RELAY_PAUSED])
+        self.step(fleet, advance=600)
+        self.assertEqual(self.tracker.desired(), {})
+
+    def test_silent_server_goes_first_in_the_list_for_the_node(self):
+        calm = [reading(0.0, ip=f"10.0.0.{i}") for i in range(3, 7)]
+        bad = [reading(90.0, ip="10.0.0.1"), reading(3.0, ip="10.0.0.2", **self.SILENT)]
+        self.step(snap(*bad, *calm))
+        self.step(snap(*bad, *calm), advance=180)
+        self.assertEqual(self.tracker.desired(), {RELAY: ["10.0.0.2:443", "10.0.0.1:443"]})
+
+
+class ClientProbeObserveTests(TrackerTestCase):
+    mode = Mode.OBSERVE
+
+    def test_silent_server_is_listed_until_it_answers(self):
+        self.step(snap(reading(answers=False)))
+        [event] = self.step(snap(reading(answers=False)), advance=180)
+        self.assertEqual((event.kind, event.observe, event.reason_kind), (EventKind.DISABLED, True, ReasonKind.NO_REPLY))
+        self.assertEqual(self.step(snap(reading(answers=False)), advance=3600), [])
+        self.step(snap(reading(answers=True)), advance=10)
+        [event] = self.step(snap(reading(answers=True)), advance=600)
+        self.assertEqual((event.kind, event.observe), (EventKind.RESTORED, True))
+
+
 class RegistryDownsTests(unittest.TestCase):
+    def test_probe_verdict_is_parsed_and_a_silent_server_counts_as_lost(self):
+        def entry(**extra) -> dict:
+            return {"ip": IP, "port": 443, "loss_pct": 3.0, "rtt_ms": 40.0, "samples": 60, **extra}
+
+        readings = parse_readings({"loss_probe": [
+            entry(answers=True), entry(answers=False), entry(answers=None), entry(), entry(answers="no"),
+        ]})
+        self.assertEqual([r.answers for r in readings], [True, False, None, None, None])
+        # Подключения доходят, а сервер клиенту не отвечает: для алерта и страницы он не работает
+        self.assertEqual([r.loss_pct for r in readings], [3.0, 100.0, 3.0, 3.0, 3.0])
     def test_downs_are_parsed_from_node_metrics(self):
         metrics = {"loss_probe": [
             {"ip": IP, "port": 443, "loss_pct": 1.0, "rtt_ms": 40.0, "samples": 60, "downs": 4},

@@ -56,6 +56,11 @@ class DisabledLineTests(unittest.TestCase):
         self.assertIn("сервер не отвечает клиентам", message)
         self.assertNotIn("потери", message)
 
+    def test_reason_of_a_server_silent_to_the_probe(self):
+        message = text([disabled(reason_kind=ReasonKind.NO_REPLY, loss_pct=100.0)])
+        self.assertIn("не отвечает на проверку как клиент", message)
+        self.assertNotIn("потери", message)
+
     def test_downs_are_declined(self):
         for downs, phrase in ((3, "упал 3 раза "), (5, "упал 5 раз "), (11, "упал 11 раз "), (21, "упал 21 раз "),
                               (22, "упал 22 раза ")):
@@ -121,6 +126,13 @@ class RestoredLineTests(unittest.TestCase):
         self.assertNotIn("отвечает", watched)
         self.assertNotIn("срок", watched)
 
+    def test_server_checked_as_a_client_returns_because_it_answers(self):
+        for observe in (False, True):
+            with self.subTest(observe=observe):
+                back = text([restored(RestoreCause.CALM, reason_kind=ReasonKind.NO_REPLY, observe=observe)])
+                self.assertIn("снова отвечает на проверку", back)
+                self.assertNotIn("потери", back)
+
     def test_other_causes_do_not_depend_on_the_reason(self):
         self.assertIn("вручную", text([restored(RestoreCause.MANUAL, reason_kind=ReasonKind.STALLED)]))
 
@@ -185,6 +197,12 @@ class SafetyTests(unittest.TestCase):
                       text([restored(RestoreCause.CALM, reason_kind=ReasonKind.STALLED, observe=True)], lang="en"))
         self.assertIn("term is over",
                       text([restored(RestoreCause.CALM, reason_kind=ReasonKind.STALLED)], lang="en"))
+
+    def test_english_client_probe_texts(self):
+        self.assertIn("does not answer the client-like check",
+                      text([disabled(reason_kind=ReasonKind.NO_REPLY)], lang="en"))
+        self.assertIn("answers the check again",
+                      text([restored(RestoreCause.CALM, reason_kind=ReasonKind.NO_REPLY)], lang="en"))
 
     def test_unknown_language_falls_back_to_english(self):
         self.assertIn("Disabled", text([disabled()], lang="de"))

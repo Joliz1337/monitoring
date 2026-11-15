@@ -408,6 +408,8 @@ export interface LossProbeStats {
   loss_pct: number
   rtt_ms: number | null
   samples: number
+  // false — подключение проходит, а на проверку «как клиент» сервер не отвечает; нет поля или null — проверка не идёт
+  answers?: boolean | null
 }
 
 export interface HAProxyProxyStats {
@@ -2257,6 +2259,7 @@ export interface LossRelay {
   loss_pct: number
   rtt_ms: number | null
   samples: number
+  answers?: boolean | null
 }
 
 export interface LossTarget {
@@ -2292,6 +2295,8 @@ export interface QuarantineSettingsData {
   max_share_pct: number
   drop_sessions: boolean
   notify: boolean
+  // Релеи проверяют адреса назначения «как клиент» (TLS-рукопожатие)
+  client_probe: boolean
   exempt_server_ids: number[]
   // Формат адресов — как у excluded_targets
   exempt_targets: string[]
@@ -2322,7 +2327,7 @@ export interface QuarantineItem {
   server_id: number
   server_name: string
   state: 'pending' | 'disabled' | 'blocked' | 'would_disable'
-  reason: { kind: 'loss' | 'downs' | 'stalled'; loss_pct: number; downs: number }
+  reason: { kind: 'loss' | 'downs' | 'stalled' | 'no_reply'; loss_pct: number; downs: number }
   // Unix-секунды; у would_disable — когда панель так решила
   disabled_at: number | null
   // Раньше этого времени адрес не вернётся; есть только у disabled

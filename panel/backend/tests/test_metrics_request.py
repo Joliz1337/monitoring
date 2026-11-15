@@ -212,6 +212,22 @@ class DirectRequestTest(LiveNodeCase):
 
         self.assertEqual(self.requests[0].query["window"], str(window))
 
+    async def test_node_is_not_asked_to_probe_as_a_client_by_default(self):
+        url = await self.start_node()
+
+        await self.poll(node(url))
+
+        self.assertNotIn("client_probe", self.requests[0].query)
+
+    async def test_node_is_asked_to_probe_as_a_client_when_the_owner_switched_it_on(self):
+        url = await self.start_node()
+        runner = mock.Mock(client_probe_wanted=mock.Mock(return_value=True))
+
+        with mock.patch.object(metrics_collector, "get_quarantine_runner", return_value=runner):
+            await self.poll(node(url))
+
+        self.assertEqual(self.requests[0].query["client_probe"], "1")
+
     async def test_mtls_node_is_not_sent_the_api_key(self):
         url = await self.start_node()
         await self.poll(node(url))

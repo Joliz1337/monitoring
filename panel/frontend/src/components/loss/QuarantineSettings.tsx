@@ -114,6 +114,13 @@ export default function QuarantineSettings({ servers, value, onChange }: Props) 
 
       <div className="flex items-center justify-between gap-4">
         <div>
+          <p className="text-sm text-dark-200">{t('loss.quarantine_client_probe')}</p>
+          <p className="text-xs text-dark-500">{t('loss.quarantine_client_probe_hint')}</p>
+        </div>
+        <Toggle on={value.client_probe} onClick={() => onChange({ ...value, client_probe: !value.client_probe })} />
+      </div>
+      <div className="flex items-center justify-between gap-4">
+        <div>
           <p className="text-sm text-dark-200">{t('loss.quarantine_drop_sessions')}</p>
           <p className="text-xs text-dark-500">{t('loss.quarantine_drop_sessions_hint')}</p>
         </div>

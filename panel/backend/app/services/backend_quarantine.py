@@ -8,16 +8,19 @@
 Пара, а не адрес: фильтрация на пути зависит от релея, с другого релея тот же
 адрес работает.
 
-- Отключить — одно из трёх: сервер не отвечает клиентам дольше удержания
-  (`stalled`), потери не ниже порога дольше удержания, падений за полчаса не
-  меньше порога. Порог потерь — от половины подключений: сервер, до которого
+- Отключить — одно из трёх: сервер не отвечает клиентам дольше удержания,
+  потери не ниже порога дольше удержания, падений за полчаса не меньше порога.
+  «Не отвечает» — по проверке релея «как клиент» (`answers`), а где её нет —
+  по счётчикам трафика HAProxy (`stalled`). Порог потерь — от половины подключений: сервер, до которого
   теряется их часть, бывает рабочим, и по одному проценту потерь его от
   заблокированного не отличить.
 - Решение ещё не отключение: пара `pending`, пока нода не ответила, `disabled`
   — когда применила, `blocked` — когда отказала (последний сервер правила,
   предел доли) или до неё не достучаться. Срок, счёт отключений и сообщение —
   с подтверждения ноды.
-- Вернуть — минимальный срок вышел и потери ниже половины порога всё затишье.
+- Вернуть — минимальный срок вышел, потери ниже половины порога и сервер не
+  молчит всё затишье. Проверка «как клиент» идёт и к отключённому серверу,
+  поэтому с ней он возвращается по факту ответа, а не «на пробу».
   Срок растёт с каждым отключением пары за сутки: мигающий адрес не должен
   ходить туда-обратно каждые десять минут.
 - Беда релея — он теряет больше половины своих адресов разом: дело в его
@@ -75,6 +78,7 @@ class ReasonKind(str, Enum):
     LOSS = "loss"
     DOWNS = "downs"
     STALLED = "stalled"
+    NO_REPLY = "no_reply"
 
 
 class EventKind(str, Enum):
@@ -100,6 +104,7 @@ class NodeFailure(str, Enum):
 
 
 NOT_FOUND = "not_found"
+SILENT_REASONS = (ReasonKind.STALLED, ReasonKind.NO_REPLY)
 WANTED_STATES = (PairState.PENDING, PairState.DISABLED, PairState.BLOCKED)
 
 
@@ -202,9 +207,17 @@ def _counts_downs(mode: TargetMode) -> bool:
     return mode is not TargetMode.TOTAL_ONLY
 
 
+def _silent(reading: LossReading) -> bool:
+    """Сервер не отвечает клиентам. Проверке «как клиент» веры больше, чем счётчикам
+    трафика: она спрашивает сам сервер. Счётчики решают, только когда её нет."""
+    if reading.answers is not None:
+        return not reading.answers
+    return bool(reading.stalled)
+
+
 def _is_bad(reading: LossReading, mode: TargetMode, policy: QuarantinePolicy) -> bool:
     """Плохая сейчас: хотя бы один повод отключать налицо (удержание ещё не прошло)."""
-    if reading.stalled or reading.loss_pct >= _trigger_loss(mode, policy):
+    if _silent(reading) or reading.loss_pct >= _trigger_loss(mode, policy):
         return True
     return _counts_downs(mode) and (reading.downs or 0) >= policy.downs_threshold
 
@@ -221,7 +234,7 @@ class QuarantineTracker:
     pairs: dict[PairKey, Pair] = field(default_factory=dict)
     # Пара → с какого момента потери дают повод отключать
     _above: dict[PairKey, float] = field(default_factory=dict)
-    # Пара → с какого момента сервер не отвечает клиентам
+    # Пара → с какого момента сервер не отвечает клиентам (по проверке или по счётчикам)
     _stalled: dict[PairKey, float] = field(default_factory=dict)
     _pauses: dict[int, RelayPause] = field(default_factory=dict)
     # Релей → до какого момента его падения не повод отключать: пока у релея не было
@@ -271,7 +284,7 @@ class QuarantineTracker:
                 wanted.setdefault(pair.relay_id, []).append(pair)
         return {
             relay_id: [pair.target for pair in sorted(
-                pairs, key=lambda p: (p.reason_kind is not ReasonKind.STALLED, -p.loss_pct, p.target),
+                pairs, key=lambda p: (p.reason_kind not in SILENT_REASONS, -p.loss_pct, p.target),
             )]
             for relay_id, pairs in wanted.items()
         }
@@ -416,10 +429,10 @@ class QuarantineTracker:
         reading = item.reading
         lossy = reading.loss_pct >= _trigger_loss(item.mode, policy)
         # Оба таймера идут каждый цикл, какой бы повод ни сработал первым
-        stalled_long = self._held(self._stalled, item.key, bool(reading.stalled), policy, now)
+        silent_long = self._held(self._stalled, item.key, _silent(reading), policy, now)
         loss_long = self._held(self._above, item.key, lossy, policy, now)
-        if stalled_long:
-            return ReasonKind.STALLED
+        if silent_long:
+            return ReasonKind.NO_REPLY if reading.answers is False else ReasonKind.STALLED
         if loss_long:
             return ReasonKind.LOSS
         downs_trusted = now >= self._downs_ignored_until.get(item.key[0], 0.0)
@@ -436,8 +449,9 @@ class QuarantineTracker:
         return now - since.setdefault(key, now) >= policy.sustained_sec
 
     def _step_active(self, item: _Observed, pair: Pair, policy: QuarantinePolicy, now: float) -> list[Event]:
-        # Молчащий сервер в работе (нода отказала, режим наблюдения) затишья не начинает
-        quiet = item.reading.loss_pct < _recovery_bound(item.mode, policy) and not item.reading.stalled
+        # Молчащий сервер затишья не начинает: по счётчикам — пока он в работе (нода
+        # отказала, режим наблюдения), по проверке «как клиент» — и отключённый
+        quiet = item.reading.loss_pct < _recovery_bound(item.mode, policy) and not _silent(item.reading)
         if pair.state is PairState.WOULD_DISABLE and _counts_downs(item.mode):
             # В наблюдении сервер не в обслуживании — его падения видны и держат пару в списке
             quiet = quiet and (item.reading.downs or 0) < policy.downs_threshold

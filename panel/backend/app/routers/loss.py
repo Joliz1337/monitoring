@@ -124,6 +124,8 @@ class QuarantineSettingsIn(BaseModel):
     max_share_pct: int = Field(ge=MAX_SHARE_PCT_BOUNDS[0], le=MAX_SHARE_PCT_BOUNDS[1])
     drop_sessions: bool = True
     notify: bool = True
+    # Вкладка, открытая до обновления, поля не шлёт — проверка тогда остаётся выключенной
+    client_probe: bool = False
     exempt_server_ids: list[int] = Field(default_factory=list, max_length=5000)
     # "ip" — все порты адреса, "ip:port" / "[v6]:port" — один бэкенд
     exempt_targets: list[str] = Field(default_factory=list, max_length=MAX_EXCLUDED_TARGETS)

@@ -172,6 +172,11 @@ class QuarantineRunner:
         self._settings = settings
         self._wake.set()
 
+    def client_probe_wanted(self) -> bool:
+        """Сборщик метрик передаёт это релеям с каждым опросом: проверка «как клиент»
+        идёт на ноде, только пока панель о ней просит."""
+        return self._settings.client_probe
+
     async def restore(self) -> None:
         self._settings = await self._storage.load_settings()
         self._mode = self._settings.mode

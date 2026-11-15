@@ -17,6 +17,8 @@ STALE_AFTER_SEC = 90.0
 # Адрес вне учёта с галочкой «только полные потери»: частичные потери на нём
 # известны и не интересны, учитывается только почти полный отказ
 TOTAL_LOSS_PCT = 95.0
+# Сервер, который подключения принимает, а клиенту не отвечает, не работает целиком
+NO_REPLY_LOSS_PCT = 100.0
 
 
 class TargetMode(str, Enum):
@@ -36,6 +38,9 @@ class LossReading:
     downs: Optional[int] = None
     # Клиенты шлют, а сервер HAProxy не отвечает ни байтом; None — судить не по чему
     stalled: Optional[bool] = None
+    # Ответил ли сервер релею на проверку «как клиент»; None — проверка не идёт.
+    # При False loss_pct — NO_REPLY_LOSS_PCT, сколько бы подключений ни доходило
+    answers: Optional[bool] = None
 
     @property
     def key(self) -> str:
@@ -85,14 +90,17 @@ def parse_readings(metrics: dict) -> tuple[LossReading, ...]:
             rtt = entry.get("rtt_ms")
             downs = entry.get("downs")
             stalled = entry.get("stalled")
+            answers = entry.get("answers")
+            answers = answers if isinstance(answers, bool) else None
             readings.append(LossReading(
                 ip=str(entry["ip"]),
                 port=int(entry["port"]),
-                loss_pct=float(entry["loss_pct"]),
+                loss_pct=NO_REPLY_LOSS_PCT if answers is False else float(entry["loss_pct"]),
                 rtt_ms=None if rtt is None else float(rtt),
                 samples=int(entry.get("samples", 0)),
                 downs=None if downs is None else int(downs),
                 stalled=stalled if isinstance(stalled, bool) else None,
+                answers=answers,
             ))
         except (AttributeError, KeyError, TypeError, ValueError):
             continue

@@ -81,6 +81,7 @@ function earliest(times: (number | null)[]): number | null {
 
 function reasonText(relays: QuarantineItem[], sustainedSeconds: number | null, t: Translate): string {
   if (relays[0].reason.kind === 'stalled') return t('loss.quarantine_reason_stalled')
+  if (relays[0].reason.kind === 'no_reply') return t('loss.quarantine_reason_no_reply')
   if (relays[0].reason.kind === 'downs') {
     return t('loss.quarantine_reason_downs', { count: Math.max(...relays.map(relay => relay.reason.downs)) })
   }
@@ -92,6 +93,8 @@ function reasonText(relays: QuarantineItem[], sustainedSeconds: number | null, t
 
 // Отключённый сервер трафика не получает: заговорил ли молчавший, покажет только возврат в работу
 function returnText(relays: QuarantineItem[], now: number, t: Translate): string {
+  // Проверка «как клиент» идёт и к отключённому серверу: вернётся он по факту ответа
+  if (relays[0].reason.kind === 'no_reply') return t('loss.quarantine_returns_when_answers')
   const silent = relays[0].reason.kind === 'stalled'
   const until = earliest(relays.map(relay => relay.until))
   if (until !== null && until > now) {

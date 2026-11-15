@@ -602,6 +602,24 @@ class StorageTests(RunnerTestCase):
         self.assertEqual(self.runner.tracker.pairs, {})
 
 
+class ClientProbeRequestTests(RunnerTestCase):
+    async def test_nodes_are_asked_to_probe_only_when_the_owner_switched_it_on(self):
+        self.assertIs(self.runner.client_probe_wanted(), False)
+        self.runner.set_settings(settings(client_probe=True))
+        self.assertIs(self.runner.client_probe_wanted(), True)
+
+    async def test_silent_server_is_disabled_and_shown_with_its_reason(self):
+        self.registry.update(RELAY_ID, "relay10", {"loss_probe": [
+            {"ip": "10.0.0.5", "port": 443, "loss_pct": 2.0, "rtt_ms": 40.0, "samples": 60, "downs": 0,
+             "stalled": None, "answers": False},
+        ]})
+        await self.cycle()
+        for _ in range(3):
+            await self.cycle(advance=60)
+        [item] = self.runner.view({})["items"]
+        self.assertEqual((item["state"], item["reason"]["kind"]), ("disabled", "no_reply"))
+
+
 class ViewTests(RunnerTestCase):
     async def test_view_lists_pairs_with_reason_and_term(self):
         self.observe(("10.0.0.5", 0.0, 3))

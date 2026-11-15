@@ -72,14 +72,19 @@ async def _read_json(content_encoding: str, chunks: AsyncIterator[bytes]) -> Any
     return body.json()
 
 
-async def request_metrics(server: "Server", window_seconds: int) -> tuple[int, Any]:
+async def request_metrics(server: "Server", window_seconds: int, client_probe: bool = False) -> tuple[int, Any]:
     """HTTP-статус ответа ноды на `/api/metrics` и разобранное тело (None, если статус не 200).
+
+    `client_probe` — просьба проверять адреса назначения как клиент: нода ведёт
+    проверку, пока просьба повторяется, а без неё серверам ничего не шлёт.
 
     Сбой соединения приходит исключением своего транспорта: aiohttp у прямого
     запроса, httpx у запроса через прокси.
     """
     url = f"{server.url}/api/metrics"
     params = {"window": window_seconds}
+    if client_probe:
+        params["client_probe"] = 1
     headers = {**node_auth_headers(server), **_ACCEPT_ENCODING}
     if getattr(server, "proxy_url", None):
         return await _request_via_proxy(server, url, params, headers)

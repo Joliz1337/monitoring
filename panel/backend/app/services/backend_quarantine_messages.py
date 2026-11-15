@@ -54,6 +54,8 @@ TEXTS = {
         "loss": lambda pct: f"потери {pct} %",
         "downs": lambda count: f"упал {count} {_times_ru(count)} за {DOWNS_WINDOW_MINUTES} мин",
         "stalled": "данные не идут: сервер не отвечает клиентам",
+        "no_reply": "не отвечает на проверку как клиент",
+        "no_reply_gone": "снова отвечает на проверку",
         "stalled_retry": "срок вышел, сервер снова получает клиентов",
         "stalled_gone": "молчание сервера больше не наблюдается",
         "term_min": lambda minutes: f"на {minutes} мин",
@@ -85,6 +87,8 @@ TEXTS = {
         "loss": lambda pct: f"loss {pct} %",
         "downs": lambda count: f"went down {count} times in {DOWNS_WINDOW_MINUTES} min",
         "stalled": "no data comes back: the server does not answer clients",
+        "no_reply": "does not answer the client-like check",
+        "no_reply_gone": "answers the check again",
         "stalled_retry": "term is over, the server gets clients again",
         "stalled_gone": "the server's silence is no longer observed",
         "term_min": lambda minutes: f"for {minutes} min",
@@ -120,10 +124,14 @@ def _reason(event: Event, texts: dict) -> str:
         return texts["downs"](event.downs)
     if event.reason_kind is ReasonKind.STALLED:
         return texts["stalled"]
+    if event.reason_kind is ReasonKind.NO_REPLY:
+        return texts["no_reply"]
     return texts["loss"](_number(event.loss_pct))
 
 
 def _cause(event: Event, texts: dict) -> str:
+    if event.cause is RestoreCause.CALM and event.reason_kind is ReasonKind.NO_REPLY:
+        return texts["no_reply_gone"]
     if event.cause is RestoreCause.CALM and event.reason_kind is ReasonKind.STALLED:
         # Отключённый сервер трафика не получает: возврат — проверка делом. В наблюдении
         # вердикт мог просто пропасть (мало трафика), поэтому «отвечает» не утверждается

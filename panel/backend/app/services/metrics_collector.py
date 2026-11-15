@@ -802,7 +802,9 @@ class MetricsCollector:
     async def _fetch_metrics(self, server: Server) -> tuple[Optional[dict], Optional[dict]]:
         """Fetch current metrics from server API. Returns (metrics, error_info)"""
         try:
-            status, data = await request_metrics(server, self._window_seconds(server.id))
+            # Параметр уходит, только когда проверка «как клиент» включена владельцем
+            probe = {"client_probe": True} if get_quarantine_runner().client_probe_wanted() is True else {}
+            status, data = await request_metrics(server, self._window_seconds(server.id), **probe)
             if status == 200:
                 self._last_success_mono[server.id] = time.monotonic()
                 # Момент ответа ноды — база времени для расчёта скоростей.
