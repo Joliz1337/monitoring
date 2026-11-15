@@ -8,11 +8,14 @@ Runnable with plain stdlib:  python -m unittest discover -s panel/backend/tests
 прислать уже известные отключения второй раз.
 """
 
+import asyncio
 import json
 import os
 import sys
 import unittest
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -404,6 +407,63 @@ class DigestTests(RunnerTestCase):
         self.assertEqual(self.targets(), [["10.0.0.5:443"]])
         await self.runner.stop()
         self.assertEqual(len(self.digests), 1)
+
+    def runner_with(self, notifier) -> QuarantineRunner:
+        runner = QuarantineRunner(
+            storage=self.storage, client_factory=lambda server: self.client, clock=self.clock,
+            registry=self.registry, notifier=notifier, notify_delay=0.0,
+        )
+        runner.set_settings(settings())
+        return runner
+
+    async def test_digest_cut_short_by_a_stop_is_sent_by_the_stop(self):
+        telegram_hangs = True
+
+        async def notifier(events: list[Event], current: QuarantineSettings) -> None:
+            if telegram_hangs:
+                await asyncio.Event().wait()
+            self.digests.append(list(events))
+
+        self.runner = self.runner_with(notifier)
+        self.observe(("10.0.0.5", 0.0, 3), *self.CALM)
+        cycle = asyncio.create_task(self.cycle())
+        await asyncio.sleep(0.05)
+        cycle.cancel()
+        with suppress(asyncio.CancelledError):
+            await cycle
+        telegram_hangs = False
+        await self.runner.stop()
+        self.assertEqual(self.targets(), [["10.0.0.5:443"]])
+
+    async def test_stop_does_not_wait_for_telegram_forever(self):
+        async def notifier(events: list[Event], current: QuarantineSettings) -> None:
+            await asyncio.Event().wait()
+
+        self.runner = self.runner_with(notifier)
+        self.runner._notify_delay = NOTIFY_DELAY_SEC
+        self.observe(("10.0.0.5", 0.0, 3), *self.CALM)
+        await self.cycle()
+        with mock.patch.object(runner_module, "STOP_NOTIFY_TIMEOUT_SEC", 0.05):
+            await asyncio.wait_for(self.runner.stop(), 2)
+
+    async def test_decided_events_survive_a_failed_push(self):
+        # Адрес вернулся, а база в этот момент не ответила: сообщение о возврате не теряется
+        async def notifier(events: list[Event], current: QuarantineSettings) -> None:
+            self.digests.append(list(events))
+
+        async def database_is_away(server_ids: set[int]) -> dict:
+            raise OSError("database is away")
+
+        self.runner = self.runner_with(notifier)
+        self.observe(("10.0.0.5", 0.0, 3), *self.CALM)
+        await self.cycle()
+        self.observe(("10.0.0.5", 0.0, 0), *self.CALM)
+        self.storage.load_servers = database_is_away
+        with self.assertLogs(runner_module.logger, level="ERROR"):
+            for _ in range(70):
+                await self.cycle(advance=10)
+        kinds = [event.kind for digest in self.digests for event in digest]
+        self.assertEqual(kinds, [EventKind.DISABLED, EventKind.RESTORED])
 
 
 class ModeChangeTests(RunnerTestCase):

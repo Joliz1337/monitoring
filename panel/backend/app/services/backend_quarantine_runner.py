@@ -67,7 +67,7 @@ VOLATILE_FIELDS = ("last_data_at", "calm_since")
 # пачка сообщений подряд
 NOTIFY_DELAY_SEC = 90.0
 # Остановка панели не ждёт Telegram дольше этого
-STOP_NOTIFY_TIMEOUT_SEC = 10.0
+STOP_NOTIFY_TIMEOUT_SEC = 5.0
 
 Notifier = Callable[[list[Event], QuarantineSettings], Awaitable[None]]
 
@@ -224,9 +224,8 @@ class QuarantineRunner:
                 await self._task
             self._task = None
         # Накопленное уходит сейчас: после перезапуска панели о нём никто не вспомнит
-        waiting, self._outbox = self._outbox, []
         with suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(self._notify(waiting, self._settings), STOP_NOTIFY_TIMEOUT_SEC)
+            await asyncio.wait_for(self._flush(self._settings, force=True), STOP_NOTIFY_TIMEOUT_SEC)
 
     async def _loop(self) -> None:
         while True:
@@ -245,12 +244,15 @@ class QuarantineRunner:
         async with self._lock:
             settings, now = self._settings, self._clock()
             events, self._startup_events = self._startup_events, []
-            events += await self._decide(settings, now)
-            events += await self._push(settings, now)
-            await self._save()
+            try:
+                events += await self._decide(settings, now)
+                events += await self._push(settings, now)
+                await self._save()
+            except Exception:
+                # Решённое уже случилось: сбой базы или рассылки не оставляет его без сообщения
+                logger.exception("quarantine cycle failed")
             self._queue(events, now)
-            due = self._take_due(now)
-        await self._notify(due, settings)
+        await self._flush(settings)
 
     async def release(self, server_id: int, target: str) -> bool:
         """Ручной возврат со страницы «Потери»; False — такой пары нет."""
@@ -269,11 +271,15 @@ class QuarantineRunner:
             self._outbox_since = now
         self._outbox += events
 
-    def _take_due(self, now: float) -> list[Event]:
-        if not self._outbox or now - self._outbox_since < self._notify_delay:
-            return []
-        due, self._outbox = self._outbox, []
-        return due
+    async def _flush(self, settings: QuarantineSettings, force: bool = False) -> None:
+        now = self._clock()
+        if not self._outbox or (not force and now - self._outbox_since < self._notify_delay):
+            return
+        batch = list(self._outbox)
+        await self._notify(batch, settings)
+        # Убирается после отправки: остановка панели посреди неё сводку не теряет — её дошлёт stop()
+        del self._outbox[:len(batch)]
+        self._outbox_since = now
 
     def view(self, owners: dict[str, str]) -> dict:
         settings = self._settings

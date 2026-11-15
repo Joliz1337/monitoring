@@ -55,7 +55,7 @@ TEXTS = {
         "downs": lambda count: f"упал {count} {_times_ru(count)} за {DOWNS_WINDOW_MINUTES} мин",
         "stalled": "данные не идут: сервер не отвечает клиентам",
         "stalled_retry": "срок вышел, сервер снова получает клиентов",
-        "stalled_gone": "сервер снова отвечает клиентам",
+        "stalled_gone": "молчание сервера больше не наблюдается",
         "term_min": lambda minutes: f"на {minutes} мин",
         "term_hours": lambda hours: f"на {hours} ч",
         "sessions": lambda count: f"соединений переведено: {count}",
@@ -86,7 +86,7 @@ TEXTS = {
         "downs": lambda count: f"went down {count} times in {DOWNS_WINDOW_MINUTES} min",
         "stalled": "no data comes back: the server does not answer clients",
         "stalled_retry": "term is over, the server gets clients again",
-        "stalled_gone": "the server answers again",
+        "stalled_gone": "the server's silence is no longer observed",
         "term_min": lambda minutes: f"for {minutes} min",
         "term_hours": lambda hours: f"for {hours} h",
         "sessions": lambda count: f"connections moved: {count}",
@@ -125,8 +125,8 @@ def _reason(event: Event, texts: dict) -> str:
 
 def _cause(event: Event, texts: dict) -> str:
     if event.cause is RestoreCause.CALM and event.reason_kind is ReasonKind.STALLED:
-        # Отключённый сервер трафика не получает: ответил ли он, видно только в наблюдении,
-        # а настоящий возврат — проверка делом
+        # Отключённый сервер трафика не получает: возврат — проверка делом. В наблюдении
+        # вердикт мог просто пропасть (мало трафика), поэтому «отвечает» не утверждается
         return texts["stalled_gone"] if event.observe else texts["stalled_retry"]
     return texts["causes"][event.cause]
 

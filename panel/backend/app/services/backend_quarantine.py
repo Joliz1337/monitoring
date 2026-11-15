@@ -10,9 +10,9 @@
 
 - Отключить — одно из трёх: сервер не отвечает клиентам дольше удержания
   (`stalled`), потери не ниже порога дольше удержания, падений за полчаса не
-  меньше порога. Потери ниже LOSS_ALONE_PCT считаются, только когда их
-  подтверждает второй признак — падение или `stalled`: сервер, до которого
-  теряется часть подключений, бывает рабочим, и снимать его незачем.
+  меньше порога. Порог потерь — от половины подключений: сервер, до которого
+  теряется их часть, бывает рабочим, и по одному проценту потерь его от
+  заблокированного не отличить.
 - Решение ещё не отключение: пара `pending`, пока нода не ответила, `disabled`
   — когда применила, `blocked` — когда отказала (последний сервер правила,
   предел доли) или до неё не достучаться. Срок, счёт отключений и сообщение —
@@ -49,8 +49,6 @@ NO_DATA_CLOSE_SEC = 3600
 MISSING_ANSWERS_TO_CLOSE = 2
 # Столько нода помнит падения сервера (DOWNS_WINDOW_SEC счётчика падений на ноде)
 DOWNS_WINDOW_SEC = 1800
-# С таких потерь адрес отключается и без второго признака
-LOSS_ALONE_PCT = 50.0
 RELAY_TROUBLE_MIN_PAIRS = 3
 RELAY_TROUBLE_ENTER_SHARE = 0.5
 RELAY_TROUBLE_EXIT_SHARE = 0.25
@@ -107,7 +105,7 @@ WANTED_STATES = (PairState.PENDING, PairState.DISABLED, PairState.BLOCKED)
 
 @dataclass(frozen=True)
 class QuarantinePolicy:
-    loss_threshold: float = 10.0
+    loss_threshold: float = 50.0
     sustained_sec: float = 180
     downs_threshold: int = 3
     calm_sec: float = 600
@@ -204,21 +202,11 @@ def _counts_downs(mode: TargetMode) -> bool:
     return mode is not TargetMode.TOTAL_ONLY
 
 
-def _usable_downs(reading: LossReading, mode: TargetMode, trusted: bool) -> int:
-    return (reading.downs or 0) if trusted and _counts_downs(mode) else 0
-
-
-def _loss_counts(reading: LossReading, mode: TargetMode, policy: QuarantinePolicy, downs: int) -> bool:
-    trigger = _trigger_loss(mode, policy)
-    if reading.loss_pct < trigger:
-        return False
-    return reading.loss_pct >= max(trigger, LOSS_ALONE_PCT) or bool(reading.stalled) or downs > 0
-
-
-def _is_bad(reading: LossReading, mode: TargetMode, policy: QuarantinePolicy, downs_trusted: bool) -> bool:
+def _is_bad(reading: LossReading, mode: TargetMode, policy: QuarantinePolicy) -> bool:
     """Плохая сейчас: хотя бы один повод отключать налицо (удержание ещё не прошло)."""
-    downs = _usable_downs(reading, mode, downs_trusted)
-    return bool(reading.stalled) or downs >= policy.downs_threshold or _loss_counts(reading, mode, policy, downs)
+    if reading.stalled or reading.loss_pct >= _trigger_loss(mode, policy):
+        return True
+    return _counts_downs(mode) and (reading.downs or 0) >= policy.downs_threshold
 
 
 @dataclass
@@ -250,7 +238,6 @@ class QuarantineTracker:
         for snapshot in snapshots:
             touched = []
             considered = 0
-            downs_trusted = self._downs_trusted(snapshot.server_id, now)
             for reading in snapshot.readings:
                 key = (snapshot.server_id, reading.key)
                 target_mode = TargetMode.TRACKED if plain else rules.mode(reading)
@@ -262,9 +249,9 @@ class QuarantineTracker:
                 if reading.downs is None or reading.samples < MIN_SAMPLES:
                     continue
                 considered += 1
-                # Здоровому адресу без записи и таймера считать нечего — таких почти все
-                if (key in self.pairs or key in self._above or key in self._stalled
-                        or _is_bad(reading, target_mode, policy, downs_trusted)):
+                # Здоровому адресу без записи считать нечего — таких почти все; его
+                # таймеры, если шли, уберёт _close_silent
+                if key in self.pairs or _is_bad(reading, target_mode, policy):
                     touched.append(_Observed(key, reading, target_mode))
             paused = self._relay_paused(snapshot, touched, considered, policy, now, events)
             for item in touched:
@@ -347,8 +334,7 @@ class QuarantineTracker:
     def _relay_paused(self, snapshot: RelaySnapshot, touched: list[_Observed], considered: int,
                       policy: QuarantinePolicy, now: float, events: list[Event]) -> bool:
         """considered — все учитываемые пары релея; плохие бывают только среди touched."""
-        downs_trusted = self._downs_trusted(snapshot.server_id, now)
-        bad = sum(1 for item in touched if self._counts_as_bad(item, policy, downs_trusted))
+        bad = sum(1 for item in touched if self._counts_as_bad(item, policy))
         pause = self._pauses.get(snapshot.server_id)
         if pause is None:
             if bad < RELAY_TROUBLE_MIN_PAIRS or bad <= considered * RELAY_TROUBLE_ENTER_SHARE:
@@ -369,19 +355,19 @@ class QuarantineTracker:
             self._forget_timers(item.key)
         return True
 
-    def _downs_trusted(self, relay_id: int, now: float) -> bool:
-        return now >= self._downs_ignored_until.get(relay_id, 0.0)
-
     def _forget_timers(self, key: PairKey) -> None:
         self._above.pop(key, None)
         self._stalled.pop(key, None)
 
-    def _counts_as_bad(self, item: _Observed, policy: QuarantinePolicy, downs_trusted: bool) -> bool:
-        if _is_bad(item.reading, item.mode, policy, downs_trusted):
+    def _counts_as_bad(self, item: _Observed, policy: QuarantinePolicy) -> bool:
+        if _is_bad(item.reading, item.mode, policy):
             return True
         pair = self.pairs.get(item.key)
-        still_out = pair is not None and pair.state is PairState.DISABLED
-        return still_out and item.reading.loss_pct >= _recovery_bound(item.mode, policy)
+        if pair is None or pair.state is not PairState.DISABLED:
+            return False
+        # Отключённый за молчание трафика не получает, и вердикта о нём больше нет:
+        # без счёта его за плохого релей с молчащими адресами отключал бы их по очереди
+        return pair.reason_kind is ReasonKind.STALLED or item.reading.loss_pct >= _recovery_bound(item.mode, policy)
 
     def _step(self, item: _Observed, relay_name: str, policy: QuarantinePolicy, mode: Mode,
               paused: bool, now: float) -> list[Event]:
@@ -428,17 +414,16 @@ class QuarantineTracker:
 
     def _reason(self, item: _Observed, policy: QuarantinePolicy, now: float) -> Optional[ReasonKind]:
         reading = item.reading
-        # Доверие падениям спрашивается здесь, а не в начале цикла: выход из беды релея
-        # в этом же цикле уже снял его
-        downs = _usable_downs(reading, item.mode, self._downs_trusted(item.key[0], now))
+        lossy = reading.loss_pct >= _trigger_loss(item.mode, policy)
         # Оба таймера идут каждый цикл, какой бы повод ни сработал первым
         stalled_long = self._held(self._stalled, item.key, bool(reading.stalled), policy, now)
-        loss_long = self._held(self._above, item.key, _loss_counts(reading, item.mode, policy, downs), policy, now)
+        loss_long = self._held(self._above, item.key, lossy, policy, now)
         if stalled_long:
             return ReasonKind.STALLED
         if loss_long:
             return ReasonKind.LOSS
-        if downs >= policy.downs_threshold:
+        downs_trusted = now >= self._downs_ignored_until.get(item.key[0], 0.0)
+        if downs_trusted and _counts_downs(item.mode) and (reading.downs or 0) >= policy.downs_threshold:
             return ReasonKind.DOWNS
         return None
 

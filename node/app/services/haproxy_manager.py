@@ -412,6 +412,7 @@ defaults
     timeout server-fin 5s
     option dontlognull
     option redispatch
+    option contstats
     option tcp-smart-accept
     option splice-request
     option splice-response

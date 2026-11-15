@@ -29,7 +29,7 @@ from app.models.dnat import DnatRule, DnatStateResponse
 from app.models.haproxy import HAProxyStatsResponse
 from app.models.loss_probe import ProbeStats
 from app.services.haproxy_down_counter import RowKey, Target, get_down_counter
-from app.services.haproxy_traffic_watch import Counters, get_traffic_watch
+from app.services.haproxy_traffic_watch import Counters, counts_bytes_continuously, get_traffic_watch
 
 logger = logging.getLogger(__name__)
 
@@ -311,11 +311,14 @@ def discover_targets() -> Discovery:
 
     found: dict[Target, set[Source]] = {}
     unknown: set[Source] = set()
-    stats = HAProxyStatsResponse.model_validate(get_haproxy_manager().get_stats())
+    haproxy = get_haproxy_manager()
+    stats = HAProxyStatsResponse.model_validate(haproxy.get_stats())
     if stats.available:
         rows = haproxy_rows(stats)
         get_down_counter().observe(rows)
-        get_traffic_watch().observe(haproxy_traffic(stats))
+        # Без наблюдений вердикт слежения устаревает сам: признака нет, а не «не молчит»
+        if counts_bytes_continuously(haproxy.get_config()):
+            get_traffic_watch().observe(haproxy_traffic(stats))
         for _, target, _ in rows:
             found.setdefault(target, set()).add(Source.HAPROXY)
     else:

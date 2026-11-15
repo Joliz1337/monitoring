@@ -32,7 +32,7 @@ interface Threshold {
 
 // Границы те же, что проверяет панель при сохранении
 const THRESHOLDS: Threshold[] = [
-  { key: 'loss_threshold', min: 2, max: 90, perInputUnit: 1, wholeOnly: false },
+  { key: 'loss_threshold', min: 50, max: 90, perInputUnit: 1, wholeOnly: false },
   { key: 'sustained_seconds', min: 60, max: 1800, perInputUnit: SECONDS_IN_MINUTE, wholeOnly: true },
   { key: 'downs_threshold', min: 2, max: 20, perInputUnit: 1, wholeOnly: true },
   { key: 'calm_seconds', min: 120, max: 3600, perInputUnit: SECONDS_IN_MINUTE, wholeOnly: true },

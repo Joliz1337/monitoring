@@ -17,7 +17,8 @@ from app.services.loss_overview import TargetParseError, format_endpoint, parse_
 
 QUARANTINE_SETTINGS_KEY = "loss_quarantine"
 
-LOSS_THRESHOLD_BOUNDS = (2.0, 90.0)
+# Меньше половины теряет и рабочий сервер: по таким потерям его от заблокированного не отличить
+LOSS_THRESHOLD_BOUNDS = (50.0, 90.0)
 SUSTAINED_SECONDS_BOUNDS = (60, 1800)
 DOWNS_THRESHOLD_BOUNDS = (2, 20)
 CALM_SECONDS_BOUNDS = (120, 3600)

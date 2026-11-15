@@ -27,7 +27,7 @@ from app.services.loss_exclusions import LossExclusions  # noqa: E402
 from app.services.loss_registry import LossRegistry  # noqa: E402
 
 VALID = {
-    "mode": "enforce", "loss_threshold": 15.0, "sustained_seconds": 240, "downs_threshold": 4,
+    "mode": "enforce", "loss_threshold": 60.0, "sustained_seconds": 240, "downs_threshold": 4,
     "calm_seconds": 900, "chronic_strikes": 5, "max_share_pct": 40, "drop_sessions": False, "notify": True,
     "exempt_server_ids": [3], "exempt_targets": ["1.2.3.4", "5.6.7.8:8443"],
 }
@@ -37,10 +37,10 @@ NO_EXCLUSIONS = LossExclusions(server_ids=frozenset(), targets=())
 class SettingsModelTests(unittest.TestCase):
     def test_valid_block(self):
         block = loss_router.QuarantineSettingsIn(**VALID)
-        self.assertEqual((block.mode, block.loss_threshold, block.max_share_pct), (Mode.ENFORCE, 15.0, 40))
+        self.assertEqual((block.mode, block.loss_threshold, block.max_share_pct), (Mode.ENFORCE, 60.0, 40))
 
     def test_bounds_are_enforced_at_the_border(self):
-        for field, value in (("loss_threshold", 1.9), ("loss_threshold", 90.1), ("sustained_seconds", 59),
+        for field, value in (("loss_threshold", 49.9), ("loss_threshold", 90.1), ("sustained_seconds", 59),
                              ("sustained_seconds", 1801), ("downs_threshold", 1), ("downs_threshold", 21),
                              ("calm_seconds", 119), ("calm_seconds", 3601), ("chronic_strikes", 1),
                              ("chronic_strikes", 21), ("max_share_pct", 9), ("max_share_pct", 91),

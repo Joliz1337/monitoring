@@ -20,6 +20,7 @@ from app.services.haproxy_traffic_watch import (  # noqa: E402
     WINDOW_SEC,
     Counters,
     TrafficWatch,
+    counts_bytes_continuously,
 )
 
 ROW = ("backend_tcp_lb", "srv1")
@@ -196,6 +197,36 @@ class TrafficWatchTests(unittest.TestCase):
         self.watch.observe([(NEIGHBOUR_ROW, NEIGHBOUR, ZERO)])
         self.later(SILENT)
         self.assertIsNone(self.watch.stalled(TARGET))
+
+
+class ContinuousCountersTests(unittest.TestCase):
+    """Без `option contstats` HAProxy прибавляет байты сессии в show stat только при её
+    закрытии: сервер с долгими живыми соединениями выглядел бы молчащим."""
+
+    def test_option_in_defaults_counts(self):
+        config = "global\n    maxconn 100\n\ndefaults\n    mode tcp\n    option contstats\n\nfrontend fe\n    bind :443\n"
+        self.assertTrue(counts_bytes_continuously(config))
+
+    def test_config_without_the_option_does_not(self):
+        self.assertFalse(counts_bytes_continuously("defaults\n    mode tcp\n    option redispatch\n"))
+
+    def test_empty_config_does_not(self):
+        self.assertFalse(counts_bytes_continuously(""))
+
+    def test_commented_option_does_not_count(self):
+        self.assertFalse(counts_bytes_continuously("defaults\n    mode tcp\n    # option contstats\n"))
+
+    def test_trailing_comment_is_ignored(self):
+        self.assertTrue(counts_bytes_continuously("defaults\n    option contstats  # счётчики по ходу\n"))
+
+    def test_option_in_one_frontend_is_not_enough(self):
+        # Остальные входы считали бы по-старому, а вердикт — один на адрес
+        config = "defaults\n    mode tcp\n\nfrontend fe\n    bind :443\n    option contstats\n"
+        self.assertFalse(counts_bytes_continuously(config))
+
+    def test_option_switched_off_anywhere_does_not_count(self):
+        config = "defaults\n    option contstats\n\nlisten relay\n    bind :443\n    no option contstats\n"
+        self.assertFalse(counts_bytes_continuously(config))
 
 
 if __name__ == "__main__":

@@ -12,6 +12,10 @@
 
 Адрес бывает в нескольких строках (несколько правил, копии под выходные IP):
 трафик адреса — сумма по его строкам.
+
+Счёт верен только при `option contstats`: без неё HAProxy прибавляет байты
+сессии при её закрытии, а новые сессии — сразу, и сервер с долгими живыми
+соединениями выглядел бы молчащим. Без опции наблюдения не ведутся.
 """
 
 import threading
@@ -29,6 +33,27 @@ STALLED_REPLY_SHARE = 0.05
 STALLED_REPLY_BYTES_PER_SESSION = 50
 # show stat читается раз в 10 с; не читается (HAProxy остановлен) — вердикт устарел
 VERDICT_VALID_SEC = 30
+CONFIG_SECTIONS = frozenset({
+    "global", "defaults", "frontend", "backend", "listen", "resolvers", "peers", "userlist",
+    "mailers", "cache", "program", "ring", "http-errors", "fcgi-app", "crt-store", "log-forward",
+})
+
+
+def counts_bytes_continuously(config: str) -> bool:
+    """`option contstats` стоит в defaults и нигде не снята: счётчики байт в show stat
+    растут по ходу сессии. В одном входе её мало — вердикт один на адрес."""
+    section, enabled = "", False
+    for line in config.splitlines():
+        words = line.split("#", 1)[0].split()
+        if not words:
+            continue
+        if words[0] in CONFIG_SECTIONS:
+            section = words[0]
+        elif words == ["no", "option", "contstats"]:
+            return False
+        elif words == ["option", "contstats"] and section == "defaults":
+            enabled = True
+    return enabled
 
 
 class Counters(NamedTuple):

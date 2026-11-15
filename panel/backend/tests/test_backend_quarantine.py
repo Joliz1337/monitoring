@@ -122,6 +122,15 @@ class LossTriggerTests(TrackerTestCase):
         self.step(snap(reading(50.0)), advance=180)
         self.assertEqual(self.state(), PairState.PENDING)
 
+    def test_threshold_set_above_half_still_rules(self):
+        strict = QuarantinePolicy(loss_threshold=70.0)
+        self.step(snap(reading(60.0, downs=2)), policy=strict)
+        self.step(snap(reading(60.0, downs=2)), advance=600, policy=strict)
+        self.assertIsNone(self.state())
+        self.step(snap(reading(70.0)), advance=60, policy=strict)
+        self.step(snap(reading(70.0)), advance=180, policy=strict)
+        self.assertEqual(self.state(), PairState.PENDING)
+
     def test_moderate_loss_alone_never_decides(self):
         # Сервер теряет на пути часть подключений и при этом работает: падений
         # нет, ответы идут. Отключать такой — снимать рабочий сервер
@@ -129,24 +138,11 @@ class LossTriggerTests(TrackerTestCase):
             self.step(snap(reading(49.9, stalled=False)), advance=600)
         self.assertIsNone(self.state())
 
-    def test_moderate_loss_with_a_down_decides(self):
-        self.step(snap(reading(15.0, downs=1)))
-        self.step(snap(reading(15.0, downs=1)), advance=179)
-        self.assertIsNone(self.state())
-        self.step(snap(reading(15.0, downs=1)), advance=1)
-        self.assertEqual(self.state(), PairState.PENDING)
-
-    def test_sustain_time_of_a_moderate_loss_starts_with_its_proof(self):
-        self.step(snap(reading(15.0)), advance=600)
-        self.step(snap(reading(15.0, downs=1)), advance=60)
-        self.step(snap(reading(15.0, downs=1)), advance=179)
-        self.assertIsNone(self.state())
-        self.step(snap(reading(15.0, downs=1)), advance=1)
-        self.assertEqual(self.state(), PairState.PENDING)
-
-    def test_loss_below_threshold_never_decides(self):
+    def test_moderate_loss_of_a_server_that_fell_never_decides(self):
+        # Сбой проверки у сервера с потерями на пути — не повод: потери сами не
+        # уйдут, и его сняло бы насовсем. Мигающий сервер ловит порог падений
         for _ in range(5):
-            self.step(snap(reading(9.9, downs=2)), advance=120)
+            self.step(snap(reading(49.9, downs=2)), advance=600)
         self.assertIsNone(self.state())
 
     def test_dip_restarts_the_sustain_time(self):
@@ -159,10 +155,10 @@ class LossTriggerTests(TrackerTestCase):
         self.assertEqual(self.state(), PairState.PENDING)
 
     def test_reason_remembers_the_numbers(self):
-        self.step(snap(reading(25.0, downs=1)))
-        self.step(snap(reading(25.0, downs=1)), advance=180)
+        self.step(snap(reading(60.0, downs=1)))
+        self.step(snap(reading(60.0, downs=1)), advance=180)
         pair = self.tracker.pairs[(RELAY, TARGET)]
-        self.assertEqual((pair.reason_kind, pair.loss_pct, pair.downs), (ReasonKind.LOSS, 25.0, 1))
+        self.assertEqual((pair.reason_kind, pair.loss_pct, pair.downs), (ReasonKind.LOSS, 60.0, 1))
 
 
 class StalledTriggerTests(TrackerTestCase):
@@ -196,10 +192,13 @@ class StalledTriggerTests(TrackerTestCase):
         self.step(snap(reading(stalled=None)), advance=3600)
         self.assertIsNone(self.state())
 
-    def test_silence_explains_a_moderate_loss_better_than_the_loss(self):
-        self.step(snap(reading(15.0, stalled=True)))
-        self.step(snap(reading(15.0, stalled=True)), advance=180)
-        self.assertEqual(self.tracker.pairs[(RELAY, TARGET)].reason_kind, ReasonKind.STALLED)
+    def test_silence_is_the_reason_whatever_the_loss(self):
+        for loss in (15.0, 60.0):
+            with self.subTest(loss=loss):
+                self.setUp()
+                self.step(snap(reading(loss, stalled=True)))
+                self.step(snap(reading(loss, stalled=True)), advance=180)
+                self.assertEqual(self.tracker.pairs[(RELAY, TARGET)].reason_kind, ReasonKind.STALLED)
 
     def test_server_still_silent_stays_wanted(self):
         # Нода отказала (последний сервер правила): сервер в работе и по-прежнему молчит
@@ -207,6 +206,18 @@ class StalledTriggerTests(TrackerTestCase):
         self.answer(node_answer(sessions=(), skipped=("last_server",)))
         self.step(snap(reading(stalled=True)), advance=3600)
         self.assertEqual(self.tracker.desired(), {RELAY: [TARGET]})
+        # Затишье не начиналось: запись та же, а не вернувшаяся и решённая заново
+        self.assertEqual(self.state(), PairState.BLOCKED)
+
+    def test_next_episode_needs_its_own_sustain_time(self):
+        self.decide()
+        self.answer(node_answer())
+        self.step(snap(reading(stalled=None)), advance=1)
+        self.step(snap(reading(stalled=None)), advance=600)
+        self.assertEqual(self.state(), PairState.IDLE)
+        # Вернулся и снова молчит: удержание идёт с начала, а не с прошлого эпизода
+        self.step(snap(reading(stalled=True)), advance=100)
+        self.assertEqual(self.tracker.desired(), {})
 
     def test_returns_after_term_and_calm(self):
         self.decide()
@@ -395,15 +406,15 @@ class ReturnTests(TrackerTestCase):
     def test_spike_restarts_the_calm(self):
         self.disable()
         self.step(snap(reading(4.0)), advance=600)
-        self.step(snap(reading(6.0)), advance=500)
+        self.step(snap(reading(30.0)), advance=500)
         self.assertEqual(self.step(snap(reading(4.0)), advance=10), [])
         self.assertEqual(self.step(snap(reading(4.0)), advance=590), [])
         self.assertEqual(kinds(self.step(snap(reading(4.0)), advance=10)), [EventKind.RESTORED])
 
     def test_calm_is_half_the_threshold(self):
         self.disable()
-        self.step(snap(reading(5.0)), advance=600)
-        self.assertEqual(self.step(snap(reading(5.0)), advance=600), [])
+        self.step(snap(reading(25.0)), advance=600)
+        self.assertEqual(self.step(snap(reading(25.0)), advance=600), [])
         self.assertEqual(self.state(), PairState.DISABLED)
 
     def test_stale_reading_right_after_return_does_not_disable_again(self):
@@ -546,6 +557,25 @@ class RelayTroubleTests(TrackerTestCase):
         self.step(self.fleet(1), advance=1)
         self.assertEqual(self.tracker.desired(), {RELAY: ["10.0.0.1:443"]})
 
+    def test_time_gathered_before_the_pause_does_not_count_after_it(self):
+        calm = [reading(0.0, ip=f"10.0.0.{i}") for i in range(2, 7)]
+        trouble = [reading(60.0, ip=f"10.0.0.{i}") for i in range(2, 5)] + calm[3:]
+        for bad in (reading(60.0, ip="10.0.0.1"), reading(stalled=True, ip="10.0.0.1")):
+            with self.subTest(reading=bad):
+                self.setUp()
+                self.step(snap(bad, *calm))
+                self.step(snap(bad, *calm), advance=120)
+                self.step(snap(bad, *trouble), advance=10)
+                self.assertEqual(list(self.tracker.paused_relays()), [RELAY])
+                self.step(snap(bad, *calm), advance=10)
+                self.step(snap(bad, *calm), advance=180)
+                # Беда кончилась: адрес плох уже шестую минуту, но удержание идёт с её конца
+                self.assertEqual((self.tracker.paused_relays(), self.tracker.desired()), ({}, {}))
+                self.step(snap(bad, *calm), advance=179)
+                self.assertEqual(self.tracker.desired(), {})
+                self.step(snap(bad, *calm), advance=1)
+                self.assertEqual(self.tracker.desired(), {RELAY: ["10.0.0.1:443"]})
+
     def test_leaving_the_pause_restarts_the_silence_time_too(self):
         self.step(self.silent_fleet(4))
         self.step(self.silent_fleet(4), advance=600)
@@ -582,18 +612,6 @@ class RelayTroubleTests(TrackerTestCase):
         self.step(after, advance=180)
         self.assertEqual(self.tracker.desired(), {RELAY: ["10.0.0.1:443"]})
 
-    def test_old_downs_do_not_back_up_a_moderate_loss(self):
-        trouble = snap(*(reading(40.0, downs=6, ip=f"10.0.0.{i + 1}") for i in range(6)))
-        self.step(trouble)
-        self.step(trouble, advance=300)
-        after = snap(*(reading(40.0 if i == 0 else 0.0, downs=2 if i == 0 else 0, ip=f"10.0.0.{i + 1}")
-                       for i in range(6)))
-        self.step(after, advance=10)
-        self.step(after, advance=180)
-        self.assertEqual(self.tracker.paused_relays(), {})
-        self.step(after, advance=1700)
-        self.assertEqual(self.tracker.desired(), {})
-
     def test_pending_and_blocked_pairs_do_not_apply_during_the_pause(self):
         calm = [reading(0.0, ip=f"10.0.0.{i}") for i in range(2, 7)]
         self.step(snap(reading(downs=3, ip="10.0.0.1"), *calm))
@@ -621,12 +639,24 @@ class RelayTroubleTests(TrackerTestCase):
         self.assertEqual(self.tracker.desired(), {RELAY: ["10.0.0.1:443"]})
 
     def test_disabled_pairs_still_lossy_count_as_bad(self):
-        # Два адреса отключены и ещё теряют 7 % (ниже порога, выше половины), третий плохой сейчас
+        # Два адреса отключены и ещё теряют 30 % (ниже порога, выше половины), третий плохой сейчас
         for ip in ("10.0.0.1", "10.0.0.2"):
             self.disable(ip=ip)
-        lossy = [reading(7.0, ip="10.0.0.1"), reading(7.0, ip="10.0.0.2"), reading(60.0, ip="10.0.0.3"),
+        lossy = [reading(30.0, ip="10.0.0.1"), reading(30.0, ip="10.0.0.2"), reading(60.0, ip="10.0.0.3"),
                  reading(0.0, ip="10.0.0.4"), reading(0.0, ip="10.0.0.5")]
         self.assertEqual(kinds(self.step(snap(*lossy), advance=10)), [EventKind.RELAY_PAUSED])
+
+    def test_servers_disabled_for_silence_keep_counting_as_bad(self):
+        # Молчат все адреса релея, но вердикт сначала есть у половины: отключённые
+        # трафика не получают, и без счёта их за плохие вторая половина ушла бы следом
+        self.step(self.silent_fleet(3))
+        self.step(self.silent_fleet(3), advance=180)
+        first = [f"10.0.0.{i}:443" for i in (1, 2, 3)]
+        self.answer([answer for target in first for answer in node_answer(target)])
+        rest = snap(*(reading(stalled=None if i < 3 else True, ip=f"10.0.0.{i + 1}") for i in range(6)))
+        self.assertEqual(kinds(self.step(rest, advance=60)), [EventKind.RELAY_PAUSED])
+        self.step(rest, advance=300)
+        self.assertEqual(sorted(self.tracker.desired()[RELAY]), first)
 
     def test_other_relays_are_not_paused(self):
         self.step(self.fleet(4), snap(reading(downs=3), relay_id=2))

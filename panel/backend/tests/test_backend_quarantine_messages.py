@@ -115,9 +115,10 @@ class RestoredLineTests(unittest.TestCase):
         self.assertIn("срок вышел", back)
         self.assertNotIn("потери", back)
 
-    def test_watched_silent_server_returns_when_it_answers(self):
+    def test_watched_silent_server_leaves_the_list_without_a_claim_that_it_answers(self):
         watched = text([restored(RestoreCause.CALM, reason_kind=ReasonKind.STALLED, observe=True)])
-        self.assertIn("снова отвечает", watched)
+        self.assertIn("больше не наблюдается", watched)
+        self.assertNotIn("отвечает", watched)
         self.assertNotIn("срок", watched)
 
     def test_other_causes_do_not_depend_on_the_reason(self):
@@ -180,7 +181,7 @@ class SafetyTests(unittest.TestCase):
     def test_english_silent_server(self):
         self.assertIn("the server does not answer clients",
                       text([disabled(reason_kind=ReasonKind.STALLED)], lang="en"))
-        self.assertIn("the server answers again",
+        self.assertIn("silence is no longer observed",
                       text([restored(RestoreCause.CALM, reason_kind=ReasonKind.STALLED, observe=True)], lang="en"))
         self.assertIn("term is over",
                       text([restored(RestoreCause.CALM, reason_kind=ReasonKind.STALLED)], lang="en"))

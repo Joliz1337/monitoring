@@ -337,15 +337,15 @@ STATS_DICT = {
 
 class RealDataPathTests(unittest.TestCase):
     def test_discovery_reads_manager_dict_and_dnat_state(self):
-        haproxy = mock.Mock(get_stats=mock.Mock(return_value=STATS_DICT))
+        haproxy = mock.Mock(get_stats=mock.Mock(return_value=STATS_DICT), get_config=mock.Mock(return_value=""))
         dnat = mock.Mock(load_state=mock.Mock(return_value=([dnat_rule(target_ip="10.0.0.6")], None)))
         with mock.patch("app.services.haproxy_manager.get_haproxy_manager", return_value=haproxy),              mock.patch("app.services.dnat_manager.get_dnat_manager", return_value=dnat):
             found = discover_targets()
         self.assertEqual(found.targets, {("10.0.0.5", 443): {Source.HAPROXY}, ("10.0.0.6", 443): {Source.DNAT}})
         self.assertEqual(found.unknown, frozenset())
 
-    def discover_with(self, counter: DownCounter, stats: dict) -> Discovery:
-        haproxy = mock.Mock(get_stats=mock.Mock(return_value=stats))
+    def discover_with(self, counter: DownCounter, stats: dict, config: str = "") -> Discovery:
+        haproxy = mock.Mock(get_stats=mock.Mock(return_value=stats), get_config=mock.Mock(return_value=config))
         dnat = mock.Mock(load_state=mock.Mock(return_value=([], None)))
         with mock.patch("app.services.haproxy_manager.get_haproxy_manager", return_value=haproxy),              mock.patch("app.services.dnat_manager.get_dnat_manager", return_value=dnat),              mock.patch("app.services.loss_probe.get_down_counter", return_value=counter):
             return discover_targets()
@@ -371,19 +371,35 @@ class RealDataPathTests(unittest.TestCase):
         self.discover_with(counter, self.stats_with_chkdown(3))
         self.assertEqual(counter.downs(("10.0.0.5", 443)), 2)
 
-    def test_discovery_feeds_the_traffic_watch(self):
+    def silent_server_seen_with(self, config: str) -> TrafficWatch:
+        """Шестьдесят новых сессий прислали 300 КБ, сервер не ответил ни байтом."""
         watch = TrafficWatch()
-
-        def discover(stot: int, bytes_in: int, bytes_out: int) -> None:
-            server = {**STATS_DICT["proxies"][0]["servers"][0], "stot": stot, "bin": bytes_in, "bout": bytes_out}
+        for stot, bytes_in in ((100, 4_000_000), (160, 4_300_000)):
+            server = {**STATS_DICT["proxies"][0]["servers"][0], "stot": stot, "bin": bytes_in, "bout": 90_000_000}
             stats = {"available": True, "proxies": [{**STATS_DICT["proxies"][0], "servers": [server]}]}
             with mock.patch("app.services.loss_probe.get_traffic_watch", return_value=watch):
-                self.discover_with(DownCounter(), stats)
+                self.discover_with(DownCounter(), stats, config)
+        return watch
 
-        discover(stot=100, bytes_in=4_000_000, bytes_out=90_000_000)
-        discover(stot=160, bytes_in=4_300_000, bytes_out=90_000_000)
-        # Шестьдесят новых сессий прислали 300 КБ, сервер не ответил ни байтом
+    def test_discovery_feeds_the_traffic_watch(self):
+        watch = self.silent_server_seen_with("defaults\n    mode tcp\n    option contstats\n")
         self.assertIs(watch.stalled(("10.0.0.5", 443)), True)
+
+    def test_traffic_is_not_judged_while_haproxy_counts_bytes_at_session_end(self):
+        watch = self.silent_server_seen_with("defaults\n    mode tcp\n")
+        self.assertIsNone(watch.stalled(("10.0.0.5", 443)))
+
+    def test_probe_singleton_reports_the_traffic_watch_verdict(self):
+        from app.services import loss_probe as loss_probe_module
+
+        target = ("10.0.0.5", 443)
+        watch = mock.Mock(stalled=mock.Mock(return_value=True))
+        with mock.patch.object(loss_probe_module, "_probe", None), \
+                mock.patch.object(loss_probe_module, "get_traffic_watch", return_value=watch):
+            probe = loss_probe_module.get_loss_probe()
+        probe.refresh_targets({target: {Source.HAPROXY}})
+        probe._windows[target].record(5.0)
+        self.assertIs(probe.snapshot({Source.HAPROXY})[0]["stalled"], True)
 
     def test_stats_route_annotates_manager_dict(self):
         from app.routers import haproxy as haproxy_router
