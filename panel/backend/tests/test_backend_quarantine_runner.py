@@ -30,7 +30,12 @@ from app.services.backend_quarantine import (  # noqa: E402
     ReasonKind,
     RestoreCause,
 )
-from app.services.backend_quarantine_runner import QuarantineRunner, pairs_delete, pairs_select  # noqa: E402
+from app.services.backend_quarantine_runner import (  # noqa: E402
+    NOTIFY_DELAY_SEC,
+    QuarantineRunner,
+    pairs_delete,
+    pairs_select,
+)
 from app.services.backend_quarantine_settings import QuarantineSettings, parse_settings  # noqa: E402
 from app.services.loss_registry import LossRegistry  # noqa: E402
 
@@ -116,9 +121,10 @@ class RunnerTestCase(unittest.IsolatedAsyncioTestCase):
         async def notifier(events: list[Event], current: QuarantineSettings) -> None:
             self.notified += events
 
+        # Без задержки сводки: что и когда решил исполнитель, видно сразу после цикла
         return QuarantineRunner(
             storage=self.storage, client_factory=lambda server: self.client, clock=self.clock,
-            registry=self.registry, notifier=notifier,
+            registry=self.registry, notifier=notifier, notify_delay=0.0,
         )
 
     def observe(self, *entries: tuple[str, float, int], server_id: int = RELAY_ID) -> None:
@@ -333,6 +339,73 @@ class ObserveModeTests(RunnerTestCase):
         self.assertEqual((event.kind, event.observe), (EventKind.DISABLED, True))
 
 
+class DigestTests(RunnerTestCase):
+    """Адреса одного сервера отключаются в соседних циклах: без задержки это пачка
+    сообщений подряд, с задержкой — одна сводка."""
+
+    CALM = tuple((f"10.0.0.{i}", 0.0, 0) for i in range(7, 10))
+
+    async def asyncSetUp(self):
+        self.digests: list[list[Event]] = []
+        await super().asyncSetUp()
+
+    def make_runner(self) -> QuarantineRunner:
+        async def notifier(events: list[Event], current: QuarantineSettings) -> None:
+            self.digests.append(list(events))
+
+        return QuarantineRunner(
+            storage=self.storage, client_factory=lambda server: self.client, clock=self.clock,
+            registry=self.registry, notifier=notifier,
+        )
+
+    async def disable(self, *ips: str, advance: float = 0.0) -> None:
+        self.observe(*((ip, 0.0, 3) for ip in ips), *self.CALM)
+        await self.cycle(advance=advance)
+
+    def targets(self) -> list[list[str]]:
+        return [[event.target for event in digest] for digest in self.digests]
+
+    async def test_events_of_neighbouring_cycles_go_as_one_digest(self):
+        await self.disable("10.0.0.5")
+        await self.disable("10.0.0.5", "10.0.0.6", advance=10)
+        await self.cycle(advance=NOTIFY_DELAY_SEC - 11)
+        self.assertEqual(self.digests, [])
+        await self.cycle(advance=1)
+        self.assertEqual(self.targets(), [["10.0.0.5:443", "10.0.0.6:443"]])
+
+    async def test_digest_is_sent_once(self):
+        await self.disable("10.0.0.5")
+        for _ in range(30):
+            await self.cycle(advance=10)
+        self.assertEqual(len(self.digests), 1)
+
+    async def test_next_digest_waits_for_its_own_delay(self):
+        await self.disable("10.0.0.5")
+        await self.cycle(advance=NOTIFY_DELAY_SEC)
+        await self.disable("10.0.0.5", "10.0.0.6", advance=10)
+        await self.cycle(advance=NOTIFY_DELAY_SEC - 1)
+        self.assertEqual(self.targets(), [["10.0.0.5:443"]])
+        await self.cycle(advance=1)
+        self.assertEqual(self.targets(), [["10.0.0.5:443"], ["10.0.0.6:443"]])
+
+    async def test_manual_release_joins_the_digest(self):
+        await self.disable("10.0.0.5")
+        self.clock.now += 10
+        await self.runner.release(RELAY_ID, TARGET)
+        self.assertEqual(self.digests, [])
+        await self.cycle(advance=NOTIFY_DELAY_SEC - 10)
+        self.assertEqual([[(e.kind, e.cause) for e in digest] for digest in self.digests],
+                         [[(EventKind.DISABLED, None), (EventKind.RESTORED, RestoreCause.MANUAL)]])
+
+    async def test_stopping_the_runner_sends_what_is_waiting(self):
+        # Перезапуск панели: о накопленном после него никто не вспомнит
+        await self.disable("10.0.0.5")
+        await self.runner.stop()
+        self.assertEqual(self.targets(), [["10.0.0.5:443"]])
+        await self.runner.stop()
+        self.assertEqual(len(self.digests), 1)
+
+
 class ModeChangeTests(RunnerTestCase):
     async def test_switching_off_returns_everything(self):
         self.observe(("10.0.0.5", 0.0, 3))
@@ -513,10 +586,22 @@ class ViewTests(RunnerTestCase):
         self.assertEqual(self.runner.view({})["items"], [])
 
     async def test_paused_relay_is_listed(self):
-        self.observe(*((f"10.0.0.{i}", 40.0, 0) for i in range(1, 5)))
+        self.observe(*((f"10.0.0.{i}", 60.0, 0) for i in range(1, 5)))
         await self.cycle()
         self.assertEqual(self.runner.view({})["paused_relays"],
                          [{"server_id": RELAY_ID, "name": "relay10", "since": self.clock.now}])
+
+    async def test_silent_server_is_disabled_and_shown_with_its_reason(self):
+        # Потерь и падений нет: релей сообщает только, что сервер не отвечает клиентам
+        self.registry.update(RELAY_ID, "relay10", {"loss_probe": [
+            {"ip": "10.0.0.5", "port": 443, "loss_pct": 0.0, "rtt_ms": 40.0, "samples": 60, "downs": 0,
+             "stalled": True},
+        ]})
+        await self.cycle()
+        for _ in range(3):
+            await self.cycle(advance=60)
+        [item] = self.runner.view({})["items"]
+        self.assertEqual((item["state"], item["reason"]["kind"]), ("disabled", "stalled"))
 
     async def test_disabled_relays_by_target(self):
         self.storage.servers[11] = relay(11)

@@ -53,6 +53,9 @@ TEXTS = {
         "relay": "релей",
         "loss": lambda pct: f"потери {pct} %",
         "downs": lambda count: f"упал {count} {_times_ru(count)} за {DOWNS_WINDOW_MINUTES} мин",
+        "stalled": "данные не идут: сервер не отвечает клиентам",
+        "stalled_retry": "срок вышел, сервер снова получает клиентов",
+        "stalled_gone": "сервер снова отвечает клиентам",
         "term_min": lambda minutes: f"на {minutes} мин",
         "term_hours": lambda hours: f"на {hours} ч",
         "sessions": lambda count: f"соединений переведено: {count}",
@@ -81,6 +84,9 @@ TEXTS = {
         "relay": "relay",
         "loss": lambda pct: f"loss {pct} %",
         "downs": lambda count: f"went down {count} times in {DOWNS_WINDOW_MINUTES} min",
+        "stalled": "no data comes back: the server does not answer clients",
+        "stalled_retry": "term is over, the server gets clients again",
+        "stalled_gone": "the server answers again",
         "term_min": lambda minutes: f"for {minutes} min",
         "term_hours": lambda hours: f"for {hours} h",
         "sessions": lambda count: f"connections moved: {count}",
@@ -112,7 +118,17 @@ def _number(value: float) -> str:
 def _reason(event: Event, texts: dict) -> str:
     if event.reason_kind is ReasonKind.DOWNS:
         return texts["downs"](event.downs)
+    if event.reason_kind is ReasonKind.STALLED:
+        return texts["stalled"]
     return texts["loss"](_number(event.loss_pct))
+
+
+def _cause(event: Event, texts: dict) -> str:
+    if event.cause is RestoreCause.CALM and event.reason_kind is ReasonKind.STALLED:
+        # Отключённый сервер трафика не получает: ответил ли он, видно только в наблюдении,
+        # а настоящий возврат — проверка делом
+        return texts["stalled_gone"] if event.observe else texts["stalled_retry"]
+    return texts["causes"][event.cause]
 
 
 def _term(seconds: float, texts: dict) -> Optional[str]:
@@ -133,7 +149,7 @@ def _facts(event: Event, texts: dict) -> list[str]:
             facts.append(texts["strikes"](event.strikes))
         return [fact for fact in facts if fact]
     if event.kind is EventKind.RESTORED:
-        return [texts["causes"][event.cause]] if event.cause else []
+        return [_cause(event, texts)] if event.cause else []
     if event.kind is EventKind.CHRONIC:
         return [texts["chronic_line"](event.strikes, ", ".join(event.relays))]
     return [texts["paused_line"]]

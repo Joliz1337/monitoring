@@ -2322,7 +2322,7 @@ export interface QuarantineItem {
   server_id: number
   server_name: string
   state: 'pending' | 'disabled' | 'blocked' | 'would_disable'
-  reason: { kind: 'loss' | 'downs'; loss_pct: number; downs: number }
+  reason: { kind: 'loss' | 'downs' | 'stalled'; loss_pct: number; downs: number }
   // Unix-секунды; у would_disable — когда панель так решила
   disabled_at: number | null
   // Раньше этого времени адрес не вернётся; есть только у disabled

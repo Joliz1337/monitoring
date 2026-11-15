@@ -62,6 +62,12 @@ UNSUPPORTED_RETRY_SECONDS = 600
 # Таймеры пары: в базу не пишутся (иначе запись шла бы каждый цикл), после
 # перезапуска панели затишье считается заново
 VOLATILE_FIELDS = ("last_data_at", "calm_since")
+# События копятся и уходят одной сводкой, когда самому старому исполнился этот
+# срок: адреса одного сервера отключаются в соседних циклах, и без задержки это
+# пачка сообщений подряд
+NOTIFY_DELAY_SEC = 90.0
+# Остановка панели не ждёт Telegram дольше этого
+STOP_NOTIFY_TIMEOUT_SEC = 10.0
 
 Notifier = Callable[[list[Event], QuarantineSettings], Awaitable[None]]
 
@@ -124,12 +130,16 @@ class QuarantineRunner:
         clock: Callable[[], float] = time.time,
         registry: Optional[LossRegistry] = None,
         notifier: Optional[Notifier] = None,
+        notify_delay: float = NOTIFY_DELAY_SEC,
     ):
         self._storage = storage or DbStorage()
         self._client_factory = client_factory
         self._clock = clock
         self._registry = registry or get_loss_registry()
         self._notifier = notifier
+        self._notify_delay = notify_delay
+        self._outbox: list[Event] = []
+        self._outbox_since = 0.0
         self.tracker = QuarantineTracker()
         self._settings = QuarantineSettings()
         # Режим, в котором трекер считал в прошлый раз: смена режима возвращает всё отключённое
@@ -208,12 +218,15 @@ class QuarantineRunner:
             self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._task.cancel()
-        with suppress(asyncio.CancelledError):
-            await self._task
-        self._task = None
+        if self._task is not None:
+            self._task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+        # Накопленное уходит сейчас: после перезапуска панели о нём никто не вспомнит
+        waiting, self._outbox = self._outbox, []
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self._notify(waiting, self._settings), STOP_NOTIFY_TIMEOUT_SEC)
 
     async def _loop(self) -> None:
         while True:
@@ -235,7 +248,9 @@ class QuarantineRunner:
             events += await self._decide(settings, now)
             events += await self._push(settings, now)
             await self._save()
-        await self._notify(events, settings)
+            self._queue(events, now)
+            due = self._take_due(now)
+        await self._notify(due, settings)
 
     async def release(self, server_id: int, target: str) -> bool:
         """Ручной возврат со страницы «Потери»; False — такой пары нет."""
@@ -243,11 +258,22 @@ class QuarantineRunner:
             pair = self.tracker.pairs.get((server_id, target))
             if pair is None or pair.state is PairState.IDLE:
                 return False
-            events = self.tracker.release(server_id, target, self._clock())
+            now = self._clock()
+            self._queue(self.tracker.release(server_id, target, now), now)
             await self._save()
         self._wake.set()
-        await self._notify(events, self._settings)
         return True
+
+    def _queue(self, events: list[Event], now: float) -> None:
+        if events and not self._outbox:
+            self._outbox_since = now
+        self._outbox += events
+
+    def _take_due(self, now: float) -> list[Event]:
+        if not self._outbox or now - self._outbox_since < self._notify_delay:
+            return []
+        due, self._outbox = self._outbox, []
+        return due
 
     def view(self, owners: dict[str, str]) -> dict:
         settings = self._settings

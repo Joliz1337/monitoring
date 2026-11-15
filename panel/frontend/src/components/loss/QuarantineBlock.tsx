@@ -80,6 +80,7 @@ function earliest(times: (number | null)[]): number | null {
 }
 
 function reasonText(relays: QuarantineItem[], sustainedSeconds: number | null, t: Translate): string {
+  if (relays[0].reason.kind === 'stalled') return t('loss.quarantine_reason_stalled')
   if (relays[0].reason.kind === 'downs') {
     return t('loss.quarantine_reason_downs', { count: Math.max(...relays.map(relay => relay.reason.downs)) })
   }
@@ -87,6 +88,17 @@ function reasonText(relays: QuarantineItem[], sustainedSeconds: number | null, t
   return sustainedSeconds === null
     ? t('loss.quarantine_reason_loss_short', { loss })
     : t('loss.quarantine_reason_loss', { loss, duration: formatSpan(sustainedSeconds, t) })
+}
+
+// Отключённый сервер трафика не получает: заговорил ли молчавший, покажет только возврат в работу
+function returnText(relays: QuarantineItem[], now: number, t: Translate): string {
+  const silent = relays[0].reason.kind === 'stalled'
+  const until = earliest(relays.map(relay => relay.until))
+  if (until !== null && until > now) {
+    const span = formatSpan(until - now, t)
+    return t(silent ? 'loss.quarantine_returns_after_stalled' : 'loss.quarantine_returns_after', { span })
+  }
+  return t(silent ? 'loss.quarantine_returns_soon_stalled' : 'loss.quarantine_returns_when_calm')
 }
 
 function refusalText(reason: QuarantineBlockedReason | null, t: Translate): string {
@@ -107,10 +119,7 @@ function situationText(relays: QuarantineItem[], sustainedSeconds: number | null
     if (since !== null) parts.push(t('loss.quarantine_would_disable_ago', { span: formatSpan(now - since, t) }))
   } else {
     if (since !== null) parts.push(t('loss.quarantine_disabled_ago', { span: formatSpan(now - since, t) }))
-    const until = earliest(relays.map(relay => relay.until))
-    parts.push(until !== null && until > now
-      ? t('loss.quarantine_returns_after', { span: formatSpan(until - now, t) })
-      : t('loss.quarantine_returns_when_calm'))
+    parts.push(returnText(relays, now, t))
     const sessions = relays.reduce((sum, relay) => sum + relay.sessions, 0)
     if (sessions > 0) parts.push(t('loss.quarantine_sessions_moved', { count: sessions }))
     if (partialReason) parts.push(t('loss.quarantine_partial', { reason: refusalText(partialReason, t) }))

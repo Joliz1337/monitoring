@@ -51,6 +51,11 @@ class DisabledLineTests(unittest.TestCase):
         self.assertIn("упал 4 раза за 30 мин", message)
         self.assertNotIn("потери", message)
 
+    def test_silent_server_reason(self):
+        message = text([disabled(reason_kind=ReasonKind.STALLED, loss_pct=0.0)])
+        self.assertIn("сервер не отвечает клиентам", message)
+        self.assertNotIn("потери", message)
+
     def test_downs_are_declined(self):
         for downs, phrase in ((3, "упал 3 раза "), (5, "упал 5 раз "), (11, "упал 11 раз "), (21, "упал 21 раз "),
                               (22, "упал 22 раза ")):
@@ -102,6 +107,21 @@ class RestoredLineTests(unittest.TestCase):
 
     def test_observe_return_is_marked(self):
         self.assertIn("Вернул бы", text([restored(RestoreCause.CALM, observe=True)]))
+
+    def test_silent_server_does_not_return_because_loss_is_gone(self):
+        # Потерь у такого сервера могло и не быть. Отключённый, он трафика не получает:
+        # заговорил ли он, покажет только возврат в работу
+        back = text([restored(RestoreCause.CALM, reason_kind=ReasonKind.STALLED)])
+        self.assertIn("срок вышел", back)
+        self.assertNotIn("потери", back)
+
+    def test_watched_silent_server_returns_when_it_answers(self):
+        watched = text([restored(RestoreCause.CALM, reason_kind=ReasonKind.STALLED, observe=True)])
+        self.assertIn("снова отвечает", watched)
+        self.assertNotIn("срок", watched)
+
+    def test_other_causes_do_not_depend_on_the_reason(self):
+        self.assertIn("вручную", text([restored(RestoreCause.MANUAL, reason_kind=ReasonKind.STALLED)]))
 
 
 class OtherSectionTests(unittest.TestCase):
@@ -157,6 +177,14 @@ class SafetyTests(unittest.TestCase):
             self.assertIn(part, message)
         self.assertNotIn("потери", message)
 
+    def test_english_silent_server(self):
+        self.assertIn("the server does not answer clients",
+                      text([disabled(reason_kind=ReasonKind.STALLED)], lang="en"))
+        self.assertIn("the server answers again",
+                      text([restored(RestoreCause.CALM, reason_kind=ReasonKind.STALLED, observe=True)], lang="en"))
+        self.assertIn("term is over",
+                      text([restored(RestoreCause.CALM, reason_kind=ReasonKind.STALLED)], lang="en"))
+
     def test_unknown_language_falls_back_to_english(self):
         self.assertIn("Disabled", text([disabled()], lang="de"))
 
@@ -186,6 +214,11 @@ class HistoryTests(unittest.TestCase):
             "target": TARGET, "owner": "nl-3", "reason": "loss", "loss_pct": 25.0, "downs": 0,
             "term_sec": 600, "sessions": 221, "strikes": 2, "cause": None, "observe": False, "relays": [],
         })
+
+    def test_silent_server_in_history(self):
+        [record] = history_records([disabled(reason_kind=ReasonKind.STALLED, loss_pct=0.0)], OWNERS, "ru")
+        self.assertEqual(record.details["reason"], "stalled")
+        self.assertIn("сервер не отвечает клиентам", record.message)
 
     def test_observe_events_are_marked_in_history(self):
         [record] = history_records([disabled(observe=True, term_sec=0)], OWNERS, "ru")
