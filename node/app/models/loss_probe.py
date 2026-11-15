@@ -26,6 +26,9 @@ class LossProbeEntry(ProbeStats):
     # Падений сервера HAProxy с этим адресом за полчаса; None — адреса среди
     # серверов HAProxy нет (цель DNAT), и вывести его из балансировки нельзя
     downs: Optional[int] = None
+    # Клиенты шлют, а сервер HAProxy с этим адресом не отвечает ни байтом;
+    # None — судить не по чему: мало новых сессий либо адреса в HAProxy нет
+    stalled: Optional[bool] = None
 
 
 class TargetRequest(BaseModel):

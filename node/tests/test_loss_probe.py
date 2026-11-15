@@ -30,6 +30,7 @@ from app.models.haproxy import (  # noqa: E402
 )
 from app.models.loss_probe import CHECK_ATTEMPTS_MAX, LossCheckRequest  # noqa: E402
 from app.services.haproxy_down_counter import DownCounter  # noqa: E402
+from app.services.haproxy_traffic_watch import TrafficWatch  # noqa: E402
 from app.services.loss_probe import (  # noqa: E402
     APPLY_SETTLE_SEC,
     MAX_TARGETS,
@@ -244,7 +245,8 @@ class LossProbeTests(unittest.TestCase):
         self.assertEqual(probe.snapshot({Source.DNAT}), [])
         self.assertEqual(
             probe.snapshot({Source.HAPROXY}),
-            [{"ip": "10.0.0.5", "port": 443, "loss_pct": 0.0, "rtt_ms": 6.0, "samples": 1, "downs": 0}],
+            [{"ip": "10.0.0.5", "port": 443, "loss_pct": 0.0, "rtt_ms": 6.0, "samples": 1,
+              "downs": 0, "stalled": None}],
         )
 
     def test_snapshot_reports_downs_for_haproxy_targets_only(self):
@@ -263,6 +265,22 @@ class LossProbeTests(unittest.TestCase):
         probe, _ = self.probe({shared: {Source.HAPROXY, Source.DNAT}}, {shared: [6.0]}, downs_fn=lambda target: 4)
         asyncio.run(probe.run_round())
         self.assertIsNone(probe.snapshot({Source.DNAT})[0]["downs"])
+
+    def test_snapshot_reports_stalled_for_haproxy_targets_only(self):
+        backend, forwarded = ("10.0.0.5", 443), ("10.0.0.6", 443)
+        probe, _ = self.probe(
+            {backend: {Source.HAPROXY}, forwarded: {Source.DNAT}}, {backend: [6.0], forwarded: [6.0]},
+            stalled_fn={backend: True, forwarded: True}.get,
+        )
+        asyncio.run(probe.run_round())
+        stalled = {entry["ip"]: entry["stalled"] for entry in probe.snapshot(set(Source))}
+        self.assertEqual(stalled, {"10.0.0.5": True, "10.0.0.6": None})
+
+    def test_snapshot_hides_stalled_when_haproxy_is_closed_to_panel(self):
+        shared = ("10.0.0.5", 443)
+        probe, _ = self.probe({shared: {Source.HAPROXY, Source.DNAT}}, {shared: [6.0]}, stalled_fn=lambda target: True)
+        asyncio.run(probe.run_round())
+        self.assertIsNone(probe.snapshot({Source.DNAT})[0]["stalled"])
 
     def test_unreadable_haproxy_keeps_its_targets_and_history(self):
         backend, forwarded = ("10.0.0.5", 443), ("10.0.0.6", 443)
@@ -352,6 +370,20 @@ class RealDataPathTests(unittest.TestCase):
         # Неудачное чтение не стирает точку отсчёта: падения за это время не теряются
         self.discover_with(counter, self.stats_with_chkdown(3))
         self.assertEqual(counter.downs(("10.0.0.5", 443)), 2)
+
+    def test_discovery_feeds_the_traffic_watch(self):
+        watch = TrafficWatch()
+
+        def discover(stot: int, bytes_in: int, bytes_out: int) -> None:
+            server = {**STATS_DICT["proxies"][0]["servers"][0], "stot": stot, "bin": bytes_in, "bout": bytes_out}
+            stats = {"available": True, "proxies": [{**STATS_DICT["proxies"][0], "servers": [server]}]}
+            with mock.patch("app.services.loss_probe.get_traffic_watch", return_value=watch):
+                self.discover_with(DownCounter(), stats)
+
+        discover(stot=100, bytes_in=4_000_000, bytes_out=90_000_000)
+        discover(stot=160, bytes_in=4_300_000, bytes_out=90_000_000)
+        # Шестьдесят новых сессий прислали 300 КБ, сервер не ответил ни байтом
+        self.assertIs(watch.stalled(("10.0.0.5", 443)), True)
 
     def test_stats_route_annotates_manager_dict(self):
         from app.routers import haproxy as haproxy_router

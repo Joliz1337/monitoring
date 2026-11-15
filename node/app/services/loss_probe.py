@@ -29,6 +29,7 @@ from app.models.dnat import DnatRule, DnatStateResponse
 from app.models.haproxy import HAProxyStatsResponse
 from app.models.loss_probe import ProbeStats
 from app.services.haproxy_down_counter import RowKey, Target, get_down_counter
+from app.services.haproxy_traffic_watch import Counters, get_traffic_watch
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,16 @@ def haproxy_rows(stats: HAProxyStatsResponse) -> list[tuple[RowKey, Target, Opti
     """Строки серверов с разобранным адресом и счётчиком падений HAProxy."""
     return [
         ((proxy.name, server.name), target, server.chkdown)
+        for proxy in stats.proxies
+        for server in proxy.servers
+        if (target := parse_addr(server.addr or "")) is not None
+    ]
+
+
+def haproxy_traffic(stats: HAProxyStatsResponse) -> list[tuple[RowKey, Target, Counters]]:
+    """Строки серверов со счётчиками сессий и байт в обе стороны."""
+    return [
+        ((proxy.name, server.name), target, Counters(server.stot, server.bin, server.bout))
         for proxy in stats.proxies
         for server in proxy.servers
         if (target := parse_addr(server.addr or "")) is not None
@@ -181,10 +192,12 @@ class LossProbe:
         discover: Callable[[], Discovery],
         attempt_fn: Callable[[str, int], Awaitable[Optional[float]]] = attempt,
         downs_fn: Callable[[Target], int] = lambda _target: 0,
+        stalled_fn: Callable[[Target], Optional[bool]] = lambda _target: None,
     ):
         self._discover = discover
         self._attempt = attempt_fn
         self._downs = downs_fn
+        self._stalled = stalled_fn
         self._windows: dict[Target, AttemptWindow] = {}
         self._sources: dict[Target, set[Source]] = {}
         self._unknown_since: dict[Source, float] = {}
@@ -258,8 +271,13 @@ class LossProbe:
             shown = self._sources.get((ip, port), set()) & readable
             if stats is None or not shown:
                 continue
-            downs = self._downs((ip, port)) if Source.HAPROXY in shown else None
-            entries.append({"ip": ip, "port": port, **stats.model_dump(), "downs": downs})
+            # Падения и ответы сервера — сведения HAProxy: у цели DNAT их нет
+            in_haproxy = Source.HAPROXY in shown
+            entries.append({
+                "ip": ip, "port": port, **stats.model_dump(),
+                "downs": self._downs((ip, port)) if in_haproxy else None,
+                "stalled": self._stalled((ip, port)) if in_haproxy else None,
+            })
         return entries
 
     async def start(self) -> None:
@@ -297,6 +315,7 @@ def discover_targets() -> Discovery:
     if stats.available:
         rows = haproxy_rows(stats)
         get_down_counter().observe(rows)
+        get_traffic_watch().observe(haproxy_traffic(stats))
         for _, target, _ in rows:
             found.setdefault(target, set()).add(Source.HAPROXY)
     else:
@@ -313,5 +332,9 @@ _probe: Optional[LossProbe] = None
 def get_loss_probe() -> LossProbe:
     global _probe
     if _probe is None:
-        _probe = LossProbe(discover=discover_targets, downs_fn=get_down_counter().downs)
+        _probe = LossProbe(
+            discover=discover_targets,
+            downs_fn=get_down_counter().downs,
+            stalled_fn=get_traffic_watch().stalled,
+        )
     return _probe
