@@ -20,7 +20,8 @@ import BackendEditModal from '../components/loss/BackendEditModal'
 import BatchEditModal, { type BatchMode } from '../components/loss/BatchEditModal'
 import ActivityStrip, { isJobRunning, type RunningCheck } from '../components/loss/ActivityStrip'
 import LossSettings from '../components/loss/LossSettings'
-import QuarantineBlock, { type BackendAddress } from '../components/loss/QuarantineBlock'
+import QuarantineBlock from '../components/loss/QuarantineBlock'
+import type { BackendAddress, ExemptAddress } from '../components/loss/quarantineGroups'
 import TraceModal from '../components/loss/TraceModal'
 import { readStorage, writeStorage } from '../utils/storage'
 
@@ -48,8 +49,10 @@ function isLossy(lossPct: number): boolean {
   return lossPct > LOSS_WARN_PCT
 }
 
-// Ключ строки `ip:port` для IPv6 неоднозначен — в список исключений IPv6 идёт в скобках
-function endpointText({ ip, port }: BackendAddress): string {
+// Ключ строки `ip:port` для IPv6 неоднозначен — в список исключений IPv6 идёт в скобках.
+// Без порта запись покрывает адрес на всех портах
+function endpointText({ ip, port }: ExemptAddress): string {
+  if (port === null) return ip
   return ip.includes(':') ? `[${ip}]:${port}` : `${ip}:${port}`
 }
 
@@ -148,7 +151,7 @@ export default function Loss() {
     })
   }
 
-  const exemptFromQuarantine = (address: BackendAddress) => {
+  const exemptFromQuarantine = (address: ExemptAddress) => {
     if (!settings) return
     const endpoint = endpointText(address)
     patchSettings(
