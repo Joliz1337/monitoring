@@ -49,6 +49,22 @@ function groupByAddress({ items, chronic }: QuarantineOverview, mergePorts: bool
   return [...groups.values()]
 }
 
+const REFUSED_FIRST = 0
+const QUARANTINED_NEXT = 1
+const IN_SERVICE_LAST = 2
+
+function attentionRank({ items }: AddressGroup): number {
+  if (items.some(item => item.state === 'blocked')) return REFUSED_FIRST
+  return items.length > 0 ? QUARANTINED_NEXT : IN_SERVICE_LAST
+}
+
+// Карточка ноды показывает только первые адреса, поэтому выше идёт то, что требует внимания:
+// адрес не отвечает, а релей отключить его отказался. Внутри ранга порядок прежний — по адресу
+function attentionFirst(addresses: AddressGroup[]): AddressGroup[] {
+  const ranks = new Map(addresses.map(address => [address, attentionRank(address)]))
+  return [...addresses].sort((left, right) => ranks.get(left)! - ranks.get(right)!)
+}
+
 export function groupByNode(view: QuarantineOverview, mergePorts: boolean): NodeGroup[] {
   const nodes = new Map<string | null, AddressGroup[]>()
   for (const address of groupByAddress(view, mergePorts)) {
@@ -56,7 +72,7 @@ export function groupByNode(view: QuarantineOverview, mergePorts: boolean): Node
     nodes.set(address.owner, addresses)
     addresses.push(address)
   }
-  return [...nodes].map(([owner, addresses]) => ({ owner, addresses }))
+  return [...nodes].map(([owner, addresses]) => ({ owner, addresses: attentionFirst(addresses) }))
 }
 
 // Релеи адреса с одним состоянием и одной причиной идут одной строкой

@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Loader2, Server } from 'lucide-react'
@@ -8,6 +8,7 @@ import { releasable, type AddressGroup, type NodeGroup } from './quarantineGroup
 
 // У ноды бывают десятки отключённых адресов — карточка показывает первые
 const ADDRESSES_SHOWN = 10
+const CONFIRM_WINDOW_MS = 5000
 
 interface Props extends AddressActions {
   node: NodeGroup
@@ -16,37 +17,39 @@ interface Props extends AddressActions {
 }
 
 interface ReleaseAllProps {
-  addresses: AddressGroup[]
-  onReleased: () => void
+  count: number
+  releasing: boolean
+  onConfirmed: () => void
 }
 
 // Возврат разом пускает клиентов на все больные адреса ноды, а панель час не отключит их заново —
-// поэтому со второго нажатия
-function ReleaseAllButton({ addresses, onReleased }: ReleaseAllProps) {
+// поэтому со второго нажатия. Подтверждение держится несколько секунд и только за тем числом
+// адресов, которое было на кнопке: список обновляется сам
+function ReleaseAllButton({ count, releasing, onConfirmed }: ReleaseAllProps) {
   const { t } = useTranslation()
-  const [confirming, setConfirming] = useState(false)
-  const [releasing, setReleasing] = useState(false)
-  const count = addresses.length
+  const [armedFor, setArmedFor] = useState<number | null>(null)
+  const confirming = armedFor === count
 
-  const release = async () => {
+  useEffect(() => {
+    if (armedFor === null) return
+    const timer = setTimeout(() => setArmedFor(null), CONFIRM_WINDOW_MS)
+    return () => clearTimeout(timer)
+  }, [armedFor])
+
+  const click = () => {
     if (!confirming) {
-      setConfirming(true)
+      setArmedFor(count)
       return
     }
-    setConfirming(false)
-    setReleasing(true)
-    const released = await releaseItems(addresses.flatMap(address => releasable(address.items)))
-    setReleasing(false)
-    if (released) toast.success(t('loss.quarantine_released_many', { count }))
-    else toast.error(t('loss.quarantine_release_failed_many'))
-    onReleased()
+    setArmedFor(null)
+    onConfirmed()
   }
 
   return (
     <button
       type="button"
-      onClick={release}
-      onBlur={() => setConfirming(false)}
+      onClick={click}
+      onBlur={() => setArmedFor(null)}
       disabled={releasing}
       title={t('loss.quarantine_release_hint')}
       className={`ml-auto shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs transition-colors disabled:opacity-40 ${
@@ -66,6 +69,9 @@ function countWith(addresses: AddressGroup[], state: 'would_disable' | 'blocked'
 export default function QuarantineNodeCard({ node, mergePorts, now, ...actions }: Props) {
   const { t } = useTranslation()
   const [showAll, setShowAll] = useState(false)
+  // Число адресов, которые сейчас возвращаются разом; список за это время успевает обновиться и
+  // похудеть, а кнопка должна остаться на месте и не дать запустить возврат второй раз
+  const [releasingCount, setReleasingCount] = useState<number | null>(null)
   const name = node.owner ?? t('loss.owner_unknown')
   const returnable = node.addresses.filter(address => releasable(address.items).length > 0)
   const wouldDisable = countWith(node.addresses, 'would_disable')
@@ -76,6 +82,16 @@ export default function QuarantineNodeCard({ node, mergePorts, now, ...actions }
   if (returnable.length > 0) facts.push({ text: t('loss.quarantine_node_disabled', { count: returnable.length }), alarming: false })
   if (wouldDisable > 0) facts.push({ text: t('loss.quarantine_node_would_disable', { count: wouldDisable }), alarming: false })
   if (refused > 0) facts.push({ text: t('loss.quarantine_node_blocked', { count: refused }), alarming: true })
+
+  const releaseAll = async () => {
+    const pairs = returnable.flatMap(address => releasable(address.items))
+    setReleasingCount(returnable.length)
+    const failed = await releaseItems(pairs)
+    setReleasingCount(null)
+    if (failed === 0) toast.success(t('loss.quarantine_released_many', { count: returnable.length }))
+    else toast.error(t('loss.quarantine_release_failed_many', { failed, total: pairs.length }))
+    actions.onReleased()
+  }
 
   return (
     <section aria-label={name} className="bg-dark-900/50 rounded-xl border border-dark-800/50">
@@ -94,7 +110,13 @@ export default function QuarantineNodeCard({ node, mergePorts, now, ...actions }
             ))}
           </p>
         </div>
-        {returnable.length > 1 && <ReleaseAllButton addresses={returnable} onReleased={actions.onReleased} />}
+        {(returnable.length > 1 || releasingCount !== null) && (
+          <ReleaseAllButton
+            count={releasingCount ?? returnable.length}
+            releasing={releasingCount !== null}
+            onConfirmed={releaseAll}
+          />
+        )}
       </header>
       <ul>
         {shown.map(address => (

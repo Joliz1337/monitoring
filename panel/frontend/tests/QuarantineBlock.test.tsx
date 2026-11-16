@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { toast } from 'sonner'
 import QuarantineBlock from '../src/components/loss/QuarantineBlock'
 import { lossApi, type QuarantineItem, type QuarantineOverview } from '../src/api/client'
 
@@ -33,11 +34,16 @@ const overview = (items: QuarantineItem[], over: Partial<QuarantineOverview> = {
 
 function show(view: QuarantineOverview) {
   const handlers = { onReleased: vi.fn(), onExempt: vi.fn(), onEdit: vi.fn() }
-  const rendered = render(<QuarantineBlock view={view} sustainedSeconds={180} canExempt {...handlers} />)
-  return { ...handlers, ...rendered }
+  const block = (shown: QuarantineOverview) => <QuarantineBlock view={shown} sustainedSeconds={180} canExempt {...handlers} />
+  const rendered = render(block(view))
+  // Страница перечитывает список раз в 10 с — блок получает новый ответ, не теряя своего состояния
+  const refresh = (next: QuarantineOverview) => rendered.rerender(block(next))
+  return { ...handlers, ...rendered, refresh }
 }
 
 const card = (owner: string) => screen.getByRole('region', { name: owner })
+const releaseAllButton = (owner: string, name: string | RegExp) =>
+  within(card(owner)).getByRole('button', { name }) as HTMLButtonElement
 const rowsOf = (owner: string) => within(card(owner)).getAllByRole('listitem')
 const rowOf = (address: string) => screen.getByText(address).closest('li') as HTMLElement
 const expand = (address: string) => fireEvent.click(screen.getByText(address))
@@ -52,6 +58,10 @@ describe('Потери: блок «Отключённые адреса»', () =>
   beforeEach(() => {
     localStorage.clear()
     vi.spyOn(Date, 'now').mockReturnValue(NOW * 1000)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('адреса разложены по карточкам нод', () => {
@@ -218,6 +228,96 @@ describe('Потери: блок «Отключённые адреса»', () =>
     expect(release.mock.calls).toEqual([
       [3, '193.141.60.121:8449'], [3, '193.141.60.129:8449'], [5, '193.141.60.129:8449'],
     ])
+  })
+
+  it('подтверждение «Вернуть все» само гаснет через несколько секунд', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const release = vi.spyOn(lossApi, 'releaseQuarantine').mockResolvedValue({ data: { released: true } } as never)
+    show(overview([...on('193.141.60.121:8449', [BRIDGE_3]), ...on('193.141.60.129:8449', [BRIDGE_3])]))
+    fireEvent.click(releaseAllButton('Тубо 2', 'Вернуть все 2'))
+    expect(releaseAllButton('Тубо 2', 'Точно вернуть 2?')).toBeTruthy()
+
+    act(() => { vi.advanceTimersByTime(5000) })
+
+    fireEvent.click(releaseAllButton('Тубо 2', 'Вернуть все 2'))
+    expect(release).not.toHaveBeenCalled()
+  })
+
+  it('подтверждение не переносится на другое число адресов', () => {
+    const release = vi.spyOn(lossApi, 'releaseQuarantine').mockResolvedValue({ data: { released: true } } as never)
+    const two = [...on('193.141.60.121:8449', [BRIDGE_3]), ...on('193.141.60.129:8449', [BRIDGE_3])]
+    const { refresh } = show(overview(two))
+    fireEvent.click(releaseAllButton('Тубо 2', 'Вернуть все 2'))
+
+    refresh(overview([...two, ...on('193.141.60.243:8449', [BRIDGE_3])]))
+    fireEvent.click(releaseAllButton('Тубо 2', 'Вернуть все 3'))
+
+    expect(releaseAllButton('Тубо 2', 'Точно вернуть 3?')).toBeTruthy()
+    expect(release).not.toHaveBeenCalled()
+  })
+
+  it('пока идёт возврат всех адресов, кнопка остаётся на месте и второй раз не запускается', async () => {
+    let finish = () => {}
+    const pending = new Promise(resolve => { finish = () => resolve({ data: { released: true } }) })
+    const release = vi.spyOn(lossApi, 'releaseQuarantine').mockReturnValue(pending as never)
+    const first = on('193.141.60.121:8449', [BRIDGE_3])
+    const { refresh, onReleased } = show(overview([...first, ...on('193.141.60.129:8449', [BRIDGE_3])]))
+    fireEvent.click(releaseAllButton('Тубо 2', 'Вернуть все 2'))
+    fireEvent.click(releaseAllButton('Тубо 2', 'Точно вернуть 2?'))
+
+    // Список обновился раньше, чем дошли все запросы: отключённым остался один адрес
+    refresh(overview(first))
+
+    expect(releaseAllButton('Тубо 2', 'Вернуть все 2').disabled).toBe(true)
+    finish()
+    await waitFor(() => expect(onReleased).toHaveBeenCalledTimes(1))
+    expect(release).toHaveBeenCalledTimes(2)
+    expect(within(card('Тубо 2')).queryByRole('button', { name: /Вернуть все/ })).toBeNull()
+  })
+
+  it('сбой возврата всех адресов называет, сколько возвратов не прошло', async () => {
+    vi.spyOn(lossApi, 'releaseQuarantine').mockImplementation(((serverId: number) =>
+      serverId === BRIDGE_5[0] ? Promise.reject(new Error('timeout')) : Promise.resolve({ data: { released: true } })) as never)
+    const toastError = vi.spyOn(toast, 'error')
+    const { onReleased } = show(overview([
+      ...on('193.141.60.121:8449', [BRIDGE_3]),
+      ...on('193.141.60.129:8449', [BRIDGE_3, BRIDGE_5]),
+    ]))
+
+    fireEvent.click(releaseAllButton('Тубо 2', 'Вернуть все 2'))
+    fireEvent.click(releaseAllButton('Тубо 2', 'Точно вернуть 2?'))
+
+    await waitFor(() => expect(onReleased).toHaveBeenCalledTimes(1))
+    expect(toastError).toHaveBeenCalledWith('Вернуть не удалось в 1 из 3 случаев')
+  })
+
+  it('адрес, который не удалось отключить, стоит в карточке первым, а не прячется под кнопку', () => {
+    const disabled = Array.from({ length: 12 }, (_, index) => item(`10.0.0.${index + 1}:443`, BRIDGE_3))
+    show(overview([...disabled, ...on('10.0.9.9:443', [BRIDGE_3], refused)]))
+
+    expect(rowsOf('Тубо 2')[0].textContent).toContain('10.0.9.9:443')
+    expect(rowsOf('Тубо 2')[1].textContent).toContain('10.0.0.1:443')
+  })
+
+  it('отказ без названной причины и «ошибка HAProxy» идут одной строкой', () => {
+    show(overview([
+      item('193.141.60.242:8449', BRIDGE_3, { ...refused, blocked_reason: null }),
+      item('193.141.60.242:8449', BRIDGE_5, { ...refused, blocked_reason: 'error' }),
+    ]))
+
+    expect(rowOf('193.141.60.242:8449').textContent).toContain('не отключён на 2 релеях: ошибка HAProxy')
+  })
+
+  it('в подробностях метка «N за сутки» расшифрована словами', () => {
+    show(overview(on('193.141.60.129:8443', [BRIDGE_3]), {
+      chronic: [{ target: '193.141.60.129:8443', ip: '193.141.60.129', port: 8443, owner: 'Тубо 2', strikes: 7 }],
+    }))
+    const row = rowOf('193.141.60.129:8443')
+    expect(row.textContent).not.toContain('постоянные проблемы')
+
+    expand('193.141.60.129:8443')
+
+    expect(row.textContent).toContain('постоянные проблемы · 7 отключений за сутки')
   })
 
   it('у адреса, который не отключён, вернуть нечего', () => {

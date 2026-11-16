@@ -961,7 +961,7 @@
     "quarantine_release_all": "Вернуть все {{count}}",
     "quarantine_release_all_confirm": "Точно вернуть {{count}}?",
     "quarantine_released_many": "Адресов возвращается в балансировку: {{count}}",
-    "quarantine_release_failed_many": "Часть адресов вернуть не удалось",
+    "quarantine_release_failed_many": "Вернуть не удалось в {{failed}} из {{total}} случаев",
     "quarantine_actions": "Действия",
     "quarantine_show_all": "Показать все {{count}}",
     "quarantine_show_less": "Свернуть",

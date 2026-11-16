@@ -45,12 +45,14 @@ function dotClass(items: QuarantineItem[]): string {
   return 'bg-dark-600'
 }
 
-function refusals(items: QuarantineItem[]): [QuarantineBlockedReason | null, QuarantineItem[]][] {
-  const byReason = new Map<QuarantineBlockedReason | null, QuarantineItem[]>()
+// Отказ без названной причины показывается как ошибка HAProxy — и идёт с ней одной строкой
+function refusals(items: QuarantineItem[]): [QuarantineBlockedReason, QuarantineItem[]][] {
+  const byReason = new Map<QuarantineBlockedReason, QuarantineItem[]>()
   for (const item of items) {
     if (item.state !== 'blocked') continue
-    const relays = byReason.get(item.blocked_reason) ?? []
-    byReason.set(item.blocked_reason, relays)
+    const reason = item.blocked_reason ?? 'error'
+    const relays = byReason.get(reason) ?? []
+    byReason.set(reason, relays)
     relays.push(item)
   }
   return [...byReason]
@@ -126,9 +128,9 @@ export default function QuarantineAddressRow({
 
   const release = async () => {
     setReleasing(true)
-    const released = await releaseItems(toRelease)
+    const failed = await releaseItems(toRelease)
     setReleasing(false)
-    if (released) toast.success(t('loss.quarantine_released', { target: group.key }))
+    if (failed === 0) toast.success(t('loss.quarantine_released', { target: group.key }))
     else toast.error(t('loss.quarantine_release_failed', { target: group.key }))
     onReleased()
   }
@@ -188,7 +190,7 @@ export default function QuarantineAddressRow({
             </span>
             <span className="block text-xs text-dark-400"><Facts group={group} /></span>
             {refusals(group.items).map(([reason, relays]) => (
-              <span key={reason ?? 'error'} className="flex items-center gap-1.5 text-xs text-danger">
+              <span key={reason} className="flex items-center gap-1.5 text-xs text-danger">
                 <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                 {t('loss.quarantine_blocked_on', {
                   where: t('loss.quarantine_relays_loc', { count: relayNames(relays).length }),
@@ -207,6 +209,11 @@ export default function QuarantineAddressRow({
       </div>
       {open && expandable && (
         <div className="ml-[2.125rem] mr-4 mb-3 pl-3 border-l-2 border-dark-800 space-y-2">
+          {group.chronicStrikes !== undefined && (
+            <p className="text-xs text-danger">
+              {t('loss.quarantine_chronic', { count: group.chronicStrikes })}. {t('loss.quarantine_chronic_hint')}
+            </p>
+          )}
           {groupBySituation(group.items).map(relays => (
             <Situation
               key={`${relays[0].target}@${relays[0].server_id}`}

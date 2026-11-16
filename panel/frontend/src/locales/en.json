@@ -943,7 +943,7 @@
     "quarantine_release_all": "Bring back all {{count}}",
     "quarantine_release_all_confirm": "Bring back {{count}}?",
     "quarantine_released_many": "Addresses going back into balancing: {{count}}",
-    "quarantine_release_failed_many": "Some addresses could not be brought back",
+    "quarantine_release_failed_many": "Could not bring back {{failed}} of {{total}}",
     "quarantine_actions": "Actions",
     "quarantine_show_all": "Show all {{count}}",
     "quarantine_show_less": "Collapse",
