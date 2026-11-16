@@ -292,6 +292,8 @@ export default function Loss() {
 
       <QuarantineBlock
         view={quarantine}
+        targets={targets}
+        lossThreshold={settings?.quarantine.loss_threshold ?? null}
         sustainedSeconds={settings?.quarantine.sustained_seconds ?? null}
         canExempt={settings !== null}
         onReleased={fetchOverview}

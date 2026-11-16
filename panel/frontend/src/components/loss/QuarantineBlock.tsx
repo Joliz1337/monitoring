@@ -1,24 +1,30 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { PauseCircle, ShieldOff } from 'lucide-react'
-import type { QuarantineOverview } from '../../api/client'
+import type { LossTarget, QuarantineOverview } from '../../api/client'
 import { Checkbox } from '../ui/Checkbox'
 import { readStorage, writeStorage } from '../../utils/storage'
 import QuarantineNodeCard from './QuarantineNodeCard'
 import type { AddressActions } from './QuarantineAddressRow'
 import { groupByNode } from './quarantineGroups'
+import { indexProbes } from './quarantineSpread'
 import { formatSpan } from './quarantineText'
 
 const MERGE_PORTS_KEY = 'loss_quarantine_merge_ports'
 
 interface Props extends AddressActions {
   view: QuarantineOverview | null
+  // Таблица потерь той же страницы: по ней видно, на скольких релеях из всех адрес не работает
+  targets: LossTarget[] | null
+  // Порог потерь автоотключения; null, пока настройки не загружены
+  lossThreshold: number | null
 }
 
-export default function QuarantineBlock({ view, ...actions }: Props) {
+export default function QuarantineBlock({ view, targets, lossThreshold, ...actions }: Props) {
   const { t } = useTranslation()
   const [mergePorts, setMergePorts] = useState(() => readStorage(MERGE_PORTS_KEY) === '1')
   const nodes = useMemo(() => (view ? groupByNode(view, mergePorts) : []), [view, mergePorts])
+  const probes = useMemo(() => (targets ? indexProbes(targets) : null), [targets])
   if (!view) return null
 
   const nothingToShow = nodes.length === 0 && view.paused_relays.length === 0
@@ -79,6 +85,8 @@ export default function QuarantineBlock({ view, ...actions }: Props) {
               node={node}
               mergePorts={mergePorts}
               now={now}
+              probes={probes}
+              lossThreshold={lossThreshold}
               {...actions}
             />
           ))}

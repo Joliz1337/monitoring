@@ -14,11 +14,18 @@ import {
   type ExemptAddress,
 } from './quarantineGroups'
 import { formatCount, reasonsBrief, refusalText, relayList, returnBrief, situationText } from './quarantineText'
+import { spreadLevel, type Spread, type SpreadLevel } from './quarantineSpread'
 
 // Столько релеев в краткой строке названо поимённо, больше — числом
 const RELAYS_INLINE = 2
 const HALF_DOT = 'bg-[linear-gradient(90deg,theme(colors.warning)_50%,theme(colors.danger)_50%)]'
 const pillCls = 'px-2 py-0.5 rounded-md border text-2xs font-medium'
+// Красным — только бан везде: такой адрес пора менять, а не ждать его возврата
+const SPREAD_CLS: Record<SpreadLevel, string> = {
+  all: 'bg-danger/10 text-danger border-danger/20',
+  most: 'bg-warning/10 text-warning border-warning/20',
+  limited: 'bg-dark-800/60 text-dark-300 border-dark-700',
+}
 
 export interface AddressActions {
   // Удержание из настроек — для текста причины; null, пока настройки не загружены
@@ -33,6 +40,19 @@ interface Props extends AddressActions {
   group: AddressGroup
   mergePorts: boolean
   now: number
+  // null — судить не о чем: таблица потерь не загружена, адреса в ней нет или он везде работает
+  spread: Spread | null
+}
+
+function SpreadMark({ spread }: { spread: Spread }) {
+  const { t } = useTranslation()
+  const level = spreadLevel(spread)
+  return (
+    <span title={t('loss.quarantine_spread_hint', { ...spread })} className={`${pillCls} whitespace-nowrap ${SPREAD_CLS[level]}`}>
+      {level === 'all' && `${t('loss.quarantine_spread_all')} · `}
+      {t('loss.quarantine_spread', { ...spread })}
+    </span>
+  )
 }
 
 function dotClass(items: QuarantineItem[]): string {
@@ -118,7 +138,7 @@ function Situation({ relays, sustainedSeconds, now }: { relays: QuarantineItem[]
 }
 
 export default function QuarantineAddressRow({
-  group, mergePorts, now, sustainedSeconds, canExempt, onReleased, onExempt, onEdit,
+  group, mergePorts, now, spread, sustainedSeconds, canExempt, onReleased, onExempt, onEdit,
 }: Props) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
@@ -171,6 +191,7 @@ export default function QuarantineAddressRow({
                 {mergePorts && (
                   <span className="font-mono text-xs text-dark-500">{group.ports.map(port => `:${port}`).join(', ')}</span>
                 )}
+                {spread && <SpreadMark spread={spread} />}
                 {group.chronicStrikes !== undefined && (
                   <span
                     title={`${t('loss.quarantine_chronic', { count: group.chronicStrikes })}. ${t('loss.quarantine_chronic_hint')}`}

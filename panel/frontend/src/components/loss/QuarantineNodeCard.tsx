@@ -5,6 +5,7 @@ import { Loader2, Server } from 'lucide-react'
 import QuarantineAddressRow, { type AddressActions } from './QuarantineAddressRow'
 import { releaseItems } from './quarantineRelease'
 import { releasable, type AddressGroup, type NodeGroup } from './quarantineGroups'
+import { spreadOf, type ProbeIndex } from './quarantineSpread'
 
 // У ноды бывают десятки отключённых адресов — карточка показывает первые
 const ADDRESSES_SHOWN = 10
@@ -14,6 +15,9 @@ interface Props extends AddressActions {
   node: NodeGroup
   mergePorts: boolean
   now: number
+  // Замеры из таблицы потерь и порог отключения; null — ещё не загружены
+  probes: ProbeIndex | null
+  lossThreshold: number | null
 }
 
 interface ReleaseAllProps {
@@ -66,7 +70,7 @@ function countWith(addresses: AddressGroup[], state: 'would_disable' | 'blocked'
   return addresses.filter(address => address.items.some(item => item.state === state)).length
 }
 
-export default function QuarantineNodeCard({ node, mergePorts, now, ...actions }: Props) {
+export default function QuarantineNodeCard({ node, mergePorts, now, probes, lossThreshold, ...actions }: Props) {
   const { t } = useTranslation()
   const [showAll, setShowAll] = useState(false)
   // Число адресов, которые сейчас возвращаются разом; список за это время успевает обновиться и
@@ -120,7 +124,14 @@ export default function QuarantineNodeCard({ node, mergePorts, now, ...actions }
       </header>
       <ul>
         {shown.map(address => (
-          <QuarantineAddressRow key={address.key} group={address} mergePorts={mergePorts} now={now} {...actions} />
+          <QuarantineAddressRow
+            key={address.key}
+            group={address}
+            mergePorts={mergePorts}
+            now={now}
+            spread={probes && spreadOf(address, mergePorts, probes, lossThreshold)}
+            {...actions}
+          />
         ))}
       </ul>
       {node.addresses.length > ADDRESSES_SHOWN && (

@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { toast } from 'sonner'
 import QuarantineBlock from '../src/components/loss/QuarantineBlock'
-import { lossApi, type QuarantineItem, type QuarantineOverview } from '../src/api/client'
+import { spreadLevel } from '../src/components/loss/quarantineSpread'
+import { lossApi, type LossRelay, type LossTarget, type QuarantineItem, type QuarantineOverview } from '../src/api/client'
 
 const NOW = 1_800_000_000
 const MINUTE = 60
@@ -32,9 +33,33 @@ const refused = { state: 'blocked', blocked_reason: 'share_limit', until: null }
 const overview = (items: QuarantineItem[], over: Partial<QuarantineOverview> = {}): QuarantineOverview =>
   ({ mode: 'enforce', items, chronic: [], paused_relays: [], ...over })
 
-function show(view: QuarantineOverview) {
+const LOSS_THRESHOLD = 50
+
+const measured = ([server_id, name]: Relay, loss_pct: number, answers: boolean | null = null): LossRelay =>
+  ({ server_id, name, loss_pct, rtt_ms: 40, samples: 60, answers })
+
+// Строка таблицы потерь: все релеи, где стоит адрес, и что видит каждый
+function probed(target: string, readings: LossRelay[]): LossTarget {
+  const [ip, port] = target.split(':')
+  return {
+    target, ip, port: Number(port), owner: 'Тубо 2', total_only: false, relays: readings,
+    worst_loss: Math.max(...readings.map(reading => reading.loss_pct)), episode: null, quarantined: [],
+  }
+}
+
+interface Probes {
+  // null — таблица потерь ещё не загружена
+  targets?: LossTarget[] | null
+  lossThreshold?: number | null
+}
+
+function show(view: QuarantineOverview, { targets = null, lossThreshold = LOSS_THRESHOLD }: Probes = {}) {
   const handlers = { onReleased: vi.fn(), onExempt: vi.fn(), onEdit: vi.fn() }
-  const block = (shown: QuarantineOverview) => <QuarantineBlock view={shown} sustainedSeconds={180} canExempt {...handlers} />
+  const block = (shown: QuarantineOverview) => (
+    <QuarantineBlock
+      view={shown} targets={targets} lossThreshold={lossThreshold} sustainedSeconds={180} canExempt {...handlers}
+    />
+  )
   const rendered = render(block(view))
   // Страница перечитывает список раз в 10 с — блок получает новый ответ, не теряя своего состояния
   const refresh = (next: QuarantineOverview) => rendered.rerender(block(next))
@@ -320,6 +345,79 @@ describe('Потери: блок «Отключённые адреса»', () =>
     expect(row.textContent).toContain('постоянные проблемы · 7 отключений за сутки')
   })
 
+  it('адрес, который не работает на всех своих релеях, помечен «везде»', () => {
+    show(overview(on('193.141.60.129:8443', [BRIDGE_3, BRIDGE_5])), {
+      targets: [probed('193.141.60.129:8443', [measured(BRIDGE_3, 100, false), measured(BRIDGE_5, 100, false)])],
+    })
+
+    expect(rowOf('193.141.60.129:8443').textContent).toContain('везде · 2 из 2')
+  })
+
+  it('у адреса, который не работает на части релеев, видно, на скольких из скольких', () => {
+    const healthy = relays(4).map(relay => measured(relay, 0, true))
+    show(overview(on('176.97.210.169:8449', [BRIDGE_3, BRIDGE_5])), {
+      targets: [probed('176.97.210.169:8449', [measured(BRIDGE_3, 100, false), measured(BRIDGE_5, 100, false), ...healthy])],
+    })
+
+    const row = rowOf('176.97.210.169:8449')
+    expect(within(row).getByTitle('Не работает на 2 из 6 релеев, где стоит этот адрес').textContent).toBe('2 из 6')
+    expect(row.textContent).not.toContain('везде')
+  })
+
+  it('релей, где адрес не отвечает, считается, даже если в списке отключённых его нет', () => {
+    show(overview(on('176.97.210.169:8449', [BRIDGE_3])), {
+      targets: [probed('176.97.210.169:8449', [
+        measured(BRIDGE_3, 100, false), measured(BRIDGE_5, 100, false), measured([7, 'Ланд'], 0, true),
+      ])],
+    })
+
+    expect(rowOf('176.97.210.169:8449').textContent).toContain('2 из 3')
+  })
+
+  it('потери не ниже порога отключения — тоже «не работает», меньшие — нет', () => {
+    const readings = [measured(BRIDGE_3, 100), measured(BRIDGE_5, 60), measured([7, 'Ланд'], 49), measured([8, 'Ланд 2'], 0)]
+    const view = overview(on('176.97.210.169:8449', [BRIDGE_3]))
+    const { unmount } = show(view, { targets: [probed('176.97.210.169:8449', readings)] })
+    expect(rowOf('176.97.210.169:8449').textContent).toContain('2 из 4')
+    unmount()
+
+    // Порог неизвестен, пока настройки не загружены: остаются только релеи из списка
+    show(view, { targets: [probed('176.97.210.169:8449', readings)], lossThreshold: null })
+    expect(rowOf('176.97.210.169:8449').textContent).toContain('1 из 4')
+  })
+
+  it('без различия портов релеи считаются по всем портам IP', () => {
+    show(overview(on('193.141.60.129:8443', [BRIDGE_3])), {
+      targets: [
+        probed('193.141.60.129:8443', [measured(BRIDGE_3, 100, false)]),
+        probed('193.141.60.129:8449', [measured(BRIDGE_5, 0, true), measured([7, 'Ланд'], 0, true)]),
+      ],
+    })
+    expect(rowOf('193.141.60.129:8443').textContent).toContain('1 из 1')
+
+    mergePorts()
+
+    expect(rowOf('193.141.60.129').textContent).toContain('1 из 3')
+  })
+
+  it('метки нет, пока таблица потерь не загружена или адреса в ней нет', () => {
+    const view = overview(on('193.141.60.129:8443', [BRIDGE_3, BRIDGE_5]))
+    const { unmount } = show(view)
+    expect(rowOf('193.141.60.129:8443').textContent).not.toContain(' из ')
+    unmount()
+
+    show(view, { targets: [probed('10.0.0.1:443', [measured(BRIDGE_3, 100, false)])] })
+    expect(rowOf('193.141.60.129:8443').textContent).not.toContain(' из ')
+  })
+
+  it('у адреса, который сейчас работает на всех релеях, метки нет', () => {
+    show(overview([], {
+      chronic: [{ target: '194.107.126.137:8443', ip: '194.107.126.137', port: 8443, owner: 'Аворо нода', strikes: 5 }],
+    }), { targets: [probed('194.107.126.137:8443', [measured(BRIDGE_3, 0, true), measured(BRIDGE_5, 0, true)])] })
+
+    expect(rowOf('194.107.126.137:8443').textContent).not.toContain(' из ')
+  })
+
   it('у адреса, который не отключён, вернуть нечего', () => {
     show(overview(on('193.141.60.242:8449', [BRIDGE_3], refused)))
 
@@ -393,5 +491,21 @@ describe('Потери: блок «Отключённые адреса»', () =>
 
     const { container } = show(overview([], { mode: 'off' }))
     expect(container.textContent).toBe('')
+  })
+})
+
+describe('Потери: насколько широко адрес не работает', () => {
+  it('«везде» — только когда релеев больше одного и не работает на всех', () => {
+    expect(spreadLevel({ failing: 12, total: 12 })).toBe('all')
+    expect(spreadLevel({ failing: 2, total: 2 })).toBe('all')
+    // Единственный релей — одна точка зрения: по ней о бане везде судить нельзя
+    expect(spreadLevel({ failing: 1, total: 1 })).toBe('limited')
+  })
+
+  it('«большинство» — от половины релеев, но не один', () => {
+    expect(spreadLevel({ failing: 6, total: 12 })).toBe('most')
+    expect(spreadLevel({ failing: 11, total: 12 })).toBe('most')
+    expect(spreadLevel({ failing: 5, total: 12 })).toBe('limited')
+    expect(spreadLevel({ failing: 1, total: 2 })).toBe('limited')
   })
 })
