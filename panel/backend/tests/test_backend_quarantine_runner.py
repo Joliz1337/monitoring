@@ -248,6 +248,41 @@ class PushTests(RunnerTestCase):
         self.assertEqual(self.bodies()[0]["targets"], [{"ip": "2001:db8::1", "port": 8443}])
 
 
+class DeadMarkTests(RunnerTestCase):
+    """Пометка «мёртв» в списке для релея: с ней нода выводит адрес и сверх предела
+    доли серверов правила."""
+
+    def probed(self, answers: bool | None, downs: int = 0) -> None:
+        self.registry.update(RELAY_ID, f"relay{RELAY_ID}", {"loss_probe": [{
+            "ip": "10.0.0.5", "port": 443, "loss_pct": 0.0, "rtt_ms": 40.0, "samples": 60,
+            "downs": downs, "answers": answers,
+        }]})
+
+    async def test_server_silent_to_the_probe_is_sent_as_dead(self):
+        self.probed(answers=False)
+        await self.cycle()
+        await self.cycle(advance=180)
+        self.assertEqual(self.bodies()[0]["targets"], [{"ip": "10.0.0.5", "port": 443, "dead": True}])
+
+    async def test_address_turning_dead_is_sent_again_at_once(self):
+        # Релей отказал из-за доли, а сервер тем временем перестал отвечать совсем:
+        # ждать минуту до очередного повтора списка незачем
+        self.runner.set_settings(settings(sustained_seconds=60))
+        self.skip_reason = "share_limit"
+        self.probed(answers=None, downs=3)
+        await self.cycle()
+        self.probed(answers=False, downs=3)
+        for _ in range(6):
+            await self.cycle(advance=10)
+        self.assertEqual([body["targets"] for body in self.bodies()], [[{"ip": "10.0.0.5", "port": 443}]] * 2)
+
+        self.skip_reason = None
+        await self.cycle(advance=10)
+
+        self.assertEqual(self.bodies()[2]["targets"], [{"ip": "10.0.0.5", "port": 443, "dead": True}])
+        self.assertEqual(self.state(), PairState.DISABLED)
+
+
 class RefusalTests(RunnerTestCase):
     async def blocked_with(self) -> str | None:
         self.observe(("10.0.0.5", 0.0, 3))

@@ -24,7 +24,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Callable, Collection, Optional, Sequence
 
 from app.config import get_settings
 from app.services.haproxy_down_counter import RowKey, Target, get_down_counter
@@ -70,6 +70,13 @@ class TargetResult:
     skipped: list[SkippedBackend] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _Lease:
+    deadline: float
+    # Сервер не отвечает на проверку «как клиент»: такой адрес выводится без предохранителей
+    dead: bool = False
+
+
 @dataclass
 class _Plan:
     rows: dict[Target, list[tuple[str, dict]]] = field(default_factory=dict)
@@ -94,10 +101,29 @@ def _serving_left(servers: Sequence[dict], removed: set[Target]) -> bool:
     return any(_serves(row) and parse_addr(row.get("addr") or "") not in removed for row in servers)
 
 
-def plan_quarantine(proxies: Sequence[dict], targets: Sequence[Target], max_share_pct: int) -> _Plan:
+def _refusal(servers: Sequence[dict], accepted: set[Target], target: Target, limit: int) -> Optional[SkipReason]:
+    """Почему нельзя вывести адрес, который может оказаться рабочим."""
+    if len(accepted) >= limit:
+        return SkipReason.SHARE_LIMIT
+    if not _serving_left(servers, accepted | {target}):
+        return SkipReason.LAST_SERVER
+    return None
+
+
+def plan_quarantine(proxies: Sequence[dict], targets: Sequence[Target], max_share_pct: int,
+                    dead: Collection[Target] = frozenset()) -> _Plan:
     """Какие адреса можно вывести в каждом backend. Адреса идут в порядке
-    панели (худшие первыми): слотов меньше, чем желающих, — достаются первым."""
+    панели (худшие первыми): слотов меньше, чем желающих, — достаются первым.
+
+    Мёртвые адреса (`dead`) выводятся всегда, без обоих предохранителей: сервер,
+    который клиентам не отвечает, бесполезен, сколько бы живых ни осталось.
+    Backend, где мертвы все, остаётся без серверов и отказывает клиенту сразу
+    (или уходит на backup) — с мёртвым сервером в работе клиент получил бы
+    принятое подключение и ждал ответа до своего таймаута. Слоты доли мёртвые
+    занимают, причём первыми, где бы ни стояли в списке: чем их больше, тем
+    меньше остаётся на адреса с потерями, которые могут оказаться рабочими."""
     plan = _Plan()
+    targets = sorted(targets, key=lambda target: target not in dead)
     for proxy in proxies:
         servers = proxy.get("servers") or []
         rows_by_target: dict[Target, list[dict]] = {}
@@ -111,15 +137,12 @@ def plan_quarantine(proxies: Sequence[dict], targets: Sequence[Target], max_shar
             if target not in rows_by_target:
                 continue
             plan.found.add(target)
-            if len(accepted) >= limit:
-                reason = SkipReason.SHARE_LIMIT
-            elif not _serving_left(servers, accepted | {target}):
-                reason = SkipReason.LAST_SERVER
-            else:
-                accepted.add(target)
-                plan.rows.setdefault(target, []).extend((proxy["name"], row) for row in rows_by_target[target])
+            reason = None if target in dead else _refusal(servers, accepted, target, limit)
+            if reason is not None:
+                plan.skipped.setdefault(target, []).append(SkippedBackend(proxy["name"], reason))
                 continue
-            plan.skipped.setdefault(target, []).append(SkippedBackend(proxy["name"], reason))
+            accepted.add(target)
+            plan.rows.setdefault(target, []).extend((proxy["name"], row) for row in rows_by_target[target])
     return plan
 
 
@@ -139,8 +162,8 @@ class Quarantine:
         self._clock = clock
         self._on_maint = on_maint
         self._on_release = on_release
-        # Адрес → срок; порядок — порядок списка панели
-        self._leases: dict[Target, float] = {}
+        # Адрес → срок и пометка панели; порядок — порядок её списка
+        self._leases: dict[Target, _Lease] = {}
         # Строки, которые перевёл в обслуживание этот менеджер, и их адрес
         self._owned: dict[RowKey, Target] = {}
         self._owned_view: frozenset[RowKey] = frozenset()
@@ -154,13 +177,13 @@ class Quarantine:
         self._load()
 
     def apply(self, targets: Sequence[Target], ttl_seconds: int, max_share_pct: int,
-              drop_sessions: bool) -> list[TargetResult]:
+              drop_sessions: bool, dead: Collection[Target] = frozenset()) -> list[TargetResult]:
         """Полный список отключённых адресов релея; срез show stat читается до
         любых изменений — мёртвый сокет не должен менять сроки."""
         with self._lock:
             proxies = self._read_proxies()
             now = self._clock()
-            self._leases = {target: now + ttl_seconds for target in dict.fromkeys(targets)}
+            self._leases = {target: _Lease(now + ttl_seconds, target in dead) for target in dict.fromkeys(targets)}
             self._max_share_pct = max_share_pct
             self._drop_sessions = drop_sessions
             return self._enforce(proxies, now)
@@ -179,9 +202,10 @@ class Quarantine:
         return self._owned_view
 
     def _enforce(self, proxies: Sequence[dict], now: float) -> list[TargetResult]:
-        self._leases = {target: deadline for target, deadline in self._leases.items() if deadline > now}
+        self._leases = {target: lease for target, lease in self._leases.items() if lease.deadline > now}
+        dead = {target for target, lease in self._leases.items() if lease.dead}
         try:
-            plan = plan_quarantine(proxies, list(self._leases), self._max_share_pct)
+            plan = plan_quarantine(proxies, list(self._leases), self._max_share_pct, dead)
             self._return_rows(proxies, plan.row_keys())
             return self._disable_rows(plan)
         finally:
@@ -241,8 +265,8 @@ class Quarantine:
         return json.dumps({
             "max_share_pct": self._max_share_pct,
             "drop_sessions": self._drop_sessions,
-            "leases": [{"ip": ip, "port": port, "deadline": deadline}
-                       for (ip, port), deadline in self._leases.items()],
+            "leases": [{"ip": ip, "port": port, "deadline": lease.deadline, "dead": lease.dead}
+                       for (ip, port), lease in self._leases.items()],
             "owned": [{"backend": backend, "server": server, "ip": ip, "port": port}
                       for (backend, server), (ip, port) in self._owned.items()],
         })
@@ -265,7 +289,9 @@ class Quarantine:
             return
         try:
             data = json.loads(self._state_path.read_text(encoding="utf-8"))
-            leases = {(str(item["ip"]), int(item["port"])): float(item["deadline"]) for item in data["leases"]}
+            # Файл агента до пометок поля dead не знает: его адреса — в пределах доли
+            leases = {(str(item["ip"]), int(item["port"])): _Lease(float(item["deadline"]), bool(item.get("dead")))
+                      for item in data["leases"]}
             owned = {(str(item["backend"]), str(item["server"])): (str(item["ip"]), int(item["port"]))
                      for item in data["owned"]}
             max_share_pct, drop_sessions = int(data["max_share_pct"]), bool(data["drop_sessions"])

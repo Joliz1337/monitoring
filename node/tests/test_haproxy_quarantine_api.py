@@ -58,6 +58,10 @@ class RequestModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             QuarantineRequest(targets=[{"ip": "10.0.0.5"}], ttl_seconds=180, max_share_pct=50)
 
+    def test_address_is_not_dead_unless_the_panel_says_so(self):
+        # Панель старой версии пометки не шлёт — для неё предел доли действует на все адреса
+        self.assertFalse(QuarantineRequest(**body()).targets[0].dead)
+
 
 class RouteTests(unittest.TestCase):
     def call(self, quarantine: mock.Mock, **overrides):
@@ -74,12 +78,25 @@ class RouteTests(unittest.TestCase):
         quarantine = mock.Mock(apply=mock.Mock(return_value=[result]))
         response = self.call(quarantine, drop_sessions=False)
 
-        quarantine.apply.assert_called_once_with([("10.0.0.5", 443)], 180, 50, False)
+        quarantine.apply.assert_called_once_with([("10.0.0.5", 443)], 180, 50, False, frozenset())
         self.assertEqual(response.model_dump(), {"results": [{
             "ip": "10.0.0.5", "port": 443, "found": True,
             "applied": [{"backend": "backend_tcp_lb", "server": "srv1", "sessions": 7}],
             "skipped": [{"backend": "backend_tcp_other", "reason": "last_server"}],
         }]})
+
+    def test_dead_marks_reach_the_manager(self):
+        request = QuarantineRequest(
+            targets=[{"ip": "10.0.0.5", "port": 443, "dead": True}, {"ip": "10.0.0.6", "port": 443}],
+            ttl_seconds=180, max_share_pct=50,
+        )
+        quarantine = mock.Mock(apply=mock.Mock(return_value=[]))
+        with mock.patch.object(haproxy_router, "get_quarantine", return_value=quarantine):
+            asyncio.run(haproxy_router.set_quarantine(request))
+
+        quarantine.apply.assert_called_once_with(
+            [("10.0.0.5", 443), ("10.0.0.6", 443)], 180, 50, True, frozenset({("10.0.0.5", 443)}),
+        )
 
     def test_missing_socket_is_503_not_an_empty_answer(self):
         for error in (StatsSocketUnavailableError("no socket"), OSError("socket is gone"), TimeoutError()):

@@ -944,6 +944,111 @@ class ClientProbeTests(TrackerTestCase):
         self.assertEqual(self.tracker.desired(), {RELAY: ["10.0.0.2:443", "10.0.0.1:443"]})
 
 
+class DeadAddressTests(TrackerTestCase):
+    """Сервер, молчащий на проверку «как клиент», не работает наверняка — потери и
+    падения бывают и у рабочего. Такой адрес нода выводит и сверх предела доли
+    серверов правила, поэтому пометку нельзя ни раздать зря, ни потерять."""
+
+    SILENT = dict(answers=False)
+
+    def refused_for_the_share(self) -> None:
+        self.step(snap(reading(downs=3)))
+        self.answer(node_answer(sessions=(), skipped=("share_limit",)))
+
+    def test_server_silent_to_the_probe_is_dead(self):
+        self.step(snap(reading(3.0, **self.SILENT)))
+        self.step(snap(reading(3.0, **self.SILENT)), advance=180)
+        self.assertTrue(self.tracker.is_dead(RELAY, TARGET))
+
+    def test_loss_falls_and_silent_counters_leave_doubt(self):
+        for bad in (reading(60.0), reading(downs=3), reading(stalled=True)):
+            with self.subTest(reading=bad):
+                self.setUp()
+                self.step(snap(bad))
+                self.step(snap(bad), advance=180)
+                self.assertEqual(self.state(), PairState.PENDING)
+                self.assertFalse(self.tracker.is_dead(RELAY, TARGET))
+
+    def test_returned_pair_is_dead_no_more(self):
+        self.step(snap(reading(3.0, **self.SILENT)))
+        self.step(snap(reading(3.0, **self.SILENT)), advance=180)
+        self.answer(node_answer())
+        self.tracker.release(RELAY, TARGET, self.now)
+        self.assertFalse(self.tracker.is_dead(RELAY, TARGET))
+
+    def test_pair_decided_by_falls_becomes_dead_once_the_probe_stays_silent(self):
+        # Сервер сначала мигал, а потом перестал отвечать совсем: предел доли, из-за
+        # которого релей его не отключил, больше не причина держать его в работе
+        self.refused_for_the_share()
+        silent = snap(reading(downs=3, **self.SILENT))
+        self.step(silent)
+        self.step(silent, advance=170)
+        self.assertFalse(self.tracker.is_dead(RELAY, TARGET))
+        self.step(silent, advance=10)
+        self.assertTrue(self.tracker.is_dead(RELAY, TARGET))
+        pair = self.tracker.pairs[(RELAY, TARGET)]
+        self.assertEqual((pair.reason_kind, pair.state), (ReasonKind.NO_REPLY, PairState.BLOCKED))
+
+    def test_one_reply_restarts_the_wait(self):
+        self.refused_for_the_share()
+        silent, answering = snap(reading(downs=3, **self.SILENT)), snap(reading(downs=3, answers=True))
+        self.step(silent)
+        self.step(silent, advance=100)
+        self.step(answering, advance=10)
+        self.step(silent, advance=10)
+        self.step(silent, advance=170)
+        self.assertFalse(self.tracker.is_dead(RELAY, TARGET))
+        self.step(silent, advance=10)
+        self.assertTrue(self.tracker.is_dead(RELAY, TARGET))
+
+    def test_pair_closed_by_the_node_starts_its_wait_anew(self):
+        # Нода дважды ответила, что адреса у неё нет, — запись закрыта. Молчание
+        # проверки, замеченное до этого, новому решению удержание не сокращает
+        self.step(snap(reading(60.0)))
+        self.step(snap(reading(60.0)), advance=180)
+        silent = snap(reading(60.0, **self.SILENT))
+        self.step(silent)
+        for _ in range(2):
+            self.answer(node_answer(sessions=(), found=False))
+        self.step(silent, advance=180)
+        self.assertNotEqual(self.state(), PairState.PENDING)
+        self.step(silent, advance=60)
+        self.assertEqual(self.state(), PairState.PENDING)
+
+    def test_pair_turned_dead_returns_by_the_reply_of_the_server(self):
+        self.refused_for_the_share()
+        silent = snap(reading(downs=3, **self.SILENT))
+        self.step(silent)
+        self.step(silent, advance=180)
+        self.answer(node_answer())
+        self.step(silent, advance=3600)
+        self.assertEqual(self.state(), PairState.DISABLED)
+        answering = snap(reading(answers=True))
+        self.step(answering, advance=1)
+        [event] = self.step(answering, advance=600)
+        self.assertEqual((event.kind, event.cause, event.reason_kind),
+                         (EventKind.RESTORED, RestoreCause.CALM, ReasonKind.NO_REPLY))
+
+    def test_relay_in_trouble_proves_nothing_about_its_servers(self):
+        # У релея пропала сеть: проверка молчит ко всем его адресам сразу
+        self.disable()
+        trouble = snap(
+            reading(downs=3, **self.SILENT),
+            *(reading(ip=f"10.0.0.{i}", **self.SILENT) for i in range(6, 10)),
+        )
+        self.step(trouble)
+        self.step(trouble, advance=600)
+        self.assertFalse(self.tracker.is_dead(RELAY, TARGET))
+
+    def test_dead_addresses_go_first_in_the_list_for_the_node(self):
+        # Мёртвые занимают слоты доли первыми: сомнительным достаётся то, что осталось
+        calm = [reading(0.0, ip=f"10.0.0.{i}") for i in range(3, 7)]
+        bad = [reading(90.0, ip="10.0.0.1", stalled=True), reading(3.0, ip="10.0.0.2", **self.SILENT)]
+        self.step(snap(*bad, *calm))
+        self.step(snap(*bad, *calm), advance=180)
+        self.assertEqual(self.tracker.desired(), {RELAY: ["10.0.0.2:443", "10.0.0.1:443"]})
+
+
 class ClientProbeObserveTests(TrackerTestCase):
     mode = Mode.OBSERVE
 

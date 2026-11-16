@@ -399,6 +399,9 @@ QUARANTINE_MAX_TARGETS = 256
 
 class QuarantineTarget(TargetRequest):
     port: int = Field(ge=1, le=65535)
+    # Сервер не отвечает на проверку «как клиент» — не работает наверняка: выводится сверх
+    # max_share_pct и даже последним в backend
+    dead: bool = False
 
 
 class QuarantineRequest(BaseModel):

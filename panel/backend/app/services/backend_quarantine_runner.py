@@ -114,9 +114,19 @@ class DbStorage:
             return await load_quarantine_settings(db)
 
 
+# Адрес и пометка «мёртв наверняка» — в таком виде он уходит релею
+Marked = tuple[str, bool]
+
+
+def _wire_target(target: str, dead: bool) -> dict:
+    ip, _, port = target.rpartition(":")
+    # Пометка уходит только у мёртвых: без неё нода держит адрес в пределах доли
+    return {"ip": ip, "port": int(port), **({"dead": True} if dead else {})}
+
+
 @dataclass(frozen=True)
 class _Sent:
-    targets: tuple[str, ...]
+    targets: tuple[Marked, ...]
     max_share_pct: int
     drop_sessions: bool
     at: float
@@ -200,8 +210,13 @@ class QuarantineRunner:
         пришлёт им пустой."""
         policy = self._settings.policy
         for relay_id, targets in self.tracker.desired().items():
-            self._sent[relay_id] = _Sent(tuple(targets), policy.max_share_pct, policy.drop_sessions, now)
+            self._sent[relay_id] = _Sent(
+                self._marked(relay_id, targets), policy.max_share_pct, policy.drop_sessions, now,
+            )
         return self.tracker.clear(now, RestoreCause.MODE)
+
+    def _marked(self, relay_id: int, targets: list[str]) -> tuple[Marked, ...]:
+        return tuple((target, self.tracker.is_dead(relay_id, target)) for target in targets)
 
     async def ensure_restored(self) -> bool:
         """Настройки и пары из базы; пока не поднялись, цикл ничего не решает —
@@ -353,12 +368,15 @@ class QuarantineRunner:
 
     async def _push(self, settings: QuarantineSettings, now: float) -> list[Event]:
         # В наблюдении и после выключения трекер ничего не хочет сам: пары «отключил бы» в набор не идут
-        desired = self.tracker.desired()
+        desired = {
+            relay_id: self._marked(relay_id, targets[:NODE_MAX_TARGETS])
+            for relay_id, targets in self.tracker.desired().items()
+        }
         # Релей без отключений остаётся в рассылке, пока не получит пустой список
         due = {
-            relay_id: desired.get(relay_id, [])[:NODE_MAX_TARGETS]
+            relay_id: desired.get(relay_id, ())
             for relay_id in set(desired) | set(self._sent)
-            if self._due(relay_id, desired.get(relay_id, []), settings, now)
+            if self._due(relay_id, desired.get(relay_id, ()), settings, now)
         }
         self._forced.clear()
         if not due:
@@ -366,7 +384,7 @@ class QuarantineRunner:
         servers = await self._storage.load_servers(set(due))
         semaphore = asyncio.Semaphore(PUSH_CONCURRENCY)
 
-        async def deliver(relay_id: int, targets: list[str]) -> list[dict] | NodeFailure:
+        async def deliver(relay_id: int, targets: tuple[Marked, ...]) -> list[dict] | NodeFailure:
             async with semaphore:
                 return await self._deliver(servers.get(relay_id), targets, settings, now)
 
@@ -376,7 +394,7 @@ class QuarantineRunner:
             events += self._account(relay_id, targets, outcome, settings, now)
         return events
 
-    def _due(self, relay_id: int, targets: list[str], settings: QuarantineSettings, now: float) -> bool:
+    def _due(self, relay_id: int, targets: tuple[Marked, ...], settings: QuarantineSettings, now: float) -> bool:
         if relay_id in self._forced:
             return relay_id in self._sent or bool(targets)
         if now < self._retry_at.get(relay_id, 0.0):
@@ -384,12 +402,13 @@ class QuarantineRunner:
         sent = self._sent.get(relay_id)
         if sent is None:
             return bool(targets)
-        current = (tuple(targets[:NODE_MAX_TARGETS]), settings.policy.max_share_pct, settings.policy.drop_sessions)
+        # Пометка «мёртв» — часть набора: её появление уходит релею сразу, как и новый адрес
+        current = (targets, settings.policy.max_share_pct, settings.policy.drop_sessions)
         if current != (sent.targets, sent.max_share_pct, sent.drop_sessions):
             return True
         return now - sent.at >= RESEND_SECONDS
 
-    def _account(self, relay_id: int, targets: list[str], outcome: list[dict] | NodeFailure,
+    def _account(self, relay_id: int, targets: tuple[Marked, ...], outcome: list[dict] | NodeFailure,
                  settings: QuarantineSettings, now: float) -> list[Event]:
         events = self.tracker.apply_node_results(relay_id, outcome, settings.policy, now)
         if isinstance(outcome, NodeFailure):
@@ -402,9 +421,7 @@ class QuarantineRunner:
             return events
         self._retry_at.pop(relay_id, None)
         if targets:
-            self._sent[relay_id] = _Sent(
-                tuple(targets), settings.policy.max_share_pct, settings.policy.drop_sessions, now,
-            )
+            self._sent[relay_id] = _Sent(targets, settings.policy.max_share_pct, settings.policy.drop_sessions, now)
         else:
             self._sent.pop(relay_id, None)
         return events
@@ -422,7 +439,7 @@ class QuarantineRunner:
             return NodeFailure.UNSUPPORTED
         return None
 
-    async def _deliver(self, server: Optional[Server], targets: list[str], settings: QuarantineSettings,
+    async def _deliver(self, server: Optional[Server], targets: tuple[Marked, ...], settings: QuarantineSettings,
                        now: float) -> list[dict] | NodeFailure:
         if server is None:
             return NodeFailure.OFFLINE
@@ -430,7 +447,7 @@ class QuarantineRunner:
         if failure is not None:
             return failure
         body = {
-            "targets": [{"ip": ip, "port": int(port)} for ip, _, port in (t.rpartition(":") for t in targets)],
+            "targets": [_wire_target(target, dead) for target, dead in targets],
             "ttl_seconds": TTL_SECONDS,
             "max_share_pct": settings.policy.max_share_pct,
             "drop_sessions": settings.policy.drop_sessions,

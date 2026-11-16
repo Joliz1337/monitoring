@@ -18,6 +18,11 @@
   — когда применила, `blocked` — когда отказала (последний сервер правила,
   предел доли) или до неё не достучаться. Срок, счёт отключений и сообщение —
   с подтверждения ноды.
+- Мёртвый наверняка — сервер молчит на проверку «как клиент»: тут либо
+  отвечает, либо нет, а потери и падения бывают и у рабочего. Адрес такой
+  пары нода выводит без предохранителей — сверх предела доли и даже
+  последним в правиле (`is_dead`). Пара, решённая по другой причине,
+  получает эту, когда проверка молчит всё удержание.
 - Вернуть — минимальный срок вышел, потери ниже половины порога и сервер не
   молчит всё затишье. Проверка «как клиент» идёт и к отключённому серверу,
   поэтому с ней он возвращается по факту ответа, а не «на пробу».
@@ -236,7 +241,8 @@ class QuarantineTracker:
     pairs: dict[PairKey, Pair] = field(default_factory=dict)
     # Пара → с какого момента потери дают повод отключать
     _above: dict[PairKey, float] = field(default_factory=dict)
-    # Пара → с какого момента сервер не отвечает клиентам (по проверке или по счётчикам)
+    # Пара → с какого момента сервер не отвечает клиентам (по проверке или по счётчикам);
+    # у уже решённой пары — с какого момента молчит проверка «как клиент» (_note_dead)
     _stalled: dict[PairKey, float] = field(default_factory=dict)
     _pauses: dict[int, RelayPause] = field(default_factory=dict)
     # Релей → до какого момента его падения не повод отключать: пока у релея не было
@@ -279,17 +285,27 @@ class QuarantineTracker:
     def desired(self) -> dict[int, list[str]]:
         """Релей → адреса, которые он должен держать отключёнными; худшие первыми —
         нода раздаёт слоты доли в этом порядке. Сервер без ответов бесполезен
-        целиком, при любых потерях до него."""
+        целиком, при любых потерях до него; мёртвые наверняка идут раньше всех —
+        они выводятся и сверх доли, а слоты при этом занимают."""
         wanted: dict[int, list[Pair]] = {}
         for pair in self.pairs.values():
             if pair.state in WANTED_STATES:
                 wanted.setdefault(pair.relay_id, []).append(pair)
         return {
-            relay_id: [pair.target for pair in sorted(
-                pairs, key=lambda p: (p.reason_kind not in SILENT_REASONS, -p.loss_pct, p.target),
-            )]
+            relay_id: [pair.target for pair in sorted(pairs, key=lambda p: (
+                p.reason_kind is not ReasonKind.NO_REPLY, p.reason_kind not in SILENT_REASONS, -p.loss_pct, p.target,
+            ))]
             for relay_id, pairs in wanted.items()
         }
+
+    def is_dead(self, relay_id: int, target: str) -> bool:
+        """Сервер не отвечает релею на проверку «как клиент» — не работает наверняка.
+        Такой адрес нода выводит без предохранителей: сверх предела доли и даже
+        последним в правиле — правило без серверов отказывает клиенту сразу, а с
+        мёртвым сервером клиент ждал бы до таймаута. Потери, падения и счётчики
+        трафика такой уверенности не дают — сервер с ними бывает рабочим."""
+        pair = self.pairs.get((relay_id, target))
+        return pair is not None and pair.state in WANTED_STATES and pair.reason_kind is ReasonKind.NO_REPLY
 
     def apply_node_results(self, relay_id: int, results: list[dict] | NodeFailure,
                            policy: QuarantinePolicy, now: float) -> list[Event]:
@@ -450,7 +466,20 @@ class QuarantineTracker:
             return False
         return now - since.setdefault(key, now) >= policy.sustained_sec
 
+    def _note_dead(self, item: _Observed, pair: Pair, policy: QuarantinePolicy, now: float) -> None:
+        """Пара решена по потерям, падениям или счётчикам, а сервер с тех пор молчит на
+        проверку «как клиент» всё удержание: причина становится этой, определённой. С
+        ней нода выводит адрес без предохранителей, а возврат идёт по ответу сервера.
+        При беде релея таймер каждый цикл сбрасывается — молчание проверки ко всем
+        адресам сразу о сервере ничего не говорит."""
+        if pair.reason_kind is ReasonKind.NO_REPLY:
+            return
+        if self._held(self._stalled, item.key, item.reading.answers is False, policy, now):
+            pair.reason_kind = ReasonKind.NO_REPLY
+            self._stalled.pop(item.key, None)
+
     def _step_active(self, item: _Observed, pair: Pair, policy: QuarantinePolicy, now: float) -> list[Event]:
+        self._note_dead(item, pair, policy, now)
         # Молчащий сервер затишья не начинает: по счётчикам — пока он в работе (нода
         # отказала, режим наблюдения), по проверке «как клиент» — и отключённый
         quiet = item.reading.loss_pct < _recovery_bound(item.mode, policy) and not _silent(item.reading)
@@ -517,11 +546,12 @@ class QuarantineTracker:
         self._idle(pair)
         return [event] if reported else []
 
-    @staticmethod
-    def _idle(pair: Pair) -> None:
+    def _idle(self, pair: Pair) -> None:
         pair.state = PairState.IDLE
         pair.disabled_at = pair.until = pair.calm_since = None
         pair.node, pair.missing, pair.guard_reported = {}, 0, False
+        # Молчание проверки, замеченное у закрытой записи, новому решению удержание не сокращает
+        self._forget_timers((pair.relay_id, pair.target))
 
     def _close_silent(self, seen: set[PairKey], now: float) -> None:
         """Без данных час — запись закрывается молча: что с адресом, неизвестно, а

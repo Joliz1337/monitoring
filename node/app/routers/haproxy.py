@@ -138,9 +138,10 @@ async def set_runtime_weights(request: RuntimeWeightsRequest):
 async def set_quarantine(request: QuarantineRequest):
     """Адреса, выведенные панелью из балансировки: полный список релея, на лету, с ограниченным сроком"""
     targets = [(target.ip, target.port) for target in request.targets]
+    dead = frozenset((target.ip, target.port) for target in request.targets if target.dead)
     try:
         results = await asyncio.to_thread(
-            get_quarantine().apply, targets, request.ttl_seconds, request.max_share_pct, request.drop_sessions,
+            get_quarantine().apply, targets, request.ttl_seconds, request.max_share_pct, request.drop_sessions, dead,
         )
     except SocketPermissionError:
         raise HTTPException(status_code=409, detail="HAProxy stats socket is not admin level")

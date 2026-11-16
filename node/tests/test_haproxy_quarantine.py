@@ -8,6 +8,7 @@ Runnable with plain stdlib:  python -m unittest discover -s node/tests
 """
 
 import asyncio
+import json
 import os
 import re
 import sys
@@ -110,8 +111,8 @@ class QuarantineTestCase(unittest.TestCase):
             on_maint=self.maint_rows.append, on_release=self.released.append,
         )
 
-    def apply(self, *targets, share: int = 50, drop: bool = True):
-        return self.quarantine.apply(list(targets), TTL, share, drop)
+    def apply(self, *targets, share: int = 50, drop: bool = True, dead=()):
+        return self.quarantine.apply(list(targets), TTL, share, drop, frozenset(dead))
 
     def status(self, name: str, backend: str = LB) -> str:
         return self.haproxy.row(backend, name)["status"]
@@ -207,7 +208,7 @@ class ApplyTests(QuarantineTestCase):
         self.assertEqual(self.haproxy.commands, [])
 
 
-class ShareLimitTests(QuarantineTestCase):
+class WideRuleTestCase(QuarantineTestCase):
     def wide(self, count: int) -> list[tuple[str, int]]:
         targets = [(f"10.0.1.{i}", 443) for i in range(1, count + 1)]
         self.haproxy = FakeHAProxy((LB, [server(f"srv{i}", t) for i, t in enumerate(targets, 1)]))
@@ -217,6 +218,8 @@ class ShareLimitTests(QuarantineTestCase):
     def applied(self, results) -> list[bool]:
         return [bool(r.applied) for r in results]
 
+
+class ShareLimitTests(WideRuleTestCase):
     def test_half_of_ten(self):
         targets = self.wide(10)
         results = self.apply(*targets[:6])
@@ -269,6 +272,78 @@ class ShareLimitTests(QuarantineTestCase):
         self.assertEqual((self.status("srv1"), self.status("srv2")), ("MAINT", "UP"))
         self.apply(B)
         self.assertEqual((self.status("srv1"), self.status("srv2")), ("UP", "MAINT"))
+
+
+class DeadAddressTests(WideRuleTestCase):
+    """Адрес, не отвечающий на проверку «как клиент», не работает наверняка: держать
+    его в балансировке ради доли живых незачем. Потери и падения бывают у рабочего
+    сервера — для них предел доли остаётся."""
+
+    def test_dead_addresses_go_out_beyond_the_share(self):
+        targets = self.wide(10)
+        results = self.apply(*targets[:8], dead=targets[:8])
+        self.assertEqual(self.applied(results), [True] * 8)
+        self.assertEqual([self.status(f"srv{i}") for i in (8, 9)], ["MAINT", "UP"])
+
+    def test_rule_with_every_server_dead_is_emptied(self):
+        # Правило без серверов сразу отказывает клиенту. С мёртвым сервером в работе
+        # клиент получил бы принятое подключение и ждал ответа до своего таймаута
+        targets = self.wide(3)
+        results = self.apply(*targets, dead=targets)
+        self.assertEqual(self.applied(results), [True, True, True])
+        self.assertEqual([self.status(f"srv{i}") for i in (1, 2, 3)], ["MAINT"] * 3)
+
+    def test_single_dead_server_goes_out_too(self):
+        [target] = self.wide(1)
+        [result] = self.apply(target, dead=[target])
+        self.assertEqual((bool(result.applied), result.skipped), (True, []))
+        self.assertEqual(self.status("srv1"), "MAINT")
+
+    def test_doubtful_server_is_still_never_the_last_to_go(self):
+        # Сервер с потерями может оказаться рабочим: при мёртвых соседях он остаётся
+        lossy, dead_one, dead_two = self.wide(3)
+        results = self.apply(dead_one, dead_two, lossy, share=100, dead=[dead_one, dead_two])
+        self.assertEqual(self.applied(results), [True, True, False])
+        self.assertEqual([s.reason for s in results[2].skipped], [SkipReason.LAST_SERVER])
+        self.assertEqual(self.status("srv1"), "UP")
+
+    def test_dead_server_stays_out_when_its_neighbours_fall(self):
+        # Обычный отключённый сервер при упавших соседях возвращается: он лучше, чем
+        # ничего. Мёртвый не возвращается — клиентам от него толку нет
+        targets = self.wide(3)
+        self.apply(targets[0], dead=[targets[0]])
+        for name in ("srv2", "srv3"):
+            self.haproxy.row(LB, name)["status"] = "DOWN"
+        self.haproxy.commands.clear()
+        self.quarantine.reconcile()
+        self.assertEqual((self.haproxy.commands, self.status("srv1")), ([], "MAINT"))
+
+    def test_dead_addresses_use_up_the_share_of_the_doubtful(self):
+        # Пять мёртвых из десяти уже заняли всю долю: адреса с потерями остаются в работе
+        targets = self.wide(10)
+        results = self.apply(*targets[:7], dead=targets[:5])
+        self.assertEqual(self.applied(results), [True] * 5 + [False, False])
+        self.assertEqual([s.reason for s in results[5].skipped], [SkipReason.SHARE_LIMIT])
+
+    def test_doubtful_address_takes_the_share_the_dead_left(self):
+        targets = self.wide(10)
+        results = self.apply(*targets[:6], dead=targets[:3])
+        self.assertEqual(self.applied(results), [True] * 5 + [False])
+
+    def test_dead_addresses_take_their_slots_wherever_they_stand_in_the_list(self):
+        # Адрес с потерями впереди списка не должен оставить в работе мёртвый вместо себя
+        lossy, dead_one, dead_two = self.wide(3)
+        results = self.apply(lossy, dead_one, dead_two, dead=[dead_one, dead_two])
+        self.assertEqual(self.applied(results), [False, True, True])
+        self.assertEqual([s.reason for s in results[0].skipped], [SkipReason.SHARE_LIMIT])
+        self.assertEqual([self.status(f"srv{i}") for i in (1, 2, 3)], ["UP", "MAINT", "MAINT"])
+
+    def test_address_that_is_dead_no_more_falls_back_under_the_share(self):
+        targets = self.wide(4)
+        self.apply(*targets[:3], dead=targets[:3])
+        self.assertEqual([self.status(f"srv{i}") for i in (1, 2, 3)], ["MAINT"] * 3)
+        self.apply(*targets[:3])
+        self.assertEqual([self.status(f"srv{i}") for i in (1, 2, 3)], ["MAINT", "MAINT", "UP"])
 
 
 class LastServerTests(QuarantineTestCase):
@@ -450,6 +525,26 @@ class RestartTests(QuarantineTestCase):
         self.haproxy.commands.clear()
         self.quarantine.reconcile()
         self.assertEqual(self.haproxy.commands, [f"set server {LB}/srv1 state maint"])
+
+    def test_restarted_agent_remembers_which_addresses_are_dead(self):
+        # Из трёх адресов по доле выводится один; оба мёртвых должны остаться вне балансировки
+        self.apply(A, B, dead=[A, B])
+        self.quarantine = self.make_quarantine()
+        self.haproxy.reload()
+        self.quarantine.reconcile()
+        self.assertEqual((self.status("srv1"), self.status("srv2")), ("MAINT", "MAINT"))
+
+    def test_state_file_of_an_agent_without_dead_marks_is_read(self):
+        self.apply(A)
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        for lease in state["leases"]:
+            lease.pop("dead", None)
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        self.quarantine = self.make_quarantine()
+        self.assertEqual(self.quarantine.quarantined_rows(), frozenset({(LB, "srv1")}))
+        self.clock.now += TTL
+        self.quarantine.reconcile()
+        self.assertEqual(self.status("srv1"), "UP")
 
     def test_restart_does_not_adopt_a_manual_maintenance(self):
         self.haproxy.row(LB, "srv2")["status"] = "MAINT"
