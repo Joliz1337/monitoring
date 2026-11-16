@@ -13,7 +13,7 @@ import {
 } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
-import LossProbeBadge, { LOSS_WARN_PCT } from '../components/ui/LossProbeBadge'
+import LossProbeBadge from '../components/ui/LossProbeBadge'
 import { Checkbox } from '../components/ui/Checkbox'
 import { ServerSelector } from '../components/ssh/ServerSelector'
 import BackendEditModal from '../components/loss/BackendEditModal'
@@ -22,6 +22,16 @@ import ActivityStrip, { isJobRunning, type RunningCheck } from '../components/lo
 import LossSettings from '../components/loss/LossSettings'
 import QuarantineBlock from '../components/loss/QuarantineBlock'
 import type { BackendAddress, ExemptAddress } from '../components/loss/quarantineGroups'
+import TargetFilterBar from '../components/loss/TargetFilterBar'
+import {
+  NO_FILTERS,
+  applyFilters,
+  describeTargets,
+  facetOptions,
+  isLossy,
+  toggleFilter,
+  type FilterSelection,
+} from '../components/loss/targetFilters'
 import TraceModal from '../components/loss/TraceModal'
 import { readStorage, writeStorage } from '../utils/storage'
 
@@ -45,10 +55,6 @@ function readDismissed(): Set<string> {
 
 const inputCls = 'w-full px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-sm text-dark-100 placeholder-dark-500 focus:outline-none focus:border-accent-500/50'
 
-function isLossy(lossPct: number): boolean {
-  return lossPct > LOSS_WARN_PCT
-}
-
 // Ключ строки `ip:port` для IPv6 неоднозначен — в список исключений IPv6 идёт в скобках.
 // Без порта запись покрывает адрес на всех портах
 function endpointText({ ip, port }: ExemptAddress): string {
@@ -67,6 +73,8 @@ export default function Loss() {
   const [targets, setTargets] = useState<LossTarget[] | null>(null)
   const [quarantine, setQuarantine] = useState<QuarantineOverview | null>(null)
   const [showAll, setShowAll] = useState(false)
+  // Только в памяти вкладки: сохранённый фильтр при следующем заходе молча спрятал бы новую проблему
+  const [filters, setFilters] = useState<FilterSelection>(NO_FILTERS)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const [checkTarget, setCheckTarget] = useState('')
@@ -221,14 +229,21 @@ export default function Loss() {
   }, [targets])
 
   const effectiveSelection = selectedIds ?? relayIds
-  const visible = useMemo(
-    () => (targets ?? []).filter(target => showAll || isLossy(target.worst_loss)),
+  const rows = useMemo(
+    () => describeTargets((targets ?? []).filter(target => showAll || isLossy(target.worst_loss))),
     [targets, showAll],
   )
+  const filterOptions = useMemo(() => facetOptions(rows, filters), [rows, filters])
+  const visible = useMemo(() => applyFilters(rows, filters), [rows, filters])
   // Правка профилей — только IPv4: DNAT других адресов не держит
-  const editable = useMemo(() => visible.filter(target => target.ip.includes('.')), [visible])
-  const pickedTargets = useMemo(() => (targets ?? []).filter(target => picked.has(target.target)), [targets, picked])
-  const allPicked = editable.length > 0 && editable.every(target => picked.has(target.target))
+  const editable = useMemo(
+    () => visible.map(row => row.target).filter(target => target.ip.includes('.')),
+    [visible],
+  )
+  // В правку уходит только отмеченное на экране. Адрес, скрытый фильтром, галочку не теряет,
+  // но в счёт и в окно правки не попадает, пока снова не появится в таблице
+  const pickedTargets = useMemo(() => editable.filter(target => picked.has(target.target)), [editable, picked])
+  const allPicked = editable.length > 0 && pickedTargets.length === editable.length
 
   const togglePicked = (key: string) => {
     setPicked(prev => {
@@ -240,7 +255,14 @@ export default function Loss() {
   }
 
   const togglePickAll = () => {
-    setPicked(allPicked ? new Set() : new Set(editable.map(target => target.target)))
+    setPicked(prev => {
+      const next = new Set(prev)
+      for (const { target } of editable) {
+        if (allPicked) next.delete(target)
+        else next.add(target)
+      }
+      return next
+    })
   }
 
   const toggleExpanded = (key: string) => {
@@ -277,7 +299,7 @@ export default function Loss() {
   const levelName = (level: number) => t(`loss.level_${level}`)
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className={`space-y-6 ${picked.size > 0 ? 'pb-24' : ''}`}>
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className={`space-y-6 ${pickedTargets.length > 0 ? 'pb-24' : ''}`}>
       <div className="flex items-center gap-3">
         <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20 flex items-center justify-center border border-accent-500/20">
           <Radar className="w-5 h-5 text-accent-400" />
@@ -320,14 +342,24 @@ export default function Loss() {
           </div>
         </div>
 
+        <TargetFilterBar
+          options={filterOptions}
+          shown={visible.length}
+          total={rows.length}
+          onToggle={(facet, value) => setFilters(prev => toggleFilter(prev, facet, value))}
+          onReset={() => setFilters(NO_FILTERS)}
+        />
+
         {targets === null ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="w-6 h-6 text-accent-400 animate-spin" />
           </div>
         ) : targets.length === 0 ? (
           <p className="text-center text-sm text-dark-500 py-10 px-4">{t('loss.no_data')}</p>
-        ) : visible.length === 0 ? (
+        ) : rows.length === 0 ? (
           <p className="text-center text-sm text-dark-500 py-10 px-4">{t('loss.all_clean', { count: targets.length })}</p>
+        ) : visible.length === 0 ? (
+          <p className="text-center text-sm text-dark-500 py-10 px-4">{t('loss.filter_empty')}</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -337,7 +369,7 @@ export default function Loss() {
                     {editable.length > 0 && (
                       <Checkbox
                         checked={allPicked}
-                        indeterminate={!allPicked && editable.some(target => picked.has(target.target))}
+                        indeterminate={!allPicked && pickedTargets.length > 0}
                         onChange={togglePickAll}
                       />
                     )}
@@ -350,9 +382,8 @@ export default function Loss() {
                 </tr>
               </thead>
               <tbody>
-                {visible.map(target => {
+                {visible.map(({ target, lossyRelays }) => {
                   const isOpen = expanded.has(target.target)
-                  const lossyCount = target.relays.filter(relay => isLossy(relay.loss_pct)).length
                   return (
                     <Fragment key={target.target}>
                       <tr
@@ -386,7 +417,7 @@ export default function Loss() {
                         </td>
                         <td className="px-4 py-2"><LossProbeBadge probe={target.relays[0]} /></td>
                         <td className="px-4 py-2 text-dark-300 whitespace-nowrap">
-                          {t('loss.relays_lossy', { lossy: lossyCount, total: target.relays.length })}
+                          {t('loss.relays_lossy', { lossy: lossyRelays, total: target.relays.length })}
                         </td>
                         <td className="px-4 py-2 text-xs whitespace-nowrap">
                           {target.episode
@@ -511,9 +542,9 @@ export default function Loss() {
 
       {/* fixed, а не sticky: длинную страницу прокручивает окно, sticky внутри <main> не прилипал.
           По центру области страницы — на десктопе слева статичное меню шириной 18rem */}
-      {picked.size > 0 && (
+      {pickedTargets.length > 0 && (
         <div className="fixed bottom-6 z-40 left-1/2 -translate-x-1/2 lg:left-[calc(50%+9rem)] w-[calc(100vw-2rem)] lg:w-[calc(100vw-22rem)] max-w-4xl flex items-center gap-3 flex-wrap rounded-xl border border-accent-500/30 bg-dark-900/95 backdrop-blur px-4 py-3 shadow-2xl shadow-black/50">
-          <span className="text-sm text-dark-200">{t('loss.picked', { count: picked.size })}</span>
+          <span className="text-sm text-dark-200">{t('loss.picked', { count: pickedTargets.length })}</span>
           <button
             onClick={() => setBatch({ mode: 'delete', targets: pickedTargets })}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-danger hover:bg-danger/10 transition-colors"
