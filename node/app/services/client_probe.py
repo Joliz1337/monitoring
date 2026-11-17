@@ -11,6 +11,9 @@
 
 Сервер, которому правило HAProxy шлёт PROXY-заголовок, без него разговаривать
 не станет — заголовок уходит перед рукопожатием, тем же видом, что в правиле.
+
+Правило с `source` ходит к серверу не с основного адреса релея, и путь оттуда
+бывает другим: рукопожатие уходит с того же адреса, что и трафик правила.
 """
 
 import asyncio
@@ -70,12 +73,15 @@ def client_hello() -> bytes:
 
 
 async def probe(ip: str, port: int, proxy: Optional[ProxyHeader] = None,
-                timeout: float = CLIENT_PROBE_TIMEOUT_SEC) -> Optional[bool]:
+                timeout: float = CLIENT_PROBE_TIMEOUT_SEC, local_ip: Optional[str] = None) -> Optional[bool]:
     """True — сервер ответил; False — подключение есть, ответа нет; None — подключиться
-    не удалось: это потери, а не молчание."""
+    не удалось: это потери, а не молчание. `local_ip` — адрес релея, с которого идти
+    (`source` из правила); без него — адрес по умолчанию."""
     hello = client_hello()
     try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, port, local_addr=(local_ip, 0) if local_ip else None), timeout,
+        )
     except (asyncio.TimeoutError, OSError):
         return None
     try:

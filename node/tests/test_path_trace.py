@@ -75,6 +75,21 @@ class RoundTests(unittest.TestCase):
             mtr_round_command("184.107.64.85", 8449), "mtr -n -T -P 8449 -c 1 -G 1 -U 30 -j 184.107.64.85",
         )
 
+    def test_command_leaves_from_the_exit_address_of_the_rule(self):
+        # Правило с `source` ходит к серверу не с основного адреса: трасса с основного показала бы чужую дорогу
+        self.assertEqual(
+            mtr_round_command("184.107.64.85", 8449, "192.0.2.10"),
+            "mtr -n -T -P 8449 -c 1 -G 1 -U 30 -a 192.0.2.10 -j 184.107.64.85",
+        )
+
+    def test_command_takes_only_an_address_as_the_exit(self):
+        # Адрес читается из конфига HAProxy и попадает в строку оболочки
+        with self.assertRaises(ValueError):
+            mtr_round_command("184.107.64.85", 8449, "192.0.2.10; reboot")
+        # Область IPv6 библиотека пропускает с любыми символами после %
+        with self.assertRaises(ValueError):
+            mtr_round_command("184.107.64.85", 8449, "fe80::1%;id;")
+
 
 class DnsTests(unittest.TestCase):
     def test_query_layout(self):
@@ -153,6 +168,13 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         view = manager.view(trace)
         self.assertEqual((view["state"], view["rounds_done"], len(view["hops"])), ("done", ROUNDS, 2))
         self.assertEqual(executor.execute.await_count, ROUNDS + 1)
+
+    async def test_trace_goes_from_the_given_exit_address(self):
+        round_json = mtr_json((1, "10.0.0.1", True, 0.5), (2, "184.107.64.85", True, 130.0))
+        manager, executor = self.manager([ok()] + [ok(round_json)] * ROUNDS)
+        manager.start("184.107.64.85", 8449, local_ip="192.0.2.10")
+        await asyncio.gather(*manager._tasks)
+        self.assertIn(" -a 192.0.2.10 ", executor.execute.await_args_list[1].args[0])
 
     async def test_missing_mtr_fails_with_reason(self):
         manager, _ = self.manager([failed("")])

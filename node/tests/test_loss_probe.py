@@ -52,6 +52,7 @@ from app.services.loss_probe import (  # noqa: E402
     haproxy_targets,
     parse_addr,
     readable_sources,
+    target_exits,
     target_proxy_headers,
 )
 
@@ -83,9 +84,12 @@ class FakeAttempts:
     def __init__(self, answers: dict[tuple[str, int], list]):
         self.answers = {target: list(values) for target, values in answers.items()}
         self.calls: list[tuple[str, int]] = []
+        # С какого адреса релея ушла попытка; None — с адреса по умолчанию
+        self.routes: list[tuple[tuple[str, int], object]] = []
 
-    async def __call__(self, ip: str, port: int):
+    async def __call__(self, ip: str, port: int, local_ip=None):
         self.calls.append((ip, port))
+        self.routes.append(((ip, port), local_ip))
         queue = self.answers.get((ip, port), [])
         return queue.pop(0) if queue else None
 
@@ -189,6 +193,42 @@ class AttemptTests(unittest.TestCase):
         with mock.patch("app.services.loss_probe.asyncio.open_connection", unreachable):
             self.assertIsNone(asyncio.run(attempt("10.0.0.5", 443)))
 
+    def test_attempt_leaves_from_the_given_address(self):
+        # Выходной адрес из правила HAProxy: путь с него бывает другим, чем с адреса по умолчанию
+        async def scenario():
+            peers = []
+
+            def accept(_reader, writer):
+                peers.append(writer.get_extra_info("peername")[0])
+                writer.close()
+
+            server = await asyncio.start_server(accept, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            try:
+                answered = await attempt("127.0.0.1", port, timeout=5.0, local_ip="127.0.0.2")
+                await asyncio.sleep(0.05)
+            finally:
+                server.close()
+                await server.wait_closed()
+            return answered, peers
+
+        answered, peers = asyncio.run(scenario())
+        self.assertIsNotNone(answered)
+        self.assertEqual(peers, ["127.0.0.2"])
+
+    def test_exit_address_missing_on_the_host_counts_as_lost(self):
+        # HAProxy с такого адреса тоже не подключится
+        async def scenario():
+            server = await asyncio.start_server(lambda r, w: w.close(), "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            try:
+                return await attempt("127.0.0.1", port, timeout=5.0, local_ip="192.0.2.77")
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        self.assertIsNone(asyncio.run(scenario()))
+
 
 class LossProbeTests(unittest.TestCase):
     def probe(self, targets: dict, answers: dict, **kwargs) -> tuple[LossProbe, FakeAttempts]:
@@ -204,6 +244,27 @@ class LossProbeTests(unittest.TestCase):
         self.assertEqual(sorted(fake.calls), sorted(targets))
         self.assertEqual(probe.stats_for(("10.0.0.5", 443)).loss_pct, 0.0)
         self.assertEqual(probe.stats_for(("10.0.0.6", 443)).loss_pct, 100.0)
+
+    def test_attempts_take_the_exit_addresses_of_the_rule_in_turn(self):
+        # Копии сервера под выходные IP делят соединения по кругу — так же ходит и замер
+        relayed, plain = ("10.0.0.5", 443), ("10.0.0.6", 443)
+        targets = {relayed: {Source.HAPROXY}, plain: {Source.DNAT}}
+        probe, fake = self.probe(targets, {})
+        probe.refresh_targets(targets, exits={relayed: ("192.0.2.10", "192.0.2.11")})
+        for _ in range(3):
+            asyncio.run(probe.run_round())
+        self.assertEqual([local_ip for target, local_ip in fake.routes if target == relayed],
+                         ["192.0.2.10", "192.0.2.11", "192.0.2.10"])
+        self.assertEqual({local_ip for target, local_ip in fake.routes if target == plain}, {None})
+
+    def test_failed_stats_read_keeps_the_exit_addresses(self):
+        relayed = ("10.0.0.5", 443)
+        targets = {relayed: {Source.HAPROXY}}
+        probe, fake = self.probe(targets, {})
+        probe.refresh_targets(targets, exits={relayed: ("192.0.2.10",)})
+        probe.refresh_targets(targets)
+        asyncio.run(probe.run_round())
+        self.assertEqual(fake.routes, [(relayed, "192.0.2.10")])
 
     def test_refresh_drops_vanished_targets_and_keeps_history(self):
         kept, gone = ("10.0.0.5", 443), ("10.0.0.6", 443)
@@ -436,10 +497,47 @@ class RealDataPathTests(unittest.TestCase):
         failed = self.discover_with(DownCounter(), {"available": False, "reason": "timeout", "proxies": []})
         self.assertIsNone(failed.proxy_headers)
 
+    def test_discovery_finds_the_exit_address_of_a_server(self):
+        config = "backend backend_tcp_relay\n    server srv1 10.0.0.5:443 check source 192.0.2.10\n"
+        found = self.discover_with(DownCounter(), STATS_DICT, config)
+        self.assertEqual(found.exits, {("10.0.0.5", 443): ("192.0.2.10",)})
+
+    def test_failed_stats_read_leaves_the_exit_addresses_unknown(self):
+        failed = self.discover_with(DownCounter(), {"available": False, "reason": "timeout", "proxies": []})
+        self.assertIsNone(failed.exits)
+
+    def test_manual_check_goes_from_the_exit_addresses_of_the_rule(self):
+        from app.routers import loss_probe as loss_probe_router
+
+        asked = {}
+
+        async def series(ip: str, port: int, attempts: int, **kwargs) -> ProbeStats:
+            asked.update(kwargs)
+            return ProbeStats(loss_pct=0.0, rtt_ms=5.0, samples=attempts)
+
+        probe = mock.Mock(exits_for=mock.Mock(return_value=("192.0.2.10",)))
+        with mock.patch.object(loss_probe_router, "check_target", series), \
+                mock.patch.object(loss_probe_router, "get_loss_probe", return_value=probe):
+            asyncio.run(loss_probe_router.check(LossCheckRequest(ip="10.0.0.5", port=443)))
+        probe.exits_for.assert_called_once_with(("10.0.0.5", 443))
+        self.assertEqual(asked, {"exits": ("192.0.2.10",)})
+
+    def test_trace_goes_from_the_first_exit_address_of_the_rule(self):
+        from app.models.loss_probe import TargetRequest
+        from app.routers import loss_probe as loss_probe_router
+
+        manager = mock.Mock(start=mock.Mock(return_value=mock.Mock(id="trace-1")))
+        probe = mock.Mock(exits_for=mock.Mock(return_value=("192.0.2.10", "192.0.2.11")))
+        with mock.patch.object(loss_probe_router, "get_path_trace_manager", return_value=manager), \
+                mock.patch.object(loss_probe_router, "get_loss_probe", return_value=probe):
+            started = asyncio.run(loss_probe_router.start_trace(TargetRequest(ip="10.0.0.5", port=443)))
+        self.assertEqual(started, {"id": "trace-1"})
+        manager.start.assert_called_once_with("10.0.0.5", 443, local_ip="192.0.2.10")
+
     def test_manual_check_adds_the_client_probe_when_the_panel_asks(self):
         from app.routers import loss_probe as loss_probe_router
 
-        async def series(ip: str, port: int, attempts: int) -> ProbeStats:
+        async def series(ip: str, port: int, attempts: int, **_kwargs) -> ProbeStats:
             return ProbeStats(loss_pct=0.0, rtt_ms=5.0, samples=attempts)
 
         probe = mock.Mock(probe_as_client=mock.AsyncMock(return_value=False))
@@ -470,11 +568,22 @@ class ManualCheckTests(unittest.TestCase):
     def test_series_counts_loss_and_rtt(self):
         answers = iter([10.0, None, 30.0, None])
 
-        async def fake(ip, port):
+        async def fake(ip, port, local_ip=None):
             return next(answers)
 
         stats = asyncio.run(check_target("10.0.0.5", 443, attempts=4, attempt_fn=fake, spacing=0))
         self.assertEqual((stats.loss_pct, stats.rtt_ms, stats.samples), (50.0, 20.0, 4))
+
+    def test_series_goes_through_the_exit_addresses_in_turn(self):
+        left_from = []
+
+        async def fake(ip, port, local_ip=None):
+            left_from.append(local_ip)
+            return 5.0
+
+        asyncio.run(check_target("10.0.0.5", 443, attempts=4, attempt_fn=fake, spacing=0,
+                                 exits=("192.0.2.10", None)))
+        self.assertEqual(sorted(left_from, key=str), ["192.0.2.10", "192.0.2.10", None, None])
 
     def test_request_defaults_and_limits(self):
         request = LossCheckRequest(ip="62.50.146.225")
@@ -541,15 +650,18 @@ class FakeClock:
 
 
 class FakeClientProbe:
-    """Подменяет проверку «как клиент»: вердикт по адресу; None — подключиться не удалось."""
+    """Подменяет проверку «как клиент»: вердикт по адресу либо по адресу и выходному
+    адресу релея (ip, port, local_ip); None — подключиться не удалось."""
 
-    def __init__(self, verdicts: dict[tuple[str, int], object]):
+    def __init__(self, verdicts: dict[tuple, object]):
         self.verdicts = verdicts
         self.calls: list[tuple[tuple[str, int], object]] = []
+        self.routes: list[tuple[tuple[str, int], object]] = []
 
-    async def __call__(self, ip: str, port: int, proxy=None):
+    async def __call__(self, ip: str, port: int, proxy=None, local_ip=None):
         self.calls.append(((ip, port), proxy))
-        return self.verdicts.get((ip, port))
+        self.routes.append(((ip, port), local_ip))
+        return self.verdicts.get((ip, port, local_ip), self.verdicts.get((ip, port)))
 
 
 class ProxyHeaderDiscoveryTests(unittest.TestCase):
@@ -622,22 +734,106 @@ class ProxyHeaderDiscoveryTests(unittest.TestCase):
                          {("10.0.0.5", 443): ProxyHeader.V1})
 
 
+class ExitAddressDiscoveryTests(unittest.TestCase):
+    """Проверки идут с того же адреса, что и трафик: `source` из правила HAProxy."""
+
+    @staticmethod
+    def exits(config: str, *servers: tuple[str, str, str]) -> dict:
+        rows = [((backend, name), parse_addr(addr), 0) for backend, name, addr in servers]
+        return target_exits(rows, haproxy_proxy_headers(config))
+
+    def test_copies_of_a_server_give_every_exit_address(self):
+        config = ("backend b\n    server srv1 10.0.0.5:443 check source 192.0.2.10\n"
+                  "    server srv1_o2 10.0.0.5:443 check source 192.0.2.11\n"
+                  "    server srv2 10.0.0.6:443 check\n")
+        found = self.exits(config, ("b", "srv1", "10.0.0.5:443"), ("b", "srv1_o2", "10.0.0.5:443"),
+                           ("b", "srv2", "10.0.0.6:443"))
+        # Адрес, к которому ходят только с основного, в списке не нужен
+        self.assertEqual(found, {("10.0.0.5", 443): ("192.0.2.10", "192.0.2.11")})
+
+    def test_source_of_the_rule_reaches_all_its_servers(self):
+        # `source` секции действует на все её серверы, где бы ни стояла; свой у сервера старше
+        config = ("backend b\n    server before 10.0.0.5:443\n    source 192.0.2.10:0\n"
+                  "    server own 10.0.0.6:443 source 192.0.2.11\n"
+                  "backend other\n    balance source\n    server s 10.0.0.7:443\n")
+        found = self.exits(config, ("b", "before", "10.0.0.5:443"), ("b", "own", "10.0.0.6:443"),
+                           ("other", "s", "10.0.0.7:443"))
+        self.assertEqual(found, {("10.0.0.5", 443): ("192.0.2.10",), ("10.0.0.6", 443): ("192.0.2.11",)})
+
+    def test_source_of_the_defaults_section_reaches_every_rule_after_it(self):
+        config = ("backend early\n    server s 10.0.0.4:443\n\ndefaults\n    source 192.0.2.9\n\n"
+                  "backend a\n    server s 10.0.0.5:443\nlisten b\n    bind :443\n    source 192.0.2.10\n"
+                  "    server s 10.0.0.6:443\n")
+        found = self.exits(config, ("early", "s", "10.0.0.4:443"), ("a", "s", "10.0.0.5:443"),
+                           ("b", "s", "10.0.0.6:443"))
+        self.assertEqual(found, {("10.0.0.5", 443): ("192.0.2.9",), ("10.0.0.6", 443): ("192.0.2.10",)})
+
+    def test_address_reached_with_and_without_a_source_is_probed_both_ways(self):
+        config = "backend a\n    server s 10.0.0.5:443 source 192.0.2.10\nbackend b\n    server s 10.0.0.5:443\n"
+        found = self.exits(config, ("a", "s", "10.0.0.5:443"), ("b", "s", "10.0.0.5:443"))
+        self.assertEqual(found, {("10.0.0.5", 443): ("192.0.2.10", None)})
+
+    def test_source_that_is_not_an_address_means_the_main_one(self):
+        config = ("backend a\n    server s 10.0.0.5:443 source 0.0.0.0 usesrc clientip\n"
+                  "    server t 10.0.0.6:443 source ${EXIT_IP}\n    server u 10.0.0.7:443 check source\n")
+        found = self.exits(config, ("a", "s", "10.0.0.5:443"), ("a", "t", "10.0.0.6:443"), ("a", "u", "10.0.0.7:443"))
+        self.assertEqual(found, {})
+
+    def test_default_server_gives_its_source_to_the_servers_after_it(self):
+        # Проверено на HAProxy 3.0.11: сервер после такой строки выходит с её адреса
+        config = ("backend b\n    server before 10.0.0.4:443\n    default-server check source 192.0.2.10\n"
+                  "    server after 10.0.0.5:443\n    server own 10.0.0.6:443 source 192.0.2.11\n"
+                  "backend next\n    server s 10.0.0.7:443\n")
+        found = self.exits(config, ("b", "before", "10.0.0.4:443"), ("b", "after", "10.0.0.5:443"),
+                           ("b", "own", "10.0.0.6:443"), ("next", "s", "10.0.0.7:443"))
+        self.assertEqual(found, {("10.0.0.5", 443): ("192.0.2.10",), ("10.0.0.6", 443): ("192.0.2.11",)})
+
+    def test_default_server_of_the_defaults_section_gives_its_source_to_every_rule(self):
+        config = ("defaults\n    default-server source 192.0.2.9\n\nbackend a\n    server s 10.0.0.5:443\n"
+                  "backend b\n    default-server send-proxy\n    server s 10.0.0.6:443\n")
+        found = self.exits(config, ("a", "s", "10.0.0.5:443"), ("b", "s", "10.0.0.6:443"))
+        self.assertEqual(found, {("10.0.0.5", 443): ("192.0.2.9",), ("10.0.0.6", 443): ("192.0.2.9",)})
+
+    def test_source_of_default_server_is_older_than_the_source_of_the_rule(self):
+        config = "backend b\n    source 192.0.2.1\n    default-server source 192.0.2.2\n    server s 10.0.0.5:443\n"
+        self.assertEqual(self.exits(config, ("b", "s", "10.0.0.5:443")), {("10.0.0.5", 443): ("192.0.2.2",)})
+
+    def test_address_with_a_zone_means_the_main_one(self):
+        # После % в адресе IPv6 может стоять что угодно, а адрес уходит в строку оболочки трассы
+        config = "backend b\n    server s 10.0.0.5:443 source fe80::1%;id;\n    server t 10.0.0.6:443 source fe80::1%eth0\n"
+        self.assertEqual(self.exits(config, ("b", "s", "10.0.0.5:443"), ("b", "t", "10.0.0.6:443")), {})
+
+    def test_servers_of_a_template_take_its_source(self):
+        config = "backend b\n    server-template node 3 nodes.example:443 check source [2001:db8::10]:0\n"
+        found = self.exits(config, ("b", "node2", "10.0.0.5:443"), ("b", "nodeX", "10.0.0.6:443"))
+        self.assertEqual(found, {("10.0.0.5", 443): ("2001:db8::10",)})
+
+    def test_header_and_source_of_one_server_are_both_read(self):
+        config = "backend b\n    server srv1 10.0.0.5:443 check send-proxy-v2 source 192.0.2.10\n"
+        rows = [(("b", "srv1"), ("10.0.0.5", 443), 0)]
+        rules = haproxy_proxy_headers(config)
+        self.assertEqual(target_proxy_headers(rows, rules), {("10.0.0.5", 443): ProxyHeader.V2})
+        self.assertEqual(target_exits(rows, rules), {("10.0.0.5", 443): ("192.0.2.10",)})
+
+
 class ClientProbeRoundTests(unittest.IsolatedAsyncioTestCase):
     """Проверка «как клиент»: идёт только по просьбе панели, реже замера подключений."""
 
     BACKEND = ("10.0.0.5", 443)
     FORWARDED = ("10.0.0.6", 443)
 
-    def make(self, verdicts: dict, proxies: dict | None = None, stalled_fn=lambda _target: None) -> LossProbe:
+    def make(self, verdicts: dict, proxies: dict | None = None, stalled_fn=lambda _target: None,
+             exits: dict | None = None) -> LossProbe:
         self.clock = FakeClock()
         self.client = FakeClientProbe(verdicts)
         self.targets = {self.BACKEND: {Source.HAPROXY}, self.FORWARDED: {Source.DNAT}}
         self.proxies = proxies or {}
+        self.exits = exits or {}
         probe = LossProbe(
-            discover=lambda: Discovery(self.targets, proxy_headers=self.proxies), attempt_fn=FakeAttempts({}),
-            client_probe_fn=self.client, stalled_fn=stalled_fn, clock=self.clock,
+            discover=lambda: Discovery(self.targets, proxy_headers=self.proxies, exits=self.exits),
+            attempt_fn=FakeAttempts({}), client_probe_fn=self.client, stalled_fn=stalled_fn, clock=self.clock,
         )
-        probe.refresh_targets(self.targets, proxy_headers=self.proxies)
+        probe.refresh_targets(self.targets, proxy_headers=self.proxies, exits=self.exits)
         return probe
 
     async def round(self, probe: LossProbe, advance: float = 0.0, ask: bool = True,
@@ -715,8 +911,79 @@ class ClientProbeRoundTests(unittest.IsolatedAsyncioTestCase):
         await probe.run_round()
         self.assertEqual(self.answers(probe), {"10.0.0.5": False, "10.0.0.6": None})
 
+    async def test_probe_leaves_from_the_exit_address_of_the_rule(self):
+        probe = self.make({}, exits={self.BACKEND: ("192.0.2.10",)})
+        await self.round(probe)
+        self.assertEqual(sorted(self.client.routes, key=str), [(self.BACKEND, "192.0.2.10"), (self.FORWARDED, None)])
+
+    async def test_server_answering_through_one_exit_address_is_not_silent(self):
+        # Выходные адреса проверяются по очереди; мёртв наверняка только молчащий со всех
+        dead_way, live_way = (*self.BACKEND, "192.0.2.10"), (*self.BACKEND, "192.0.2.11")
+        probe = self.make({dead_way: False, live_way: True}, exits={self.BACKEND: ("192.0.2.10", "192.0.2.11")})
+        await self.round(probe)
+        # Очередь ещё не дошла до адреса, с которого сервер отвечает: молчание первого — не вердикт
+        self.assertIsNone(self.answers(probe)["10.0.0.5"])
+        await self.round(probe, advance=CLIENT_PROBE_INTERVAL_SEC)
+        self.assertIs(self.answers(probe)["10.0.0.5"], True)
+        await self.round(probe, advance=CLIENT_PROBE_INTERVAL_SEC)
+        self.assertIs(self.answers(probe)["10.0.0.5"], True)
+
+    async def test_exit_that_cannot_connect_does_not_hide_the_silence_of_the_rest(self):
+        # С одного выходного адреса сервер молчит, с другого до него не подключиться: молчит со всех, откуда дошли
+        probe = self.make({(*self.BACKEND, "192.0.2.10"): False}, exits={self.BACKEND: ("192.0.2.10", "192.0.2.11")})
+        await self.round(probe)
+        self.assertIsNone(self.answers(probe)["10.0.0.5"])
+        await self.round(probe, advance=CLIENT_PROBE_INTERVAL_SEC)
+        self.assertIs(self.answers(probe)["10.0.0.5"], False)
+
+    async def test_new_exit_address_is_tried_before_the_server_is_called_silent(self):
+        probe = self.make({(*self.BACKEND, "192.0.2.10"): False, (*self.BACKEND, "192.0.2.11"): True},
+                          exits={self.BACKEND: ("192.0.2.10",)})
+        await self.round(probe)
+        self.assertIs(self.answers(probe)["10.0.0.5"], False)
+        self.exits = {self.BACKEND: ("192.0.2.10", "192.0.2.11")}
+        probe.refresh_targets(self.targets, exits=self.exits)
+        self.assertIsNone(self.answers(probe)["10.0.0.5"])
+        await self.round(probe, advance=CLIENT_PROBE_INTERVAL_SEC)
+        self.assertIs(self.answers(probe)["10.0.0.5"], True)
+
+    async def test_verdict_of_an_exit_address_lives_until_its_next_turn(self):
+        ways = tuple(f"192.0.2.{last}" for last in (10, 11, 12, 13))
+        verdicts = {(*self.BACKEND, way): False for way in ways} | {(*self.BACKEND, ways[0]): True}
+        probe = self.make(verdicts, exits={self.BACKEND: ways})
+        await self.round(probe)
+        for _ in range(len(ways) - 1):
+            await self.round(probe, advance=CLIENT_PROBE_INTERVAL_SEC)
+            self.assertIs(self.answers(probe)["10.0.0.5"], True)
+
+    async def test_server_silent_through_every_exit_address_is_silent(self):
+        probe = self.make({self.BACKEND: False}, exits={self.BACKEND: ("192.0.2.10", "192.0.2.11")})
+        await self.round(probe)
+        await self.round(probe, advance=CLIENT_PROBE_INTERVAL_SEC)
+        self.assertIs(self.answers(probe)["10.0.0.5"], False)
+
+    async def test_verdict_of_a_removed_exit_address_is_forgotten(self):
+        probe = self.make({(*self.BACKEND, "192.0.2.10"): True, (*self.BACKEND, "192.0.2.11"): False},
+                          exits={self.BACKEND: ("192.0.2.10", "192.0.2.11")})
+        await self.round(probe)
+        self.assertIs(self.answers(probe)["10.0.0.5"], True)
+        self.exits = {self.BACKEND: ("192.0.2.11",)}
+        probe.refresh_targets(self.targets, exits=self.exits)
+        await self.round(probe, advance=CLIENT_PROBE_INTERVAL_SEC)
+        self.assertIs(self.answers(probe)["10.0.0.5"], False)
+
+    async def test_manual_probe_tries_every_exit_address(self):
+        dead_way, live_way = (*self.BACKEND, "192.0.2.10"), (*self.BACKEND, "192.0.2.11")
+        probe = self.make({dead_way: False, live_way: True}, exits={self.BACKEND: ("192.0.2.10", "192.0.2.11")})
+        self.assertIs(await probe.probe_as_client(self.BACKEND), True)
+        self.assertEqual(sorted(local_ip for _, local_ip in self.client.routes), ["192.0.2.10", "192.0.2.11"])
+        self.client.verdicts = {dead_way: False}
+        self.assertIs(await probe.probe_as_client(self.BACKEND), False)
+        self.client.verdicts = {}
+        self.assertIsNone(await probe.probe_as_client(self.BACKEND))
+
     async def test_one_failing_probe_leaves_the_rest_of_the_round(self):
-        async def flaky(ip: str, port: int, proxy=None):
+        async def flaky(ip: str, port: int, proxy=None, local_ip=None):
             if (ip, port) == self.BACKEND:
                 raise RuntimeError("probe bug")
             return False

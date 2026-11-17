@@ -65,10 +65,22 @@ class TraceBusyError(RuntimeError):
     pass
 
 
-def mtr_round_command(ip: str, port: int) -> str:
+def mtr_round_command(ip: str, port: int, local_ip: Optional[str] = None) -> str:
     # ip и port уже проверены моделью запроса — в строку попадают только они.
-    # -G 1: ждать ответов секунду после последнего пакета, а не 5 по умолчанию
-    return f"mtr -n -T -P {int(port)} -c 1 -G 1 -U {MAX_SILENT_HOPS} -j {ip}"
+    # -G 1: ждать ответов секунду после последнего пакета, а не 5 по умолчанию.
+    # -a: с адреса релея, которым правило HAProxy ходит к серверу (`source`) — путь
+    # оттуда бывает другим, чем с основного
+    exit_address = f" -a {_plain_ip(local_ip)}" if local_ip else ""
+    return f"mtr -n -T -P {int(port)} -c 1 -G 1 -U {MAX_SILENT_HOPS}{exit_address} -j {ip}"
+
+
+def _plain_ip(value: str) -> str:
+    """Адрес для строки оболочки: он прочитан из конфига HAProxy, а не из запроса.
+    Область IPv6 (fe80::1%eth0) не принимается — после % библиотека пропускает что угодно."""
+    address = ipaddress.ip_address(value)
+    if address.version == 6 and address.scope_id is not None:
+        raise ValueError(f"address with a zone is not accepted: {value!r}")
+    return str(address)
 
 
 def parse_round(output: str) -> list[tuple[int, Optional[str], Optional[float]]]:
@@ -126,6 +138,8 @@ class PathTrace:
     hops: dict[int, HopStats] = field(default_factory=dict)
     error: Optional[str] = None
     finished_at: Optional[float] = None
+    # Адрес релея, с которого идёт трасса; None — адрес по умолчанию
+    local_ip: Optional[str] = None
 
     def record_round(self, replies: list[tuple[int, Optional[str], Optional[float]]]) -> None:
         for hop, host, rtt_ms in replies:
@@ -294,12 +308,12 @@ class PathTraceManager:
         self._traces: dict[str, PathTrace] = {}
         self._tasks: set[asyncio.Task] = set()
 
-    def start(self, ip: str, port: int) -> PathTrace:
+    def start(self, ip: str, port: int, local_ip: Optional[str] = None) -> PathTrace:
         self._prune()
         active = sum(trace.state is TraceState.RUNNING for trace in self._traces.values())
         if active >= MAX_ACTIVE_TRACES:
             raise TraceBusyError(f"{active} traces are already running on this node")
-        trace = PathTrace(id=uuid.uuid4().hex, ip=ip, port=port, created_at=self._clock())
+        trace = PathTrace(id=uuid.uuid4().hex, ip=ip, port=port, created_at=self._clock(), local_ip=local_ip)
         self._traces[trace.id] = trace
         task = asyncio.create_task(self.run(trace))
         self._tasks.add(task)
@@ -327,7 +341,7 @@ class PathTraceManager:
             installed = await self._executor.execute(MTR_INSTALL_COMMAND, timeout=MTR_INSTALL_TIMEOUT_SEC)
             if not installed.success:
                 raise RuntimeError("mtr is not installed and could not be installed (apt-get install mtr-tiny)")
-            command = mtr_round_command(trace.ip, trace.port)
+            command = mtr_round_command(trace.ip, trace.port, trace.local_ip)
             for _ in range(ROUNDS):
                 result = await self._executor.execute(command, timeout=ROUND_TIMEOUT_SEC)
                 if not result.success:

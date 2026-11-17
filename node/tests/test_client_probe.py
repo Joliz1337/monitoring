@@ -111,6 +111,27 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(await probe("127.0.0.1", await self.serve(hang_up), timeout=QUICK), False)
 
+    async def test_probe_leaves_from_the_given_address(self):
+        # Выходной адрес из правила HAProxy: сервер видит проверку с него, а не с адреса по умолчанию
+        peers = []
+
+        async def reply(reader, writer):
+            peers.append(writer.get_extra_info("peername")[0])
+            await reader.read(1)
+            writer.write(b"\x16\x03\x03\x00\x01\x02")
+            await writer.drain()
+
+        self.assertIs(await probe("127.0.0.1", await self.serve(reply), local_ip="127.0.0.2"), True)
+        self.assertEqual(peers, ["127.0.0.2"])
+
+    async def test_exit_address_missing_on_the_host_is_not_judged(self):
+        async def reply(reader, writer):
+            await reader.read(1)
+            writer.write(b"\x16\x03\x03\x00\x01\x02")
+            await writer.drain()
+
+        self.assertIsNone(await probe("127.0.0.1", await self.serve(reply), local_ip="192.0.2.77"))
+
     async def test_address_that_cannot_be_reached_is_not_judged(self):
         # Не подключиться — это потери, их считает другой замер
         with socket.socket() as sock:
@@ -129,7 +150,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
             def write(self, data: bytes) -> None:
                 raise AssertionError("nothing to write to")
 
-        async def connected(ip: str, port: int):
+        async def connected(ip: str, port: int, local_addr=None):
             return asyncio.StreamReader(), GoneWriter()
 
         with mock.patch("app.services.client_probe.asyncio.open_connection", connected):
