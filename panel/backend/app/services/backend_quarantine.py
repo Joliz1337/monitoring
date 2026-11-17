@@ -91,6 +91,9 @@ class EventKind(str, Enum):
     RESTORED = "restored"
     CHRONIC = "chronic"
     RELAY_PAUSED = "relay_paused"
+    # Состояние адреса целиком, а не пары: отключён почти на всех своих релеях и вернулся (backend_quarantine_dead)
+    DEAD = "dead"
+    ALIVE = "alive"
 
 
 class RestoreCause(str, Enum):
@@ -191,6 +194,14 @@ class Event:
     observe: bool = False
     # Релеи, на которых адрес отключается постоянно (только CHRONIC)
     relays: tuple[str, ...] = ()
+    # Дальше — только DEAD и ALIVE. На скольких релеях из держащих адрес он отключён
+    failing: int = 0
+    total: int = 0
+    reasons: tuple[ReasonKind, ...] = ()
+    # Владелец на момент события: упавшую ноду реестр замеров к отправке сводки уже забыл
+    owner: Optional[str] = None
+    # Больше нуля — после события у ноды-владельца не работают (снова работают) все столько адресов
+    node_total: int = 0
 
 
 @dataclass
@@ -248,17 +259,21 @@ class QuarantineTracker:
     # Релей → до какого момента его падения не повод отключать: пока у релея не было
     # сети, HAProxy ронял все серверы, и эти падения лежат в окне ноды ещё полчаса
     _downs_ignored_until: dict[int, float] = field(default_factory=dict)
+    # Адрес → релеи, чей замер учтён в последнем evaluate(): только они могли бы его отключить,
+    # и только по ним считается, на какой доле релеев адрес не работает
+    voters: dict[str, set[int]] = field(default_factory=dict)
 
     def evaluate(self, snapshots: list[RelaySnapshot], rules: TargetRules, exempt: Exemptions,
                  policy: QuarantinePolicy, mode: Mode, now: float) -> list[Event]:
         events: list[Event] = []
         seen: set[PairKey] = set()
+        voters: dict[str, set[int]] = {}
         # Без правил и исключений каждый адрес учитывается как обычный — на парке в
         # тысячи релеев это десятки тысяч сэкономленных проверок за цикл
         plain = not (rules.ips or rules.endpoints or exempt.server_ids or exempt.ips or exempt.endpoints)
         for snapshot in snapshots:
             touched = []
-            considered = 0
+            considered: list[str] = []
             for reading in snapshot.readings:
                 key = (snapshot.server_id, reading.key)
                 target_mode = TargetMode.TRACKED if plain else rules.mode(reading)
@@ -269,17 +284,22 @@ class QuarantineTracker:
                 # downs=None — адреса нет в HAProxy релея (цель DNAT) или нода старая: отключать нечем
                 if reading.downs is None or reading.samples < MIN_SAMPLES:
                     continue
-                considered += 1
+                considered.append(key[1])
                 # Здоровому адресу без записи считать нечего — таких почти все; его
                 # таймеры, если шли, уберёт _close_silent
                 if key in self.pairs or _is_bad(reading, target_mode, policy):
                     touched.append(_Observed(key, reading, target_mode))
-            paused = self._relay_paused(snapshot, touched, considered, policy, now, events)
+            paused = self._relay_paused(snapshot, touched, len(considered), policy, now, events)
+            if not paused:
+                # Релей на паузе новых отключений не решает — и о том, умер ли адрес, не судит
+                for target in considered:
+                    voters.setdefault(target, set()).add(snapshot.server_id)
             for item in touched:
                 seen.add(item.key)
                 events += self._step(item, snapshot.name, policy, mode, paused, now)
         self._close_silent(seen, now)
         self._forget_old(now)
+        self.voters = voters
         return events + self._chronic(policy, mode)
 
     def desired(self) -> dict[int, list[str]]:

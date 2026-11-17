@@ -21,6 +21,7 @@ import BatchEditModal, { type BatchMode } from '../components/loss/BatchEditModa
 import ActivityStrip, { isJobRunning, type RunningCheck } from '../components/loss/ActivityStrip'
 import LossSettings from '../components/loss/LossSettings'
 import QuarantineBlock from '../components/loss/QuarantineBlock'
+import { RelayWaysCard } from '../components/loss/RelayWays'
 import type { BackendAddress, ExemptAddress } from '../components/loss/quarantineGroups'
 import TargetFilterBar from '../components/loss/TargetFilterBar'
 import {
@@ -455,7 +456,16 @@ export default function Loss() {
                           <td />
                           <td className="px-4 py-1.5 pl-10 text-dark-300">{relay.name}</td>
                           <td className="px-4 py-1.5"><LossProbeBadge probe={relay} /></td>
-                          <td className="px-4 py-1.5 text-dark-500" colSpan={2}>{t('loss.samples', { count: relay.samples })}</td>
+                          <td className="px-4 py-1.5 text-dark-500" colSpan={2}>
+                            <span className="inline-flex items-center gap-3 flex-wrap">
+                              {t('loss.samples', { count: relay.samples })}
+                              <RelayWaysCard serverId={relay.server_id} serverName={relay.name} target={target.target}>
+                                <span className="text-dark-300 underline decoration-dotted decoration-dark-500 underline-offset-4 cursor-help">
+                                  {t('loss.ways_open')}
+                                </span>
+                              </RelayWaysCard>
+                            </span>
+                          </td>
                           <td className="px-4 py-1.5 text-right">
                             <button
                               onClick={() => setTracing({ serverId: relay.server_id, serverName: relay.name, target: target.target })}

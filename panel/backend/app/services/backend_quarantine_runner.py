@@ -35,7 +35,8 @@ from app.services.backend_quarantine import (
     QuarantineTracker,
     RestoreCause,
 )
-from app.services.backend_quarantine_messages import format_digest, history_records
+from app.services.backend_quarantine_dead import DeadTracker, revive_hold
+from app.services.backend_quarantine_messages import format_digest, history_records, telegram_events
 from app.services.backend_quarantine_settings import QuarantineSettings, load_quarantine_settings
 from app.services.haproxy_profile_sync import is_server_online
 from app.services.http_client import get_node_client, node_auth_headers
@@ -68,6 +69,11 @@ VOLATILE_FIELDS = ("last_data_at", "calm_since")
 NOTIFY_DELAY_SEC = 90.0
 # Остановка панели не ждёт Telegram дольше этого
 STOP_NOTIFY_TIMEOUT_SEC = 5.0
+# Начало «state.» — признак внутреннего состояния: общий список настроек такой ключ не отдаёт
+DEAD_STATE_KEY = "state.loss_quarantine_dead"
+# Сразу после запуска реестр замеров пуст, пока сборщик не обошёл релеи, а в режиме
+# наблюдения пары собираются заново: до этого срока об умерших адресах не судят
+WARMUP_SEC = 180.0
 
 Notifier = Callable[[list[Event], QuarantineSettings], Awaitable[None]]
 
@@ -113,6 +119,23 @@ class DbStorage:
         async with self._session_factory() as db:
             return await load_quarantine_settings(db)
 
+    async def load_dead(self) -> dict[str, dict]:
+        from app.routers.settings import get_setting
+
+        async with self._session_factory() as db:
+            raw = await get_setting(DEAD_STATE_KEY, db)
+        try:
+            rows = json.loads(raw or "{}")
+        except ValueError:
+            return {}
+        return rows if isinstance(rows, dict) else {}
+
+    async def save_dead(self, rows: dict[str, dict]) -> None:
+        from app.routers.settings import set_setting
+
+        async with self._session_factory() as db:
+            await set_setting(DEAD_STATE_KEY, json.dumps(rows), db)
+
 
 # Адрес и пометка «мёртв наверняка» — в таком виде он уходит релею
 Marked = tuple[str, bool]
@@ -151,6 +174,9 @@ class QuarantineRunner:
         self._outbox: list[Event] = []
         self._outbox_since = 0.0
         self.tracker = QuarantineTracker()
+        self.dead = DeadTracker()
+        self._dead_saved: dict[str, dict] = {}
+        self._started_at = clock()
         self._settings = QuarantineSettings()
         # Режим, в котором трекер считал в прошлый раз: смена режима возвращает всё отключённое
         self._mode = Mode.OFF
@@ -199,6 +225,9 @@ class QuarantineRunner:
                 logger.warning("quarantine: stored pair %s is unreadable, skipped", key)
         self.tracker.pairs = pairs
         self._saved = self._storable()
+        self.dead.restore(await self._storage.load_dead(), now)
+        self._dead_saved = self.dead.stored()
+        self._started_at = now
         if self._mode is not Mode.ENFORCE:
             self._startup_events = self._return_everything(now)
         self._restored = True
@@ -287,13 +316,19 @@ class QuarantineRunner:
         return True
 
     def _queue(self, events: list[Event], now: float) -> None:
-        if events and not self._outbox:
+        # Срок сводки отсчитывают только события, которые уйдут в Telegram в нынешнем режиме:
+        # событие, идущее лишь в историю, чужую сводку не торопит и само её не ждёт
+        scope = self._settings.notify_scope
+        if telegram_events(events, scope) and not telegram_events(self._outbox, scope):
             self._outbox_since = now
         self._outbox += events
 
     async def _flush(self, settings: QuarantineSettings, force: bool = False) -> None:
         now = self._clock()
-        if not self._outbox or (not force and now - self._outbox_since < self._notify_delay):
+        if not self._outbox:
+            return
+        waits = bool(telegram_events(self._outbox, settings.notify_scope))
+        if waits and not force and now - self._outbox_since < self._notify_delay:
             return
         batch = list(self._outbox)
         await self._notify(batch, settings)
@@ -354,6 +389,7 @@ class QuarantineRunner:
         events: list[Event] = []
         if settings.mode is not self._mode:
             events += self.tracker.clear(now, RestoreCause.MODE)
+            self.dead.clear()
             self._mode = settings.mode
         if settings.mode is Mode.OFF:
             return events
@@ -361,9 +397,18 @@ class QuarantineRunner:
         # в потоке он не останавливает цикл событий. Реестр читается здесь, а не в потоке —
         # коллектор пишет в него из цикла событий
         return events + await asyncio.to_thread(
-            self.tracker.evaluate,
-            self._registry.fresh(), self._registry.target_rules(), settings.exemptions(),
-            settings.policy, settings.mode, now,
+            self._evaluate, self._registry.fresh(), self._registry.target_rules(), self._registry.owners(),
+            settings, now,
+        )
+
+    def _evaluate(self, snapshots: list, rules, owners: dict[str, str], settings: QuarantineSettings,
+                  now: float) -> list[Event]:
+        """Решения по парам, а следом — по адресам целиком: умер ли адрес почти на всех своих релеях."""
+        events = self.tracker.evaluate(snapshots, rules, settings.exemptions(), settings.policy, settings.mode, now)
+        return events + self.dead.observe(
+            list(self.tracker.pairs.values()), self.tracker.voters, owners, settings.mode,
+            settings.notify_dead_share_pct, revive_hold(settings.policy), now,
+            quiet=now - self._started_at < WARMUP_SEC,
         )
 
     async def _push(self, settings: QuarantineSettings, now: float) -> list[Event]:
@@ -495,13 +540,19 @@ class QuarantineRunner:
 
     async def _save(self) -> None:
         current = self._storable()
-        if current == self._saved:
-            return
-        try:
-            await self._storage.save_pairs(current)
-            self._saved = current
-        except Exception:
-            logger.exception("quarantine: state save failed")
+        if current != self._saved:
+            try:
+                await self._storage.save_pairs(current)
+                self._saved = current
+            except Exception:
+                logger.exception("quarantine: state save failed")
+        dead = self.dead.stored()
+        if dead != self._dead_saved:
+            try:
+                await self._storage.save_dead(dead)
+                self._dead_saved = dead
+            except Exception:
+                logger.exception("quarantine: dead-address state save failed")
 
     async def _notify(self, events: list[Event], settings: QuarantineSettings) -> None:
         if not events or self._notifier is None:
@@ -514,13 +565,14 @@ class QuarantineRunner:
 
 async def notify_events(events: list[Event], settings: QuarantineSettings) -> None:
     """Сводка в Telegram тем же ботом и чатом, что алерты, и строки истории алертов.
-    История пишется всегда; Telegram — пока включены алерты и уведомления автоотключения."""
+    История пишется всегда; Telegram — пока включены алерты и уведомления автоотключения,
+    и только те события, что положены выбранному режиму уведомлений."""
     owners = get_loss_registry().owners()
     async with async_session() as db:
         alerts = (await db.execute(select(AlertSettings).limit(1))).scalar_one_or_none()
     lang = ((alerts.language if alerts else None) or "en").lower()
 
-    notified = False
+    told: set[int] = set()
     telegram_ready = alerts is not None and alerts.enabled and alerts.telegram_bot_token and alerts.telegram_chat_id
     if settings.notify and telegram_ready:
         service = get_telegram_bot_service()
@@ -528,9 +580,10 @@ async def notify_events(events: list[Event], settings: QuarantineSettings) -> No
             await service.send_message(
                 alerts.telegram_bot_token, alerts.telegram_chat_id, text, retry_later=True
             )
-            for text in format_digest(events, owners, lang)
+            for text in format_digest(events, owners, lang, settings.notify_scope)
         ]
-        notified = all(sent)
+        if all(sent):
+            told = {id(event) for event in telegram_events(events, settings.notify_scope)}
 
     rows = [
         AlertHistory(
@@ -540,9 +593,9 @@ async def notify_events(events: list[Event], settings: QuarantineSettings) -> No
             severity=record.severity,
             message=record.message,
             details=json.dumps(record.details, ensure_ascii=False),
-            notified=notified,
+            notified=id(event) in told,
         )
-        for record in history_records(events, owners, lang)
+        for event, record in zip(events, history_records(events, owners, lang))
     ]
     async with async_session() as db:
         db.add_all(rows)

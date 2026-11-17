@@ -2368,6 +2368,8 @@ export interface LossExcludedTarget {
 
 export type QuarantineMode = 'off' | 'observe' | 'enforce'
 
+export type QuarantineNotifyScope = 'all' | 'dead'
+
 export interface QuarantineSettingsData {
   mode: QuarantineMode
   loss_threshold: number
@@ -2378,6 +2380,10 @@ export interface QuarantineSettingsData {
   max_share_pct: number
   drop_sessions: boolean
   notify: boolean
+  // О чём писать: о каждой паре «релей — адрес» или только об адресе, отключённом почти на всех релеях
+  notify_scope: QuarantineNotifyScope
+  // С какой доли релеев адрес считается умершим, %
+  notify_dead_share_pct: number
   // Релеи проверяют адреса назначения «как клиент» (TLS-рукопожатие)
   client_probe: boolean
   exempt_server_ids: number[]
@@ -2432,6 +2438,25 @@ export interface QuarantineOverview {
 }
 
 export type LossCheckStatus = 'ok' | 'unsupported' | 'denied' | 'unreachable'
+
+// Путь релея к адресу назначения: с какого своего IP он идёт и что там с потерями
+export interface LossWay {
+  // null — адрес по умолчанию, который нода не смогла назвать
+  local_ip: string | null
+  // Ходит ли этим адресом правило; false — адрес проверяется для сравнения
+  used: boolean
+  loss_pct: number
+  rtt_ms: number | null
+  samples: number
+  answers: boolean | null
+  // За сколько секунд набрано окно попыток
+  span_sec: number
+}
+
+export interface LossWaysResult {
+  status: LossCheckStatus
+  ways: LossWay[]
+}
 
 export interface LossCheckResult {
   server_id: number
@@ -2551,6 +2576,8 @@ export const lossApi = {
   quarantine: () => api.get<QuarantineOverview>('/loss/quarantine'),
   releaseQuarantine: (serverId: number, target: string) =>
     api.post<{ released: boolean }>('/loss/quarantine/release', { server_id: serverId, target }),
+  ways: (serverId: number, target: string) =>
+    api.get<LossWaysResult>('/loss/ways', { params: { server_id: serverId, target } }),
   check: (target: string, serverIds: number[]) =>
     api.post<{ ip: string; port: number; results: LossCheckResult[] }>('/loss/check', {
       target,

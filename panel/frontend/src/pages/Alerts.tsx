@@ -25,6 +25,7 @@ const PANEL_ALERT_TYPES = [
 
 const BACKEND_QUARANTINE_ALERT_TYPES = [
   'backend_disabled', 'backend_restored', 'backend_chronic', 'backend_quarantine_paused',
+  'backend_dead', 'backend_alive',
 ] as const
 
 // Подпись этих типов лежит в локали под ключом alerts.type_<тип>

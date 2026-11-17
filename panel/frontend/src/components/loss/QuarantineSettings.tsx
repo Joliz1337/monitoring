@@ -13,6 +13,29 @@ interface Props {
 const MODES: QuarantineMode[] = ['off', 'observe', 'enforce']
 const SECONDS_IN_MINUTE = 60
 
+type NotifyChoice = 'all' | 'dead' | 'off'
+
+const NOTIFY_CHOICES: NotifyChoice[] = ['all', 'dead', 'off']
+// «Выключены» режим не трогает: при включении вернётся прежний
+const NOTIFY_PATCH: Record<NotifyChoice, Partial<QuarantineSettingsData>> = {
+  all: { notify: true, notify_scope: 'all' },
+  dead: { notify: true, notify_scope: 'dead' },
+  off: { notify: false },
+}
+// Границы те же, что проверяет панель при сохранении
+const DEAD_SHARE = { min: 10, max: 100 }
+
+const notifyChoice = (settings: QuarantineSettingsData): NotifyChoice =>
+  settings.notify ? settings.notify_scope : 'off'
+
+const isDeadShareValid = (share: number): boolean =>
+  Number.isInteger(share) && share >= DEAD_SHARE.min && share <= DEAD_SHARE.max
+
+const choiceCls = (active: boolean): string =>
+  `px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+    active ? 'bg-accent-500/15 text-accent-300 border-accent-500/40' : 'text-dark-400 border-dark-700 hover:text-dark-200'
+  }`
+
 type ThresholdKey =
   | 'loss_threshold'
   | 'sustained_seconds'
@@ -47,7 +70,9 @@ function isWithinBounds(threshold: Threshold, stored: number): boolean {
 }
 
 export function isQuarantineValid(settings: QuarantineSettingsData): boolean {
-  return THRESHOLDS.every(threshold => isWithinBounds(threshold, settings[threshold.key]))
+  // Порог умерших виден и действует только в своём режиме: в остальных он сохранению не мешает
+  const shareValid = notifyChoice(settings) !== 'dead' || isDeadShareValid(settings.notify_dead_share_pct)
+  return shareValid && THRESHOLDS.every(threshold => isWithinBounds(threshold, settings[threshold.key]))
 }
 
 function fromInput(threshold: Threshold, typed: string): number {
@@ -58,6 +83,8 @@ function fromInput(threshold: Threshold, typed: string): number {
 
 export default function QuarantineSettings({ servers, value, onChange }: Props) {
   const { t } = useTranslation()
+  const chosen = notifyChoice(value)
+  const shareValid = isDeadShareValid(value.notify_dead_share_pct)
 
   return (
     <div className="space-y-5">
@@ -72,11 +99,7 @@ export default function QuarantineSettings({ servers, value, onChange }: Props) 
             key={mode}
             type="button"
             onClick={() => onChange({ ...value, mode })}
-            className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-              value.mode === mode
-                ? 'bg-accent-500/15 text-accent-300 border-accent-500/40'
-                : 'text-dark-400 border-dark-700 hover:text-dark-200'
-            }`}
+            className={choiceCls(value.mode === mode)}
           >
             {t(`loss.quarantine_mode_${mode}`)}
           </button>
@@ -126,12 +149,46 @@ export default function QuarantineSettings({ servers, value, onChange }: Props) 
         </div>
         <Toggle on={value.drop_sessions} onClick={() => onChange({ ...value, drop_sessions: !value.drop_sessions })} />
       </div>
-      <div className="flex items-center justify-between gap-4">
+      <div className="space-y-2">
         <div>
           <p className="text-sm text-dark-200">{t('loss.quarantine_notify')}</p>
           <p className="text-xs text-dark-500">{t('loss.quarantine_notify_hint')}</p>
         </div>
-        <Toggle on={value.notify} onClick={() => onChange({ ...value, notify: !value.notify })} />
+        <div className="flex gap-2 flex-wrap">
+          {NOTIFY_CHOICES.map(choice => (
+            <button
+              key={choice}
+              type="button"
+              aria-pressed={chosen === choice}
+              onClick={() => onChange({ ...value, ...NOTIFY_PATCH[choice] })}
+              className={choiceCls(chosen === choice)}
+            >
+              {t(`loss.quarantine_notify_${choice}`)}
+            </button>
+          ))}
+        </div>
+        {chosen === 'dead' && (
+          <div className="sm:max-w-sm">
+            <label className="block text-xs text-dark-400 mb-1">{t('loss.quarantine_notify_share')}</label>
+            <input
+              type="number"
+              aria-label={t('loss.quarantine_notify_share')}
+              min={DEAD_SHARE.min}
+              max={DEAD_SHARE.max}
+              value={Number.isNaN(value.notify_dead_share_pct) ? '' : value.notify_dead_share_pct}
+              onChange={e => onChange({
+                ...value, notify_dead_share_pct: e.target.value === '' ? NaN : Number(e.target.value),
+              })}
+              className={`input text-sm ${shareValid ? '' : 'border-danger/60'}`}
+            />
+            <p className="text-xs text-dark-500 mt-1">
+              {t('loss.quarantine_notify_share_hint')}{' '}
+              <span className={`whitespace-nowrap ${shareValid ? '' : 'text-danger'}`}>
+                {t('loss.quarantine_field_range', DEAD_SHARE)}
+              </span>
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="space-y-3">

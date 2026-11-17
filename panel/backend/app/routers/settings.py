@@ -21,6 +21,9 @@ CPU_AFFINITY_KEY = "cpu_affinity_enabled"
 RESERVED_PORTS_KEY = "reserved_ports_global"
 # Графики истории: режим по умолчанию (smooth — сглаженные, raw — как есть),
 # полоса пиков и переопределения по метрикам ("cpu:raw,network:smooth")
+# Ключи с таким началом — внутреннее состояние сервисов, а не настройки: таблица та же,
+# но интерфейсу они не отдаются (список настроек он читает при загрузке страниц) и из него не меняются
+STATE_KEY_PREFIX = "state."
 CHART_MODE_KEY = "chart_mode"
 CHART_MODES = {"smooth", "raw"}
 # Живые показатели на дашборде и в шапке сервера: instant — последняя секунда,
@@ -102,7 +105,10 @@ async def get_all_settings(
     # Секретные ключи (токен Cloudflare) живут в той же таблице, но наружу
     # отдаются только своими эндпоинтами и в маске
     result = await db.execute(
-        select(PanelSettings).where(PanelSettings.key.notin_(SECRET_SETTING_KEYS))
+        select(PanelSettings).where(
+            PanelSettings.key.notin_(SECRET_SETTING_KEYS),
+            PanelSettings.key.not_like(f"{STATE_KEY_PREFIX}%"),
+        )
     )
     db_settings = {s.key: s.value for s in result.scalars().all()}
     
@@ -119,6 +125,8 @@ async def update_setting(
 ):
     if key in SECRET_SETTING_KEYS:
         raise HTTPException(status_code=400, detail="This setting is changed through its own endpoint")
+    if key.startswith(STATE_KEY_PREFIX):
+        raise HTTPException(status_code=400, detail="Service state is not a setting")
 
     if key == "update_branch" and data.value not in update_channel.ALLOWED_BRANCHES:
         raise HTTPException(status_code=400, detail="Invalid update branch")

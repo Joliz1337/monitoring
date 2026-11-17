@@ -21,11 +21,17 @@ TCP-правил DNAT. Ничего из этого нет — цикл прос
 Правило HAProxy с `source` ходит к серверу не с основного адреса релея, а путь
 оттуда бывает другим: с основного адрес недоступен, с выходного отвечает. Обе
 проверки идут с выходных адресов правила, по одному за раунд по кругу.
+
+С какого адреса дорога есть, а с какого нет, видно только в сравнении: по каждому
+пути «адрес назначения — свой адрес» ведётся своё окно, а остальные адреса релея
+проверяются справочно, отдельными задачами. Справочные результаты ничего не
+решают — их читает только подсказка на странице «Потери».
 """
 
 import asyncio
 import ipaddress
 import logging
+import socket
 import time
 from collections import deque
 from dataclasses import dataclass, replace
@@ -75,6 +81,13 @@ CLIENT_PROBE_LEASE_SEC = 120.0
 # Раунд, в котором подключиться не удалось, вердикта не даёт: прежний живёт столько
 CLIENT_PROBE_VALID_SEC = 90.0
 MAX_CONCURRENT_CLIENT_PROBES = 32
+# Справочные проверки с адресов релея, которыми правило не ходит: окно короче
+# основного — адреса проверяются по очереди, и длинное окно копилось бы часами
+REFERENCE_WINDOW_ATTEMPTS = 30
+MAX_CONCURRENT_REFERENCE_ATTEMPTS = 32
+MAX_CONCURRENT_REFERENCE_CLIENT_PROBES = 16
+# Каждый лишний адрес в очереди — реже проверка каждого: больше стольких не берётся
+MAX_SPARE_WAYS = 8
 
 
 class Source(str, Enum):
@@ -85,6 +98,8 @@ class Source(str, Enum):
 # Адреса релея, с которых правила ходят к адресу назначения; None — адрес по умолчанию
 Exits = tuple[Optional[str], ...]
 DEFAULT_EXIT: Exits = (None,)
+# Путь: адрес назначения и свой адрес релея, с которого к нему идут
+Way = tuple[Target, Optional[str]]
 
 
 @dataclass(frozen=True)
@@ -98,6 +113,8 @@ class Discovery:
     # Выходные адреса правил HAProxy; у адреса только с основным записи нет.
     # None — HAProxy не прочитан, остаются прежние
     exits: Optional[dict[Target, Exits]] = None
+    # IPv4 физических интерфейсов релея; None — не прочитаны, остаются прежние
+    local_ips: Optional[tuple[str, ...]] = None
 
 
 # Адрес уходит в метрики, только если панели можно читать раздел, откуда он
@@ -281,11 +298,38 @@ def target_exits(rows: Iterable[tuple[RowKey, Target, Optional[int]]], rules: Pr
     return {target: tuple(known) for target, known in exits.items() if known != [None]}
 
 
+def default_source_ip(ip: str, port: int) -> Optional[str]:
+    """С какого своего адреса ядро пойдёт к `ip`: UDP-сокет после connect() знает
+    маршрут, а пакетов при этом не уходит."""
+    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as probe:
+            probe.connect((ip, port))
+            return probe.getsockname()[0]
+    except OSError:
+        return None
+
+
+def spare_ips(local_ips: Sequence[str], used: Iterable[str], target_ip: str) -> tuple[str, ...]:
+    """Адреса релея, которыми правило к адресу назначения не ходит. Свои адреса — IPv4:
+    к адресу назначения IPv6 с них не дойти."""
+    if ":" in target_ip:
+        return ()
+    taken = set(used)
+    return tuple(ip for ip in local_ips if ip not in taken)[:MAX_SPARE_WAYS]
+
+
 def any_exit_answers(verdicts: Iterable[Optional[bool]]) -> Optional[bool]:
     """Сервер отвечает, если отвечает хотя бы с одного выходного адреса; молчит —
     если молчит со всех, откуда удалось подключиться."""
     known = [verdict for verdict in verdicts if verdict is not None]
     return any(known) if known else None
+
+
+def _verdict_lifetime(queue: int) -> float:
+    """Адреса одной очереди проверяются «как клиент» по одному за раунд: вердикт
+    каждого живёт до его следующей очереди."""
+    return CLIENT_PROBE_VALID_SEC + CLIENT_PROBE_INTERVAL_SEC * (queue - 1)
 
 
 def haproxy_targets(stats: HAProxyStatsResponse) -> set[Target]:
@@ -378,6 +422,7 @@ class LossProbe:
         stalled_fn: Callable[[Target], Optional[bool]] = lambda _target: None,
         client_probe_fn: Callable[..., Awaitable[Optional[bool]]] = client_probe.probe,
         clock: Callable[[], float] = time.monotonic,
+        source_ip_fn: Callable[[str, int], Optional[str]] = default_source_ip,
     ):
         self._discover = discover
         self._attempt = attempt_fn
@@ -402,6 +447,24 @@ class LossProbe:
         self._client_task: Optional[asyncio.Task] = None
         self._client_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLIENT_PROBES)
         self._windows: dict[Target, AttemptWindow] = {}
+        self._source_ip = source_ip_fn
+        self._local_ips: tuple[str, ...] = ()
+        # Адрес назначения → свой адрес, с которого ядро идёт к нему, когда правило адреса не задаёт
+        self._default_ips: dict[Target, Optional[str]] = {}
+        # Адрес назначения → адреса релея, которыми правило к нему не ходит
+        self._spare: dict[Target, tuple[str, ...]] = {}
+        # Окна по путям. Выходные адреса правила пишутся из попыток основного замера,
+        # остальные — справочными попытками; в решения идёт только общее окно адреса
+        self._exit_windows: dict[Way, AttemptWindow] = {}
+        self._spare_windows: dict[Way, AttemptWindow] = {}
+        self._spare_answers: dict[Way, tuple[bool, float]] = {}
+        self._reference_rounds = 0
+        self._reference_client_rounds = 0
+        self._next_reference_client_round = 0.0
+        self._reference_task: Optional[asyncio.Task] = None
+        self._reference_client_task: Optional[asyncio.Task] = None
+        self._reference_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REFERENCE_ATTEMPTS)
+        self._reference_client_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REFERENCE_CLIENT_PROBES)
         self._sources: dict[Target, set[Source]] = {}
         self._unknown_since: dict[Source, float] = {}
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_ATTEMPTS)
@@ -411,7 +474,8 @@ class LossProbe:
     def refresh_targets(self, targets: dict[Target, set[Source]],
                         unknown: frozenset[Source] = frozenset(), now: float = 0.0,
                         proxy_headers: Optional[dict[Target, ProxyHeader]] = None,
-                        exits: Optional[dict[Target, Exits]] = None) -> None:
+                        exits: Optional[dict[Target, Exits]] = None,
+                        local_ips: Optional[Sequence[str]] = None) -> None:
         """История адреса переживает обновление списка; пропавший адрес забывается.
         Адреса непрочитанного источника остаются: одно неудачное чтение show stat
         стёрло бы окна всех бэкендов."""
@@ -430,8 +494,33 @@ class LossProbe:
             self._proxy_headers = proxy_headers
         if exits is not None:
             self._exits = exits
+        if local_ips is not None:
+            self._local_ips = tuple(local_ips)
         self._answers = self._of_current_ways(self._answers)
         self._tried = self._of_current_ways(self._tried)
+        self._exit_windows = self._of_current_ways(self._exit_windows)
+        self._refresh_spare()
+
+    def _refresh_spare(self) -> None:
+        """Какие адреса релея для каждого адреса назначения запасные; пути, которых
+        больше нет, забываются вместе с окнами."""
+        default_ips: dict[Target, Optional[str]] = {}
+        spare: dict[Target, tuple[str, ...]] = {}
+        for target in self._windows:
+            exits = self.exits_for(target)
+            default_ips[target] = self._source_ip(*target) if None in exits else None
+            used = [ip for ip in (*exits, default_ips[target]) if ip is not None]
+            spare[target] = spare_ips(self._local_ips, used, target[0])
+        self._default_ips, self._spare = default_ips, spare
+        current = {(target, local_ip) for target, local_ips in spare.items() for local_ip in local_ips}
+        self._spare_windows = {way: window for way, window in self._spare_windows.items() if way in current}
+        self._spare_answers = {way: seen for way, seen in self._spare_answers.items() if way in current}
+
+    def spare_for(self, target: Target) -> tuple[str, ...]:
+        return self._spare.get(target, ())
+
+    def sources_of(self, target: Target) -> set[Source]:
+        return set(self._sources.get(target, ()))
 
     def _of_current_ways(self, known: dict) -> dict:
         """Записи только по адресам назначения и выходным адресам, которые ещё проверяются."""
@@ -454,9 +543,12 @@ class LossProbe:
     async def tick(self, now: float) -> None:
         if now >= self._next_refresh:
             discovery = await asyncio.to_thread(self._discover)
-            self.refresh_targets(discovery.targets, discovery.unknown, now, discovery.proxy_headers, discovery.exits)
+            self.refresh_targets(discovery.targets, discovery.unknown, now, discovery.proxy_headers,
+                                 discovery.exits, discovery.local_ips)
             self._next_refresh = now + TARGETS_REFRESH_SEC
         self._start_client_round(now)
+        self._start_reference_client_round(now)
+        self._start_reference_round()
         await self.run_round()
 
     def request_client_probe(self, sources: set[Source]) -> None:
@@ -516,8 +608,7 @@ class LossProbe:
 
     def _client_verdict(self, target: Target) -> Optional[bool]:
         exits = self.exits_for(target)
-        # Выходные адреса проверяются по очереди: вердикт каждого живёт до его следующей очереди
-        valid_for = CLIENT_PROBE_VALID_SEC + CLIENT_PROBE_INTERVAL_SEC * (len(exits) - 1)
+        valid_for = _verdict_lifetime(len(exits))
         now = self._clock()
         fresh = [
             seen[0] for local_ip in exits
@@ -540,20 +631,111 @@ class LossProbe:
 
     async def run_round(self) -> None:
         turn, self._rounds = self._rounds, self._rounds + 1
-        targets = list(self._windows)
-        results = await asyncio.gather(
-            *(self._limited_attempt(target, self._exit_in_turn(target, turn)) for target in targets)
-        )
-        for target, rtt_ms in zip(targets, results):
-            window = self._windows.get(target)
+        ways = [(target, self._exit_in_turn(target, turn)) for target in self._windows]
+        results = await asyncio.gather(*(self._limited_attempt(target, local_ip) for target, local_ip in ways))
+        for way, rtt_ms in zip(ways, results):
+            window = self._windows.get(way[0])
             if window is not None:
                 window.record(rtt_ms)
+                # Та же попытка — в окно своего пути: разбивка по выходным адресам новых подключений не стоит
+                self._exit_windows.setdefault(way, AttemptWindow()).record(rtt_ms)
 
     async def _limited_attempt(self, target: Target, local_ip: Optional[str]) -> Optional[float]:
         async with self._semaphore:
             return await self._attempt(target[0], target[1], local_ip=local_ip)
 
+    def _spare_in_turn(self, turn: int, sources: Optional[set[Source]] = None) -> list[Way]:
+        """По одному запасному адресу на адрес назначения за раунд, по кругу."""
+        return [
+            (target, spare[turn % len(spare)]) for target, spare in self._spare.items()
+            if spare and (sources is None or self._sources.get(target, set()) & sources)
+        ]
+
+    def _start_reference_round(self) -> None:
+        """Справочные попытки идут отдельной задачей: адрес без маршрута держит попытку
+        до таймаута, и основному замеру ждать его незачем. Прошлый раунд не кончился —
+        новый не начинается, задачи не копятся."""
+        if not any(self._spare.values()):
+            return
+        if self._reference_task is None or self._reference_task.done():
+            self._reference_task = asyncio.create_task(self.run_reference_round())
+
+    async def run_reference_round(self) -> None:
+        turn, self._reference_rounds = self._reference_rounds, self._reference_rounds + 1
+        ways = self._spare_in_turn(turn)
+        results = await asyncio.gather(*(self._reference_attempt(way) for way in ways), return_exceptions=True)
+        for way, rtt_ms in zip(ways, results):
+            # Пока раунд шёл, адрес могли убрать с интерфейса или отдать правилу
+            if isinstance(rtt_ms, BaseException) or way[1] not in self.spare_for(way[0]):
+                continue
+            self._spare_windows.setdefault(way, AttemptWindow(REFERENCE_WINDOW_ATTEMPTS)).record(rtt_ms)
+
+    async def _reference_attempt(self, way: Way) -> Optional[float]:
+        async with self._reference_semaphore:
+            return await self._attempt(way[0][0], way[0][1], local_ip=way[1])
+
+    def _start_reference_client_round(self, now: float) -> None:
+        if now >= self._client_wanted_until:
+            self._spare_answers.clear()
+            return
+        running = self._reference_client_task is not None and not self._reference_client_task.done()
+        if running or now < self._next_reference_client_round:
+            return
+        self._next_reference_client_round = now + CLIENT_PROBE_INTERVAL_SEC
+        self._reference_client_task = asyncio.create_task(self.run_reference_client_round())
+
+    async def run_reference_client_round(self) -> None:
+        turn, self._reference_client_rounds = self._reference_client_rounds, self._reference_client_rounds + 1
+        ways = self._spare_in_turn(turn, self._client_sources)
+        verdicts = await asyncio.gather(*(self._reference_client_probe(way) for way in ways), return_exceptions=True)
+        finished = self._clock()
+        for way, answered in zip(ways, verdicts):
+            if isinstance(answered, bool) and way[1] in self.spare_for(way[0]):
+                self._spare_answers[way] = (answered, finished)
+
+    async def _reference_client_probe(self, way: Way) -> Optional[bool]:
+        target, local_ip = way
+        async with self._reference_client_semaphore:
+            return await self._client_probe(target[0], target[1], self._proxy_headers.get(target), local_ip=local_ip)
+
+    def ways(self, target: Target) -> list[dict]:
+        """Потери и ответ сервера по каждому своему адресу: выходные адреса правила, за
+        ними запасные. Путь без единой попытки не показывается; [] — адрес не проверяется."""
+        if target not in self._windows:
+            return []
+        exits, spare = self.exits_for(target), self.spare_for(target)
+        # Счётчики HAProxy видят, что клиентам сервер отвечает: значит, он просто не говорит
+        # с незнакомцем, и молчание на проверку ничего не значит — как в общем вердикте адреса
+        silence_counts = self._stalled(target) is not False
+        used = [
+            self._way_row(self._exit_windows.get((target, local_ip)), self._answers.get((target, local_ip)),
+                          local_ip or self._default_ips.get(target), True, len(exits), silence_counts)
+            for local_ip in exits
+        ]
+        unused = [
+            self._way_row(self._spare_windows.get((target, local_ip)), self._spare_answers.get((target, local_ip)),
+                          local_ip, False, len(spare), silence_counts)
+            for local_ip in spare
+        ]
+        return [row for row in used + unused if row is not None]
+
+    def _way_row(self, window: Optional[AttemptWindow], seen: Optional[tuple[bool, float]],
+                 local_ip: Optional[str], used: bool, queue: int, silence_counts: bool) -> Optional[dict]:
+        stats = window.stats() if window else None
+        if stats is None:
+            return None
+        fresh = seen is not None and self._clock() - seen[1] <= _verdict_lifetime(queue)
+        answers = seen[0] if fresh else None
+        return {
+            "local_ip": local_ip, "used": used,
+            "loss_pct": stats.loss_pct, "rtt_ms": stats.rtt_ms, "samples": stats.samples,
+            "answers": None if answers is False and not silence_counts else answers,
+            # Адреса очереди проверяются по одному за раунд: окно пути набрано за столько секунд
+            "span_sec": round(stats.samples * ATTEMPT_INTERVAL_SEC * queue),
+        }
+
     def stats_for(self, target: Optional[Target]) -> Optional[ProbeStats]:
+        """Итог основного окна адреса; справочные проверки сюда не входят."""
         window = self._windows.get(target) if target else None
         stats = window.stats() if window else None
         if stats is not None:
@@ -597,9 +779,7 @@ class LossProbe:
         self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
-        if not self._task:
-            return
-        for task in (self._task, self._client_task):
+        for task in (self._task, self._client_task, self._reference_task, self._reference_client_task):
             if task is None:
                 continue
             task.cancel()
@@ -607,7 +787,7 @@ class LossProbe:
                 await task
             except asyncio.CancelledError:
                 pass
-        self._task = self._client_task = None
+        self._task = self._client_task = self._reference_task = self._reference_client_task = None
 
     async def _loop(self) -> None:
         while True:
@@ -647,6 +827,19 @@ def discover_targets() -> Discovery:
     return Discovery(found, frozenset(unknown), proxy_headers, exits)
 
 
+def discover_all() -> Discovery:
+    """Адреса назначения и свои адреса релея: по вторым идут справочные проверки."""
+    from app.services.metrics_collector import get_collector
+
+    try:
+        local_ips = tuple(get_collector().accounted_ipv4_addresses())
+    except OSError as exc:
+        # Адреса назначения от этого не зависят: запасные остаются прежними
+        logger.warning("Loss probe: local addresses are unreadable: %s", exc)
+        local_ips = None
+    return replace(discover_targets(), local_ips=local_ips)
+
+
 _probe: Optional[LossProbe] = None
 
 
@@ -654,7 +847,7 @@ def get_loss_probe() -> LossProbe:
     global _probe
     if _probe is None:
         _probe = LossProbe(
-            discover=discover_targets,
+            discover=discover_all,
             downs_fn=get_down_counter().downs,
             stalled_fn=get_traffic_watch().stalled,
         )

@@ -5,7 +5,7 @@ import ipaddress
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,7 +31,9 @@ from app.services.backend_quarantine_settings import (
     DOWNS_THRESHOLD_BOUNDS,
     LOSS_THRESHOLD_BOUNDS,
     MAX_SHARE_PCT_BOUNDS,
+    NOTIFY_DEAD_SHARE_BOUNDS,
     SUSTAINED_SECONDS_BOUNDS,
+    NotifyScope,
     QuarantineSettings,
     load_quarantine_settings,
     save_quarantine_settings,
@@ -44,6 +46,7 @@ from app.services.loss_overview import (
     check_from_servers,
     parse_endpoint,
     parse_target,
+    ways_from_server,
 )
 from app.services.loss_registry import ExcludedTarget, get_loss_registry
 from app.services.loss_trace import TraceError, TraceErrorCode, analyze_trace, fetch_trace, start_trace
@@ -113,6 +116,10 @@ class ExcludedTargetIn(BaseModel):
         return ExcludedTarget(ip, port, self.total_only)
 
 
+# Поля блока «Автоотключение», которых старая вкладка не знает: без них в запросе действуют сохранённые
+KEPT_UNLESS_SENT = ("notify_scope", "notify_dead_share_pct")
+
+
 class QuarantineSettingsIn(BaseModel):
     """Блок «Автоотключение»: границы — те же, что при чтении из базы."""
     mode: Mode
@@ -124,6 +131,11 @@ class QuarantineSettingsIn(BaseModel):
     max_share_pct: int = Field(ge=MAX_SHARE_PCT_BOUNDS[0], le=MAX_SHARE_PCT_BOUNDS[1])
     drop_sessions: bool = True
     notify: bool = True
+    # Вкладка, открытая до обновления, этих двух полей не шлёт — тогда остаётся сохранённое
+    notify_scope: Optional[NotifyScope] = None
+    notify_dead_share_pct: Optional[int] = Field(
+        None, ge=NOTIFY_DEAD_SHARE_BOUNDS[0], le=NOTIFY_DEAD_SHARE_BOUNDS[1],
+    )
     # Вкладка, открытая до обновления, поля не шлёт — проверка тогда остаётся выключенной
     client_probe: bool = False
     exempt_server_ids: list[int] = Field(default_factory=list, max_length=5000)
@@ -198,7 +210,11 @@ async def update_loss_settings(data: LossSettingsUpdate, db: AsyncSession = Depe
     if data.quarantine is None:
         return _settings_response(exclusions, await load_quarantine_settings(db))
 
-    quarantine = settings_from_dict(data.quarantine.model_dump(mode="json"))
+    stored = (await load_quarantine_settings(db)).to_dict()
+    quarantine = settings_from_dict({
+        **{field: stored[field] for field in KEPT_UNLESS_SENT},
+        **data.quarantine.model_dump(mode="json", exclude_none=True),
+    })
     await save_quarantine_settings(db, quarantine)
     get_quarantine_runner().set_settings(quarantine)
     logger.info(
@@ -237,6 +253,17 @@ async def check_target(data: LossCheckRequest, db: AsyncSession = Depends(get_db
     # Сессию отпускаем до похода по нодам: медленная нода не держит коннект пула
     await db.commit()
     return {"ip": ip, "port": port, "results": await check_from_servers(servers, ip, port, get_quarantine_runner().client_probe_wanted())}
+
+
+@router.get("/ways")
+async def get_ways(server_id: int, target: str = Query(..., min_length=1, max_length=64),
+                   db: AsyncSession = Depends(get_db)):
+    """Потери до адреса с каждого IP релея — подсказка по наведению на пару «релей — адрес»."""
+    try:
+        ip, port = parse_target(target)
+    except TargetParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return await ways_from_server(await _active_server(server_id, db), ip, port)
 
 
 @router.post("/backends/preview")

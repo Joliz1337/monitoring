@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { AlertTriangle, ChevronDown, Repeat, Replace, RotateCcw, Shield } from 'lucide-react'
 import type { QuarantineBlockedReason, QuarantineItem } from '../../api/client'
 import RowMenu, { type MenuAction } from './RowMenu'
+import { RelayWaysCard } from './RelayWays'
 import { releaseItems } from './quarantineRelease'
 import {
   groupBySituation,
@@ -162,6 +163,12 @@ export default function QuarantineAddressRow({
     onReleased()
   }
 
+  // Разбивка по IP релея — только там, где строка есть ровно одна пара «релей — адрес:порт»
+  const [onlyItem] = group.items
+  const waysOf = byRelay && group.ports.length === 1 && group.items.length === 1
+    ? { serverId: onlyItem.server_id, serverName: onlyItem.server_name, target: onlyItem.target }
+    : null
+
   const actions: MenuAction[] = []
   if (toRelease.length > 0) {
     actions.push({ label: t('loss.quarantine_release'), hint: t('loss.quarantine_release_hint'), icon: RotateCcw, onSelect: release })
@@ -233,6 +240,13 @@ export default function QuarantineAddressRow({
             ))}
           </span>
         </button>
+        {waysOf && (
+          <RelayWaysCard {...waysOf}>
+            <span className="block mt-0.5 px-1.5 py-0.5 rounded border border-dark-700 text-2xs text-dark-400 hover:text-dark-200 cursor-help whitespace-nowrap">
+              {t('loss.ways_open')}
+            </span>
+          </RelayWaysCard>
+        )}
         <RowMenu label={t('loss.quarantine_actions')} actions={actions} busy={releasing} />
       </div>
       {open && expandable && (

@@ -29,6 +29,7 @@ from app.services.loss_registry import LossRegistry  # noqa: E402
 VALID = {
     "mode": "enforce", "loss_threshold": 60.0, "sustained_seconds": 240, "downs_threshold": 4,
     "calm_seconds": 900, "chronic_strikes": 5, "max_share_pct": 40, "drop_sessions": False, "notify": True,
+    "notify_scope": "dead", "notify_dead_share_pct": 80,
     "client_probe": True,
     "exempt_server_ids": [3], "exempt_targets": ["1.2.3.4", "5.6.7.8:8443"],
 }
@@ -53,6 +54,11 @@ class SettingsModelTests(unittest.TestCase):
         older = {key: value for key, value in VALID.items() if key != "client_probe"}
         self.assertIs(loss_router.QuarantineSettingsIn(**older).client_probe, False)
         self.assertIs(loss_router.QuarantineSettingsIn(**VALID).client_probe, True)
+
+    def test_share_out_of_bounds_is_rejected(self):
+        for value in (9, 101):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                loss_router.QuarantineSettingsIn(**{**VALID, "notify_dead_share_pct": value})
 
     def test_old_interface_body_has_no_block(self):
         update = loss_router.LossSettingsUpdate(excluded_server_ids=[1], excluded_targets=[])
@@ -97,6 +103,17 @@ class SettingsRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.to_dict(), VALID)
         self.runner.set_settings.assert_called_once_with(saved)
         self.assertEqual(response["quarantine"], VALID)
+
+    async def test_old_tab_without_new_fields_keeps_the_stored_scope(self):
+        # Вкладка, открытая до обновления панели, режима уведомлений не знает и своим сохранением его не сбрасывает
+        self.stored = parse_settings(json.dumps({"mode": "observe", "notify_scope": "dead", "notify_dead_share_pct": 80}))
+        loss_router.load_quarantine_settings.return_value = self.stored
+        older = {key: value for key, value in VALID.items() if key not in ("notify_scope", "notify_dead_share_pct")}
+
+        response = await loss_router.update_loss_settings(self.update(quarantine=older), self.db)
+
+        self.assertEqual((response["quarantine"]["notify_scope"], response["quarantine"]["notify_dead_share_pct"]),
+                         ("dead", 80))
 
     async def test_unreadable_exempt_address_is_a_400_and_saves_nothing(self):
         block = {**VALID, "exempt_targets": ["1.2.3.4", "not-an-address"]}
@@ -200,13 +217,48 @@ class FakeDb:
 EVENT = Event(EventKind.DISABLED, 1, "msk-1", "10.0.0.5:443", ReasonKind.LOSS, 25.0, 0, term_sec=600, sessions=3, strikes=1)
 
 
+DEAD = Event(EventKind.DEAD, 1, "msk-1", "10.0.0.5:443", failing=5, total=6, reasons=(ReasonKind.LOSS,), owner="nl-3")
+DEAD_ONLY = parse_settings(json.dumps({"notify_scope": "dead"}))
+
+
 class NotifierTests(unittest.IsolatedAsyncioTestCase):
-    async def notify(self, alert_settings, settings: QuarantineSettings = QuarantineSettings(), sent: bool = True):
+    def sent_text(self) -> str:
+        self.telegram.send_message.assert_awaited_once()
+        return self.telegram.send_message.await_args.args[2]
+
+    def rows(self) -> list[tuple[str, bool]]:
+        return [(row.alert_type, row.notified) for row in self.db.added]
+
+    async def test_dead_scope_sends_the_address_state_and_keeps_the_whole_history(self):
+        await self.notify(self.alerts(), DEAD_ONLY, events=(EVENT, DEAD))
+        text = self.sent_text()
+        self.assertIn("Адрес не работает", text)
+        self.assertNotIn("Отключены", text)
+        self.assertEqual(self.rows(), [("backend_disabled", False), ("backend_dead", True)])
+
+    async def test_all_events_scope_keeps_its_digest_and_does_not_claim_the_dead_row(self):
+        await self.notify(self.alerts(), events=(EVENT, DEAD))
+        text = self.sent_text()
+        self.assertIn("Отключены", text)
+        self.assertNotIn("Адрес не работает", text)
+        self.assertEqual(self.rows(), [("backend_disabled", True), ("backend_dead", False)])
+
+    async def test_dead_scope_without_address_events_sends_nothing(self):
+        await self.notify(self.alerts(), DEAD_ONLY)
+        self.telegram.send_message.assert_not_awaited()
+        self.assertEqual(self.rows(), [("backend_disabled", False)])
+
+    async def test_failed_delivery_of_the_dead_digest_is_recorded(self):
+        await self.notify(self.alerts(), DEAD_ONLY, sent=False, events=(DEAD,))
+        self.assertEqual(self.rows(), [("backend_dead", False)])
+
+    async def notify(self, alert_settings, settings: QuarantineSettings = QuarantineSettings(), sent: bool = True,
+                     events: tuple[Event, ...] = (EVENT,)):
         self.db = FakeDb(alert_settings)
         self.telegram = mock.Mock(send_message=mock.AsyncMock(return_value=sent))
         registry = LossRegistry()
         with mock.patch.object(runner_module, "async_session", lambda: self.db),              mock.patch.object(runner_module, "get_telegram_bot_service", return_value=self.telegram),              mock.patch.object(runner_module, "get_loss_registry", return_value=registry):
-            await runner_module.notify_events([EVENT], settings)
+            await runner_module.notify_events(list(events), settings)
 
     @staticmethod
     def alerts(**fields):

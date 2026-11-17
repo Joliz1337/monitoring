@@ -15,7 +15,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services.backend_quarantine import Exemptions, Mode, QuarantinePolicy  # noqa: E402
-from app.services.backend_quarantine_settings import QuarantineSettings, parse_settings  # noqa: E402
+from app.services.backend_quarantine_settings import NotifyScope, QuarantineSettings, parse_settings  # noqa: E402
 
 DEFAULTS = {
     "mode": "off",
@@ -27,6 +27,8 @@ DEFAULTS = {
     "max_share_pct": 50,
     "drop_sessions": True,
     "notify": True,
+    "notify_scope": "all",
+    "notify_dead_share_pct": 70,
     "client_probe": False,
     "exempt_server_ids": [],
     "exempt_targets": [],
@@ -120,6 +122,26 @@ class DamagedRecordTests(unittest.TestCase):
 
     def test_unknown_fields_are_ignored(self):
         self.assertEqual(parse_settings(stored(future_option=1)), QuarantineSettings())
+
+
+class NotifyScopeTests(unittest.TestCase):
+    def test_record_without_scope_reads_as_all_events(self):
+        settings = parse_settings('{"mode": "enforce"}')
+        self.assertIs(settings.notify_scope, NotifyScope.ALL)
+        self.assertEqual(settings.notify_dead_share_pct, 70)
+
+    def test_unknown_scope_reads_as_all_events(self):
+        self.assertIs(parse_settings(stored(notify_scope="loud")).notify_scope, NotifyScope.ALL)
+
+    def test_dead_share_is_kept_within_bounds(self):
+        for raw, kept in ((5, 10), (150, 100), ("80", 70), (True, 70), (85, 85)):
+            with self.subTest(raw=raw):
+                self.assertEqual(parse_settings(stored(notify_dead_share_pct=raw)).notify_dead_share_pct, kept)
+
+    def test_scope_and_share_survive_a_round_trip(self):
+        settings = parse_settings(stored(notify_scope="dead", notify_dead_share_pct=85))
+        again = parse_settings(json.dumps(settings.to_dict()))
+        self.assertEqual((again.notify_scope, again.notify_dead_share_pct), (NotifyScope.DEAD, 85))
 
 
 class ExemptTargetTests(unittest.TestCase):

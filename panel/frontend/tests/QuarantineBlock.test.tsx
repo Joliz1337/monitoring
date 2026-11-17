@@ -521,6 +521,22 @@ describe('Потери: отключённые адреса по релеям', 
     expect(card('Вк мост 3').textContent).toContain('2 адреса · отключено 2')
   })
 
+  it('разбивка по IP релея — только в карточке релея и только у строки с одним портом', () => {
+    show(overview([
+      ...on('176.97.210.169:8449', [BRIDGE_3], { owner: 'тубо' }),
+      ...on('193.141.60.121:8449', [BRIDGE_3]),
+      ...on('193.141.60.121:8443', [BRIDGE_3]),
+    ]))
+    // По серверам строка — адрес сразу на многих релеях: пары «релей — адрес» в ней нет
+    expect(screen.queryByText('по IP релея')).toBeNull()
+
+    byRelays()
+    expect(within(card('Вк мост 3')).getAllByText('по IP релея')).toHaveLength(3)
+
+    mergePorts()
+    expect(within(card('Вк мост 3')).getAllByText('по IP релея')).toHaveLength(1)
+  })
+
   it('в строке адреса — чья это нода, а не список релеев', () => {
     show(overview(on('176.97.210.169:8449', [BRIDGE_3, BRIDGE_5], { owner: 'тубо', sessions: 7 })))
     byRelays()

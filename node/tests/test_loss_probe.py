@@ -16,6 +16,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from fastapi import HTTPException  # noqa: E402
+
 from app.capabilities import parse_capabilities  # noqa: E402
 from app.models.dnat import (  # noqa: E402
     DnatRule,
@@ -31,12 +33,15 @@ from app.models.haproxy import (  # noqa: E402
 from app.models.loss_probe import CHECK_ATTEMPTS_MAX, LossCheckRequest, ProbeStats  # noqa: E402
 from app.services.haproxy_down_counter import DownCounter  # noqa: E402
 from app.services.haproxy_traffic_watch import TrafficWatch  # noqa: E402
+from app.routers import loss_probe as loss_probe_router  # noqa: E402
+from app.services import loss_probe as loss_probe_module  # noqa: E402
 from app.services.client_probe import ProxyHeader  # noqa: E402
 from app.services.loss_probe import (  # noqa: E402
     CLIENT_PROBE_INTERVAL_SEC,
     CLIENT_PROBE_LEASE_SEC,
     CLIENT_PROBE_VALID_SEC,
     APPLY_SETTLE_SEC,
+    MAX_SPARE_WAYS,
     MAX_TARGETS,
     TARGETS_REFRESH_SEC,
     UNKNOWN_GRACE_SEC,
@@ -46,6 +51,7 @@ from app.services.loss_probe import (  # noqa: E402
     Source,
     attempt,
     check_target,
+    discover_all,
     discover_targets,
     dnat_targets,
     haproxy_proxy_headers,
@@ -1015,6 +1021,323 @@ class ClientProbeRoundTests(unittest.IsolatedAsyncioTestCase):
         probe = self.make({self.BACKEND: True}, proxies={self.BACKEND: ProxyHeader.V2})
         self.assertIs(await probe.probe_as_client(self.BACKEND), True)
         self.assertEqual(self.client.calls, [(self.BACKEND, ProxyHeader.V2)])
+
+
+class RoutedAttempts:
+    """Подменяет сеть: ответ зависит от адреса релея, с которого ушла попытка.
+    Адреса без записи отвечают, с записью None — теряют."""
+
+    def __init__(self, rtt_by_local_ip: dict | None = None):
+        self.rtt = rtt_by_local_ip or {}
+        self.routes: list[tuple[tuple[str, int], object]] = []
+
+    async def __call__(self, ip: str, port: int, local_ip=None):
+        self.routes.append(((ip, port), local_ip))
+        return self.rtt.get(local_ip, 10.0)
+
+
+class WaysTests(unittest.IsolatedAsyncioTestCase):
+    """Потери и ответ сервера с каждого IP релея: видно, с какого адреса дорога есть, а с какого нет.
+    Справочные проверки с неиспользуемых адресов ничего не решают — только показывают."""
+
+    TARGET = ("10.0.0.5", 443)
+    USED = "192.0.2.10"
+    LOCAL = (USED, "192.0.2.11", "192.0.2.12", "192.0.2.13")
+    SPARE = LOCAL[1:]
+
+    def make(self, exits=(USED,), local_ips=LOCAL, rtt=None, verdicts=None, target=TARGET,
+             source_ip: str | None = USED, attempts=None, stalled: bool | None = None) -> LossProbe:
+        self.clock = FakeClock()
+        self.attempts = attempts or RoutedAttempts(rtt)
+        self.client = FakeClientProbe(verdicts or {})
+        self.targets = {target: {Source.HAPROXY}}
+        self.exits = {target: tuple(exits)} if exits else {}
+        self.local_ips = tuple(local_ips)
+        probe = LossProbe(
+            discover=lambda: Discovery(self.targets, exits=self.exits, local_ips=self.local_ips),
+            attempt_fn=self.attempts, client_probe_fn=self.client, clock=self.clock,
+            source_ip_fn=lambda ip, port: source_ip, stalled_fn=lambda _target: stalled,
+        )
+        probe.refresh_targets(self.targets, exits=self.exits, local_ips=self.local_ips)
+        return probe
+
+    @staticmethod
+    def by_ip(rows: list[dict]) -> dict:
+        return {row["local_ip"]: row for row in rows}
+
+    async def rounds(self, probe: LossProbe, main: int = 0, reference: int = 0) -> None:
+        for _ in range(main):
+            await probe.run_round()
+        for _ in range(reference):
+            await probe.run_reference_round()
+
+    async def test_main_attempts_are_recorded_per_exit(self):
+        probe = self.make(exits=("192.0.2.10", "192.0.2.11"))
+        await self.rounds(probe, main=4)
+        rows = probe.ways(self.TARGET)
+        self.assertEqual([(row["local_ip"], row["used"], row["samples"]) for row in rows],
+                         [("192.0.2.10", True, 2), ("192.0.2.11", True, 2)])
+        self.assertEqual(probe.stats_for(self.TARGET).samples, 4)
+        # Попыток ровно столько же, сколько без разбивки: окна путей пишутся из тех же
+        self.assertEqual(len(self.attempts.routes), 4)
+
+    async def test_reference_round_probes_unused_addresses_in_turn(self):
+        probe = self.make()
+        await self.rounds(probe, reference=4)
+        self.assertEqual([local_ip for _, local_ip in self.attempts.routes], [*self.SPARE, self.SPARE[0]])
+
+    async def test_reference_results_do_not_touch_the_main_figure(self):
+        probe = self.make(rtt={ip: None for ip in self.SPARE})
+        await self.rounds(probe, main=3)
+        before = probe.snapshot(set(Source))
+        await self.rounds(probe, reference=6)
+        self.assertEqual(probe.snapshot(set(Source)), before)
+        self.assertEqual(probe.stats_for(self.TARGET).loss_pct, 0.0)
+        rows = self.by_ip(probe.ways(self.TARGET))
+        self.assertEqual([rows[ip]["loss_pct"] for ip in self.SPARE], [100.0] * 3)
+        self.assertEqual((rows[self.USED]["loss_pct"], rows[self.USED]["used"]), (0.0, True))
+        self.assertEqual({rows[ip]["used"] for ip in self.SPARE}, {False})
+
+    async def test_default_exit_shows_the_real_source_address(self):
+        probe = self.make(exits=None, source_ip="192.0.2.11")
+        await self.rounds(probe, main=1)
+        [used] = probe.ways(self.TARGET)
+        self.assertEqual((used["local_ip"], used["used"]), ("192.0.2.11", True))
+        self.assertEqual(probe.spare_for(self.TARGET), ("192.0.2.10", "192.0.2.12", "192.0.2.13"))
+        # Сама попытка идёт как раньше — без привязки к адресу
+        self.assertEqual(self.attempts.routes, [(self.TARGET, None)])
+
+    async def test_unknown_source_address_leaves_every_address_spare(self):
+        probe = self.make(exits=None, source_ip=None)
+        await self.rounds(probe, main=1)
+        [used] = probe.ways(self.TARGET)
+        self.assertIsNone(used["local_ip"])
+        self.assertEqual(probe.spare_for(self.TARGET), self.LOCAL)
+
+    async def test_ipv6_target_has_no_spare_addresses(self):
+        target = ("2001:db8::5", 443)
+        probe = self.make(exits=None, target=target, source_ip="2001:db8::1")
+        self.assertEqual(probe.spare_for(target), ())
+        await self.rounds(probe, reference=2)
+        self.assertEqual(self.attempts.routes, [])
+
+    async def test_spare_addresses_are_capped(self):
+        probe = self.make(local_ips=[f"192.0.2.{index}" for index in range(10, 22)])
+        self.assertEqual(len(probe.spare_for(self.TARGET)), MAX_SPARE_WAYS)
+
+    async def test_relay_with_a_single_address_has_only_the_used_way(self):
+        probe = self.make(local_ips=(self.USED,))
+        await self.rounds(probe, main=2, reference=2)
+        self.assertEqual([row["local_ip"] for row in probe.ways(self.TARGET)], [self.USED])
+        self.assertEqual(len(self.attempts.routes), 2)
+
+    async def test_ways_forget_removed_addresses_and_targets(self):
+        probe = self.make()
+        await self.rounds(probe, main=1, reference=3)
+        self.assertEqual(set(self.by_ip(probe.ways(self.TARGET))), set(self.LOCAL))
+
+        probe.refresh_targets(self.targets, exits=self.exits, local_ips=self.LOCAL[:2])
+        self.assertEqual(set(self.by_ip(probe.ways(self.TARGET))), set(self.LOCAL[:2]))
+
+        probe.refresh_targets({}, exits={}, local_ips=self.LOCAL)
+        self.assertEqual(probe.ways(self.TARGET), [])
+
+    async def test_address_that_became_an_exit_starts_a_fresh_window(self):
+        probe = self.make()
+        await self.rounds(probe, reference=3)
+        probe.refresh_targets(self.targets, exits={self.TARGET: (self.USED, self.SPARE[0])}, local_ips=self.LOCAL)
+        self.assertNotIn(self.SPARE[0], self.by_ip(probe.ways(self.TARGET)))
+
+    async def test_unread_local_addresses_keep_the_previous_list(self):
+        probe = self.make()
+        probe.refresh_targets(self.targets, exits=self.exits)
+        self.assertEqual(probe.spare_for(self.TARGET), self.SPARE)
+
+    async def test_slow_reference_round_does_not_delay_the_main_round(self):
+        # Адрес без маршрута держит попытку до таймаута: основной замер его не ждёт
+        release = asyncio.Event()
+
+        async def attempt_fn(ip, port, local_ip=None):
+            if local_ip != self.USED:
+                await release.wait()
+            return 10.0
+
+        probe = self.make(attempts=attempt_fn)
+        await asyncio.wait_for(probe.tick(self.clock.now), 1)
+        first = probe._reference_task
+        self.assertFalse(first.done())
+        self.assertEqual(probe.stats_for(self.TARGET).samples, 1)
+
+        await asyncio.wait_for(probe.tick(self.clock.now), 1)
+        self.assertIs(probe._reference_task, first)
+        self.assertEqual(probe.stats_for(self.TARGET).samples, 2)
+
+        release.set()
+        await first
+        self.assertIn(self.SPARE[0], self.by_ip(probe.ways(self.TARGET)))
+
+    async def test_stop_cancels_reference_tasks(self):
+        async def attempt_fn(ip, port, local_ip=None):
+            if local_ip != self.USED:
+                await asyncio.Event().wait()
+            return 10.0
+
+        probe = self.make(attempts=attempt_fn)
+        await probe.tick(self.clock.now)
+        first = probe._reference_task
+        await probe.stop()
+        self.assertTrue(first.cancelled())
+        self.assertIsNone(probe._reference_task)
+
+    async def client_round(self, probe: LossProbe, ask: bool = True, sources: frozenset = frozenset(Source)) -> None:
+        if ask:
+            probe.request_client_probe(set(sources))
+        await probe.tick(self.clock.now)
+        for task in (probe._client_task, probe._reference_client_task, probe._reference_task):
+            if task is not None:
+                await task
+
+    async def test_reference_client_probe_is_kept_apart(self):
+        verdicts = {(*self.TARGET, self.USED): True, **{(*self.TARGET, ip): False for ip in self.SPARE}}
+        probe = self.make(verdicts=verdicts)
+        await self.client_round(probe)
+        self.assertIs(probe.stats_for(self.TARGET).answers, True)
+        rows = self.by_ip(probe.ways(self.TARGET))
+        self.assertIs(rows[self.USED]["answers"], True)
+        self.assertIs(rows[self.SPARE[0]]["answers"], False)
+
+    async def test_silence_to_a_stranger_is_not_shown_when_clients_are_answered(self):
+        # Счётчики HAProxy видят ответы клиентам: сервер просто не говорит с незнакомцем. Общий вердикт
+        # адреса это молчание гасит — и в разбивке оно не должно выглядеть поводом менять выход
+        probe = self.make(verdicts={(*self.TARGET, ip): False for ip in self.LOCAL}, stalled=False)
+        await self.rounds(probe, reference=1)
+        await self.client_round(probe)
+        self.assertIsNone(probe.stats_for(self.TARGET).answers)
+        rows = probe.ways(self.TARGET)
+        self.assertEqual({row["used"] for row in rows}, {True, False})
+        self.assertEqual({row["answers"] for row in rows}, {None})
+
+    async def test_reference_client_probe_runs_only_while_asked_and_readable(self):
+        probe = self.make()
+        await self.client_round(probe, ask=False)
+        self.assertEqual(self.client.routes, [])
+
+        # Раздел HAProxy панели закрыт: адрес она не увидит, и рукопожатия ему ни к чему
+        await self.client_round(probe, sources=frozenset({Source.DNAT}))
+        self.assertEqual(self.client.routes, [])
+
+        self.clock.now += CLIENT_PROBE_INTERVAL_SEC
+        await self.client_round(probe)
+        # По одной проверке: с выходного адреса правила и с очередного запасного
+        routes = [local_ip for _, local_ip in self.client.routes]
+        self.assertEqual(len(routes), 2)
+        self.assertIn(self.USED, routes)
+        self.assertLess(set(routes) - {self.USED}, set(self.SPARE))
+
+    async def test_reference_verdicts_expire_with_the_request(self):
+        probe = self.make(verdicts={(*self.TARGET, ip): False for ip in self.SPARE})
+        await self.rounds(probe, reference=1)
+        await self.client_round(probe)
+        self.assertIs(self.by_ip(probe.ways(self.TARGET))[self.SPARE[0]]["answers"], False)
+
+        self.clock.now += CLIENT_PROBE_LEASE_SEC + 1
+        await self.client_round(probe, ask=False)
+        self.assertIsNone(self.by_ip(probe.ways(self.TARGET))[self.SPARE[0]]["answers"])
+
+    async def test_span_reflects_the_queue_length(self):
+        probe = self.make()
+        await self.rounds(probe, main=4, reference=6)
+        rows = self.by_ip(probe.ways(self.TARGET))
+        self.assertEqual((rows[self.USED]["samples"], rows[self.USED]["span_sec"]), (4, 8))
+        self.assertEqual((rows[self.SPARE[0]]["samples"], rows[self.SPARE[0]]["span_sec"]), (2, 12))
+
+    async def test_ways_over_real_sockets(self):
+        try:
+            with socket.socket() as bound:
+                bound.bind(("127.0.0.2", 0))
+        except OSError as exc:
+            self.skipTest(f"127.0.0.2 is not a local address here: {exc}")
+        server = await asyncio.start_server(lambda reader, writer: writer.close(), "127.0.0.1", 0)
+        target = ("127.0.0.1", server.sockets[0].getsockname()[1])
+        targets, exits = {target: {Source.HAPROXY}}, {target: ("127.0.0.2",)}
+        probe = LossProbe(discover=lambda: Discovery(targets))
+        probe.refresh_targets(targets, exits=exits, local_ips=("127.0.0.2", "127.0.0.3"))
+        try:
+            await self.rounds(probe, main=3, reference=3)
+        finally:
+            server.close()
+            await server.wait_closed()
+        rows = self.by_ip(probe.ways(target))
+        self.assertEqual((rows["127.0.0.2"]["used"], rows["127.0.0.2"]["loss_pct"], rows["127.0.0.2"]["samples"]),
+                         (True, 0.0, 3))
+        self.assertEqual((rows["127.0.0.3"]["used"], rows["127.0.0.3"]["loss_pct"], rows["127.0.0.3"]["samples"]),
+                         (False, 0.0, 3))
+
+
+class WaysRouteTests(unittest.IsolatedAsyncioTestCase):
+    """Запрос разбивки по адресам релея: то же, что видно в метриках, и не больше."""
+
+    TARGET = ("10.0.0.5", 443)
+    PATH = "/api/loss-probe/ways"
+
+    async def probe(self) -> LossProbe:
+        targets = {self.TARGET: {Source.HAPROXY}}
+        probe = LossProbe(discover=lambda: Discovery(targets), attempt_fn=RoutedAttempts(),
+                          source_ip_fn=lambda ip, port: "192.0.2.10")
+        probe.refresh_targets(targets, local_ips=("192.0.2.10", "192.0.2.11"))
+        await probe.run_round()
+        await probe.run_reference_round()
+        return probe
+
+    async def call(self, capabilities: str = "", ip: str = "10.0.0.5", port: int = 443):
+        with mock.patch.object(loss_probe_router, "get_loss_probe", return_value=await self.probe()), \
+                mock.patch.object(loss_probe_router, "get_policy", return_value=parse_capabilities(capabilities)):
+            return await loss_probe_router.ways(ip=ip, port=port)
+
+    async def test_ways_route_returns_the_breakdown(self):
+        response = await self.call()
+        self.assertEqual((response.ip, response.port), self.TARGET)
+        self.assertEqual([(way.local_ip, way.used, way.loss_pct, way.samples, way.span_sec) for way in response.ways],
+                         [("192.0.2.10", True, 0.0, 1, 2), ("192.0.2.11", False, 0.0, 1, 2)])
+
+    async def test_ways_of_unknown_target_are_empty(self):
+        self.assertEqual((await self.call(ip="10.9.9.9")).ways, [])
+
+    async def test_ways_hide_targets_of_unreadable_sections(self):
+        # Панели закрыт раздел HAProxy: в метриках этого адреса нет — нет его и здесь
+        self.assertEqual((await self.call(capabilities="system")).ways, [])
+        self.assertEqual(len((await self.call(capabilities="system haproxy:ro")).ways), 2)
+
+    async def test_ways_reject_a_bad_address(self):
+        for bad in ("0.0.0.0", "224.0.0.1", "example.com"):
+            with self.subTest(ip=bad), self.assertRaises(HTTPException) as caught:
+                await self.call(ip=bad)
+            self.assertEqual(caught.exception.status_code, 422)
+
+    def test_ways_follow_the_system_domain(self):
+        self.assertIsNone(parse_capabilities("").check("GET", self.PATH))
+        self.assertIsNone(parse_capabilities("system:ro haproxy").check("GET", self.PATH))
+        self.assertIsNotNone(parse_capabilities("haproxy").check("GET", self.PATH))
+
+
+class LocalAddressDiscoveryTests(unittest.TestCase):
+    def discover(self, addresses) -> Discovery:
+        collector = mock.Mock(accounted_ipv4_addresses=mock.Mock(side_effect=addresses))
+        with mock.patch.object(loss_probe_module, "discover_targets", return_value=Discovery({})), \
+                mock.patch("app.services.metrics_collector.get_collector", return_value=collector):
+            return discover_all()
+
+    def test_discovery_adds_the_addresses_of_the_relay(self):
+        self.assertEqual(self.discover([["10.0.0.1", "10.0.0.2"]]).local_ips, ("10.0.0.1", "10.0.0.2"))
+
+    def test_unreadable_addresses_keep_the_previous_ones(self):
+        # None — «не прочитаны»: адреса назначения всё равно обновляются, запасные остаются прежними
+        self.assertIsNone(self.discover(OSError("no /proc")).local_ips)
+
+    def test_the_running_probe_discovers_local_addresses(self):
+        self.addCleanup(setattr, loss_probe_module, "_probe", loss_probe_module._probe)
+        loss_probe_module._probe = None
+        self.assertIs(loss_probe_module.get_loss_probe()._discover, discover_all)
 
 
 if __name__ == "__main__":

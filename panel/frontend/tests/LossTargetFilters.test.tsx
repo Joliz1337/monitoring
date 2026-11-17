@@ -96,6 +96,15 @@ describe('Потери: фильтры таблицы адресов', () => {
     expect(chip(NODE, 'Тубо 2').getAttribute('aria-pressed')).toBe('false')
   })
 
+  it('в раскрытом адресе у релея есть разбивка по его IP', async () => {
+    await open()
+    expect(screen.queryByText('по IP релея')).toBeNull()
+
+    fireEvent.click(screen.getByText('10.0.0.1:443'))
+
+    expect(screen.getAllByText('по IP релея').length).toBeGreaterThan(0)
+  })
+
   it('фильтры разных групп сужают список, кнопки одной группы — расширяют', async () => {
     await open()
 

@@ -26,6 +26,7 @@ from app.services.backend_quarantine import (  # noqa: E402
     ReasonKind,
     RestoreCause,
 )
+from app.services.loss_alerts import MIN_SAMPLES  # noqa: E402
 from app.services.loss_registry import (  # noqa: E402
     ExcludedTarget,
     LossReading,
@@ -1090,6 +1091,35 @@ class RegistryDownsTests(unittest.TestCase):
             entry(stalled=True), entry(stalled=False), entry(stalled=None), entry(), entry(stalled="yes"),
         ]}
         self.assertEqual([r.stalled for r in parse_readings(metrics)], [True, False, None, None, None])
+
+
+class VoterTests(TrackerTestCase):
+    """Кто вправе голосовать за «адрес умер»: только релей, который сам мог бы его отключить."""
+
+    def test_voters_are_relays_that_considered_the_target(self):
+        self.step(
+            snap(reading(), relay_id=1),
+            snap(reading(), relay_id=2),
+            # Цель DNAT: в HAProxy релея адреса нет, отключить его нечем
+            snap(reading(downs=None), relay_id=3),
+            snap(reading(samples=MIN_SAMPLES - 1), relay_id=4),
+            exempt=Exemptions(server_ids=frozenset({2})),
+        )
+        self.assertEqual(self.tracker.voters, {TARGET: {1}})
+
+    def test_paused_relay_does_not_vote(self):
+        ips = [f"10.0.1.{index}" for index in range(4)]
+        self.step(
+            snap(*(reading(loss=80.0, ip=ip) for ip in ips), relay_id=1),
+            snap(*(reading(ip=ip) for ip in ips), relay_id=2),
+        )
+        self.assertIn(1, self.tracker.paused_relays())
+        self.assertEqual({relay for relays in self.tracker.voters.values() for relay in relays}, {2})
+
+    def test_voters_follow_the_latest_cycle(self):
+        self.step(snap(reading()))
+        self.step(snap(reading(ip="10.0.0.6")))
+        self.assertEqual(self.tracker.voters, {"10.0.0.6:443": {RELAY}})
 
 
 if __name__ == "__main__":

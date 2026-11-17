@@ -34,6 +34,23 @@ class LossProbeEntry(ProbeStats):
     stalled: Optional[bool] = None
 
 
+class WayStats(ProbeStats):
+    """Один путь к адресу назначения: с какого своего адреса релей к нему идёт и что там с потерями."""
+    # None — адрес по умолчанию, который ядро не назвало
+    local_ip: Optional[str] = None
+    # Ходит ли этим адресом правило; False — адрес проверяется справочно
+    used: bool
+    # За сколько секунд набрано окно пути: адреса одной очереди проверяются по одному за раунд
+    span_sec: int
+
+
+class WaysResponse(BaseModel):
+    """Разбивка замера по адресам релея — подсказка страницы «Потери»."""
+    ip: str
+    port: int
+    ways: list[WayStats]
+
+
 class TargetRequest(BaseModel):
     """Адрес:порт, к которому нода подключается по запросу панели."""
     ip: str

@@ -35,6 +35,7 @@ from app.services.backend_quarantine import (  # noqa: E402
 )
 from app.services.backend_quarantine_runner import (  # noqa: E402
     NOTIFY_DELAY_SEC,
+    WARMUP_SEC,
     QuarantineRunner,
     pairs_delete,
     pairs_select,
@@ -43,6 +44,8 @@ from app.services.backend_quarantine_settings import QuarantineSettings, parse_s
 from app.services.loss_registry import LossRegistry  # noqa: E402
 
 RELAY_ID = 10
+# События об адресе целиком идут тем же потоком, что события пар, но проверяются отдельно
+ADDRESS_STATE = (EventKind.DEAD, EventKind.ALIVE)
 TARGET = "10.0.0.5:443"
 PATH = "/api/haproxy/runtime/quarantine"
 
@@ -74,6 +77,8 @@ class FakeStorage:
         self.server_loads = 0
         self.saves = 0
         self.stored_settings = QuarantineSettings()
+        self.dead_rows: dict[str, dict] = {}
+        self.dead_saves = 0
 
     async def load_servers(self, server_ids: set[int]) -> dict[int, Server]:
         self.server_loads += 1
@@ -89,6 +94,13 @@ class FakeStorage:
     async def load_settings(self) -> QuarantineSettings:
         return self.stored_settings
 
+    async def load_dead(self) -> dict[str, dict]:
+        return {target: dict(row) for target, row in self.dead_rows.items()}
+
+    async def save_dead(self, rows: dict[str, dict]) -> None:
+        self.dead_saves += 1
+        self.dead_rows = {target: dict(row) for target, row in rows.items()}
+
 
 class RunnerTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -97,6 +109,7 @@ class RunnerTestCase(unittest.IsolatedAsyncioTestCase):
         self.storage = FakeStorage(relay())
         self.requests: list[httpx.Request] = []
         self.notified: list[Event] = []
+        self.address_events: list[Event] = []
         self.status = 200
         self.skip_reason: str | None = None
         self.network_down: set[str] = set()
@@ -122,7 +135,8 @@ class RunnerTestCase(unittest.IsolatedAsyncioTestCase):
 
     def make_runner(self) -> QuarantineRunner:
         async def notifier(events: list[Event], current: QuarantineSettings) -> None:
-            self.notified += events
+            self.notified += [event for event in events if event.kind not in ADDRESS_STATE]
+            self.address_events += [event for event in events if event.kind in ADDRESS_STATE]
 
         # Без задержки сводки: что и когда решил исполнитель, видно сразу после цикла
         return QuarantineRunner(
@@ -389,7 +403,9 @@ class DigestTests(RunnerTestCase):
 
     def make_runner(self) -> QuarantineRunner:
         async def notifier(events: list[Event], current: QuarantineSettings) -> None:
-            self.digests.append(list(events))
+            # Сводка из одних событий об адресе целиком здесь не считается: эти тесты — про события пар
+            if pair_events := [event for event in events if event.kind not in ADDRESS_STATE]:
+                self.digests.append(pair_events)
 
         return QuarantineRunner(
             storage=self.storage, client_factory=lambda server: self.client, clock=self.clock,
@@ -457,7 +473,9 @@ class DigestTests(RunnerTestCase):
         async def notifier(events: list[Event], current: QuarantineSettings) -> None:
             if telegram_hangs:
                 await asyncio.Event().wait()
-            self.digests.append(list(events))
+            # Сводка из одних событий об адресе целиком здесь не считается: эти тесты — про события пар
+            if pair_events := [event for event in events if event.kind not in ADDRESS_STATE]:
+                self.digests.append(pair_events)
 
         self.runner = self.runner_with(notifier)
         self.observe(("10.0.0.5", 0.0, 3), *self.CALM)
@@ -484,7 +502,9 @@ class DigestTests(RunnerTestCase):
     async def test_decided_events_survive_a_failed_push(self):
         # Адрес вернулся, а база в этот момент не ответила: сообщение о возврате не теряется
         async def notifier(events: list[Event], current: QuarantineSettings) -> None:
-            self.digests.append(list(events))
+            # Сводка из одних событий об адресе целиком здесь не считается: эти тесты — про события пар
+            if pair_events := [event for event in events if event.kind not in ADDRESS_STATE]:
+                self.digests.append(pair_events)
 
         async def database_is_away(server_ids: set[int]) -> dict:
             raise OSError("database is away")
@@ -722,6 +742,198 @@ class ViewTests(RunnerTestCase):
         self.observe(("10.0.0.5", 0.0, 3), server_id=11)
         await self.cycle()
         self.assertEqual(self.runner.disabled_relays(), {TARGET: [RELAY_ID, 11]})
+
+
+class DeadAddressTests(RunnerTestCase):
+    """Адрес, отключённый почти на всех своих релеях: одно событие, когда умер, одно — когда ожил."""
+
+    async def die(self) -> None:
+        self.observe(("10.0.0.5", 0.0, 3))
+        await self.cycle()
+        await self.cycle(advance=WARMUP_SEC)
+
+    def kinds(self) -> list[EventKind]:
+        return [event.kind for event in self.address_events]
+
+    async def test_nothing_is_announced_during_warmup_then_the_address_dies(self):
+        self.observe(("10.0.0.5", 0.0, 3))
+        await self.cycle()
+        self.assertEqual(self.address_events, [])
+        await self.cycle(advance=WARMUP_SEC)
+        [event] = self.address_events
+        self.assertEqual((event.kind, event.target, event.failing, event.total), (EventKind.DEAD, TARGET, 1, 1))
+
+    async def test_restart_does_not_reannounce_dead_address(self):
+        await self.die()
+        self.assertIn(TARGET, self.storage.dead_rows)
+        self.storage.stored_settings = settings()
+        self.runner = self.make_runner()
+        await self.runner.restore()
+        self.address_events.clear()
+        await self.cycle(advance=30)
+        await self.cycle(advance=WARMUP_SEC)
+        self.assertEqual(self.address_events, [])
+        self.assertIn(TARGET, self.runner.dead.dead)
+
+    async def test_observe_mode_restart_does_not_flap(self):
+        # После перезапуска в наблюдении пары собираются заново дольше получаса: адрес за это время не «оживает»
+        watching = settings("observe", sustained_seconds=1800)
+        self.runner.set_settings(watching)
+        self.observe(("10.0.0.5", 80.0, 0))
+        for _ in range(35):
+            await self.cycle(advance=60)
+        self.assertEqual(self.kinds(), [EventKind.DEAD])
+        self.storage.stored_settings = watching
+        self.runner = self.make_runner()
+        await self.runner.restore()
+        self.address_events.clear()
+        for _ in range(45):
+            await self.cycle(advance=60)
+        self.assertEqual(self.address_events, [])
+        self.assertIn(TARGET, self.runner.dead.dead)
+
+    async def test_restart_with_silent_relays_does_not_reannounce(self):
+        # Панель обновили, а релеи адреса ещё пять минут не отвечают: запись об умершем не стирается
+        watching = settings("observe", sustained_seconds=1800)
+        self.runner.set_settings(watching)
+        self.observe(("10.0.0.5", 80.0, 0))
+        for _ in range(35):
+            await self.cycle(advance=60)
+        self.assertEqual(self.kinds(), [EventKind.DEAD])
+        self.storage.stored_settings = watching
+        self.registry = LossRegistry(clock=self.clock)
+        self.runner = self.make_runner()
+        await self.runner.restore()
+        self.address_events.clear()
+        for _ in range(5):
+            await self.cycle(advance=60)
+        self.observe(("10.0.0.5", 80.0, 0))
+        for _ in range(60):
+            await self.cycle(advance=60)
+        self.assertEqual(self.address_events, [])
+
+    async def test_restart_keeps_the_healthy_relays_of_a_partly_disabled_address(self):
+        # Отключён на одном релее из трёх. После перезапуска отвечает только он: это не «1 из 1»
+        for relay_id in (11, 12):
+            self.storage.servers[relay_id] = relay(relay_id)
+            self.observe(("10.0.0.5", 0.0, 0), server_id=relay_id)
+        self.observe(("10.0.0.5", 0.0, 3))
+        await self.cycle()
+        await self.cycle(advance=WARMUP_SEC)
+        self.assertEqual(self.address_events, [])
+        self.storage.stored_settings = settings()
+        self.registry = LossRegistry(clock=self.clock)
+        self.runner = self.make_runner()
+        await self.runner.restore()
+        self.observe(("10.0.0.5", 0.0, 3))
+        await self.cycle(advance=30)
+        await self.cycle(advance=WARMUP_SEC)
+        await self.cycle(advance=60)
+        self.assertEqual(self.address_events, [])
+
+    async def test_recovered_address_is_announced_once(self):
+        await self.die()
+        self.observe(("10.0.0.5", 0.0, 0))
+        for _ in range(60):
+            await self.cycle(advance=60)
+        self.assertEqual(self.kinds(), [EventKind.DEAD, EventKind.ALIVE])
+        self.assertEqual(self.storage.dead_rows, {})
+
+    async def test_switching_off_forgets_dead_silently(self):
+        await self.die()
+        self.address_events.clear()
+        self.runner.set_settings(settings("off"))
+        await self.cycle(advance=10)
+        self.assertEqual((self.runner.dead.dead, self.address_events, self.storage.dead_rows), ({}, [], {}))
+
+    async def test_dead_state_is_saved_only_when_it_changes(self):
+        # Запись в базу — при смене набора умерших, а не каждый цикл
+        await self.die()
+        saves = self.storage.dead_saves
+        self.assertGreaterEqual(saves, 1)
+        for _ in range(3):
+            await self.cycle(advance=10)
+        self.assertEqual(self.storage.dead_saves, saves)
+
+    async def test_share_threshold_comes_from_settings(self):
+        # Адрес стоит на двух релеях, отключён на одном: 50 % — мало при пороге 70 и достаточно при 50
+        self.storage.servers[11] = relay(11)
+        self.observe(("10.0.0.5", 0.0, 3))
+        self.observe(("10.0.0.5", 0.0, 0), server_id=11)
+        await self.cycle()
+        await self.cycle(advance=WARMUP_SEC)
+        self.assertEqual(self.address_events, [])
+        self.runner.set_settings(settings(notify_dead_share_pct=50))
+        await self.cycle(advance=10)
+        [event] = self.address_events
+        self.assertEqual((event.failing, event.total), (1, 2))
+
+
+class DigestClockTests(RunnerTestCase):
+    """Срок сводки отсчитывают только события, которые уйдут в Telegram в выбранном режиме:
+    остальным ждать нечего, и чужую сводку они не торопят."""
+
+    DEAD = Event(EventKind.DEAD, RELAY_ID, f"relay{RELAY_ID}", TARGET, failing=1, total=1)
+    PAIR = Event(EventKind.DISABLED, RELAY_ID, f"relay{RELAY_ID}", "10.0.0.6:443", ReasonKind.LOSS, 80.0)
+
+    async def asyncSetUp(self):
+        self.batches: list[list[EventKind]] = []
+        await super().asyncSetUp()
+
+    def make_runner(self) -> QuarantineRunner:
+        async def notifier(events: list[Event], current: QuarantineSettings) -> None:
+            self.batches.append([event.kind for event in events])
+
+        return QuarantineRunner(
+            storage=self.storage, client_factory=lambda server: self.client, clock=self.clock,
+            registry=self.registry, notifier=notifier,
+        )
+
+    async def push(self, *events: Event, advance: float = 0.0) -> None:
+        self.clock.now += advance
+        self.runner._queue(list(events), self.clock.now)
+        await self.runner._flush(self.runner._settings)
+
+    async def test_address_event_does_not_start_the_clock_of_the_pair_digest(self):
+        await self.push(self.DEAD)
+        self.assertEqual(self.batches, [[EventKind.DEAD]])
+        await self.push(self.PAIR, advance=80)
+        await self.push(advance=NOTIFY_DELAY_SEC - 1)
+        self.assertEqual(len(self.batches), 1)
+        await self.push(advance=1)
+        self.assertEqual(self.batches[1], [EventKind.DISABLED])
+
+    async def test_address_event_joins_a_waiting_pair_digest(self):
+        await self.push(self.PAIR)
+        await self.push(self.DEAD, advance=30)
+        self.assertEqual(self.batches, [])
+        await self.push(advance=NOTIFY_DELAY_SEC - 30)
+        self.assertEqual(self.batches, [[EventKind.DISABLED, EventKind.DEAD]])
+
+    async def test_waiting_history_event_does_not_backdate_the_digest(self):
+        # Ручной возврат встаёт в очередь без отправки (release()); в режиме умерших в Telegram он не идёт
+        self.runner.set_settings(settings(notify_scope="dead"))
+        self.runner._queue([self.PAIR], self.clock.now)
+        await self.push(self.DEAD, advance=60)
+        await self.push(advance=NOTIFY_DELAY_SEC - 1)
+        self.assertEqual(self.batches, [])
+        await self.push(advance=1)
+        self.assertEqual(self.batches, [[EventKind.DISABLED, EventKind.DEAD]])
+
+    async def test_history_only_event_is_written_at_once_even_right_after_a_digest(self):
+        await self.push(self.PAIR)
+        await self.push(advance=NOTIFY_DELAY_SEC)
+        await self.push(self.DEAD, advance=5)
+        self.assertEqual(self.batches, [[EventKind.DISABLED], [EventKind.DEAD]])
+
+    async def test_dead_only_mode_waits_for_address_events_not_for_pairs(self):
+        self.runner.set_settings(settings(notify_scope="dead"))
+        await self.push(self.PAIR)
+        self.assertEqual(self.batches, [[EventKind.DISABLED]])
+        await self.push(self.DEAD, advance=10)
+        self.assertEqual(len(self.batches), 1)
+        await self.push(advance=NOTIFY_DELAY_SEC)
+        self.assertEqual(self.batches[1], [EventKind.DEAD])
 
 
 class StatementTests(unittest.TestCase):

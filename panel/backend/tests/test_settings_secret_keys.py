@@ -18,8 +18,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app import crypto  # noqa: E402
 from app.models import PanelSettings  # noqa: E402
 from app.routers import settings as settings_router  # noqa: E402
+from app.services import backend_quarantine_runner as runner_module  # noqa: E402
 
 CF_TOKEN_KEY = "wildcard_cloudflare_api_token"
+STATE_KEY = "state.loss_quarantine_dead"
 
 
 class SettingsDb:
@@ -89,6 +91,38 @@ class SettingsSecretKeysTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response, {"success": True, "key": "refresh_interval", "value": "15"})
         self.assertEqual(self.db.stored("refresh_interval"), "15")
+
+
+class SettingsStateKeysTests(unittest.IsolatedAsyncioTestCase):
+    """Внутреннее состояние сервисов лежит в той же таблице, но настройкой не является: список
+    настроек интерфейс запрашивает при загрузке страниц, а состояние на большом парке велико."""
+
+    def setUp(self):
+        self.db = SettingsDb({STATE_KEY: '{"10.0.0.5:443": {"holders": [1, 2]}}', "refresh_interval": "7"})
+
+    def tearDown(self):
+        self.db.session.close()
+
+    async def test_list_does_not_carry_service_state(self):
+        response = await settings_router.get_all_settings(self.db, {})
+
+        self.assertNotIn(STATE_KEY, response["settings"])
+        self.assertEqual(response["settings"]["refresh_interval"], "7")
+
+    async def test_service_state_cannot_be_written_through_the_generic_endpoint(self):
+        with self.assertRaises(HTTPException) as ctx:
+            await settings_router.update_setting(STATE_KEY, settings_router.SettingUpdate(value="{}"), self.db, {})
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("holders", self.db.stored(STATE_KEY))
+
+    async def test_services_still_read_and_write_their_state(self):
+        await settings_router.set_setting(STATE_KEY, "{}", self.db)
+
+        self.assertEqual(await settings_router.get_setting(STATE_KEY, self.db), "{}")
+
+    def test_dead_address_state_lives_under_a_state_key(self):
+        self.assertTrue(runner_module.DEAD_STATE_KEY.startswith(settings_router.STATE_KEY_PREFIX))
 
 
 if __name__ == "__main__":

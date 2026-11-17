@@ -4,6 +4,10 @@
 отключены, возвращены, постоянные проблемы, приостановка на релее. В режиме
 наблюдения разделы свои («отключил бы» / «вернул бы»), чтобы их нельзя было
 принять за настоящие отключения. Модуль чистый: строит строки и ничего не шлёт.
+
+В режиме «только умершие адреса» сводка другая: вместо строк по парам «релей —
+адрес» — адреса, отключённые почти на всех своих релеях, и их возврат; нода, у
+которой так умерли все адреса, — одной строкой. История алертов получает всё.
 """
 
 import html
@@ -11,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from app.services.backend_quarantine import Event, EventKind, ReasonKind, RestoreCause
+from app.services.backend_quarantine_settings import NotifyScope
 
 # Лимит Telegram — 4096 символов; запас под заголовок части и разметку
 MESSAGE_LIMIT = 3800
@@ -23,7 +28,17 @@ ALERT_TYPES = {
     EventKind.RESTORED: ("backend_restored", "info"),
     EventKind.CHRONIC: ("backend_chronic", "warning"),
     EventKind.RELAY_PAUSED: ("backend_quarantine_paused", "warning"),
+    EventKind.DEAD: ("backend_dead", "critical"),
+    EventKind.ALIVE: ("backend_alive", "info"),
 }
+
+# Что из событий уходит в Telegram в каждом режиме уведомлений
+TELEGRAM_KINDS = {
+    NotifyScope.ALL: (EventKind.DISABLED, EventKind.RESTORED, EventKind.CHRONIC, EventKind.RELAY_PAUSED),
+    NotifyScope.DEAD: (EventKind.DEAD, EventKind.ALIVE, EventKind.RELAY_PAUSED),
+}
+# События об адресе целиком, а не о паре «релей — адрес»
+ADDRESS_STATE = (EventKind.DEAD, EventKind.ALIVE)
 
 
 @dataclass(frozen=True)
@@ -39,6 +54,15 @@ class HistoryRecord:
 def _times_ru(count: int) -> str:
     tens, ones = count % 100, count % 10
     return "раза" if ones in (2, 3, 4) and tens not in (12, 13, 14) else "раз"
+
+
+def _addresses_ru(count: int) -> str:
+    tens, ones = count % 100, count % 10
+    if tens in (11, 12, 13, 14):
+        return "адресов"
+    if ones == 1:
+        return "адрес"
+    return "адреса" if ones in (2, 3, 4) else "адресов"
 
 
 TEXTS = {
@@ -76,6 +100,23 @@ TEXTS = {
         ),
         "paused_line": "теряет больше половины своих адресов — похоже, проблема самого релея",
         "observe_mark": "наблюдение",
+        "dead": "Адрес не работает",
+        "would_die": "Не работал бы (режим наблюдения)",
+        "alive": "Адрес снова работает",
+        "would_revive": "Снова работал бы (режим наблюдения)",
+        "spread": lambda failing, total: f"на {failing} из {total} релеев",
+        "dead_line": lambda spread: f"не работает {spread}",
+        "alive_line": "снова работает",
+        "alive_partly": lambda spread: f"снова работает, отключён {spread}",
+        "reason_names": {
+            ReasonKind.LOSS: "потери",
+            ReasonKind.DOWNS: "падения",
+            ReasonKind.STALLED: "не отвечает клиентам",
+            ReasonKind.NO_REPLY: "не отвечает на проверку",
+        },
+        "node": "нода",
+        "node_dead": lambda count: f"не работают все {count} {_addresses_ru(count)}",
+        "node_alive": lambda count: f"снова работают все {count} {_addresses_ru(count)}",
     },
     "en": {
         "title": "Backend auto-disable",
@@ -111,6 +152,23 @@ TEXTS = {
         ),
         "paused_line": "is losing more than half of its addresses — looks like the relay's own problem",
         "observe_mark": "observe",
+        "dead": "Address is down",
+        "would_die": "Would be down (observe mode)",
+        "alive": "Address works again",
+        "would_revive": "Would work again (observe mode)",
+        "spread": lambda failing, total: f"on {failing} of {total} relays",
+        "dead_line": lambda spread: f"is down {spread}",
+        "alive_line": "works again",
+        "alive_partly": lambda spread: f"works again, still disabled {spread}",
+        "reason_names": {
+            ReasonKind.LOSS: "loss",
+            ReasonKind.DOWNS: "going down",
+            ReasonKind.STALLED: "does not answer clients",
+            ReasonKind.NO_REPLY: "does not answer the check",
+        },
+        "node": "node",
+        "node_dead": lambda count: f"all {count} addresses are down",
+        "node_alive": lambda count: f"all {count} addresses work again",
     },
 }
 
@@ -166,12 +224,21 @@ def _facts(event: Event, texts: dict) -> list[str]:
         return [_cause(event, texts)] if event.cause else []
     if event.kind is EventKind.CHRONIC:
         return [texts["chronic_line"](event.strikes, ", ".join(event.relays))]
+    if event.kind is EventKind.DEAD:
+        reasons = ", ".join(texts["reason_names"][kind] for kind in event.reasons)
+        spread = texts["dead_line"](texts["spread"](event.failing, event.total))
+        return [f"{spread}: {reasons}" if reasons else spread]
+    if event.kind is EventKind.ALIVE:
+        # Ниже порога — не значит «везде в работе»: оставшиеся отключения названы
+        if event.failing > 0:
+            return [texts["alive_partly"](texts["spread"](event.failing, event.total))]
+        return [texts["alive_line"]]
     return [texts["paused_line"]]
 
 
 def _owner(event: Event, owners: dict[str, str]) -> Optional[str]:
     ip, _, _ = event.target.rpartition(":")
-    return owners.get(ip)
+    return event.owner or owners.get(ip)
 
 
 def _line(event: Event, owners: dict[str, str], texts: dict, escape: Callable[[str], str],
@@ -184,7 +251,7 @@ def _line(event: Event, owners: dict[str, str], texts: dict, escape: Callable[[s
     owner = _owner(event, owners)
     if owner:
         address += f" · {escape(owner)}"
-    if event.kind is EventKind.CHRONIC:
+    if event.kind is EventKind.CHRONIC or event.kind in ADDRESS_STATE:
         return f"{address} — {facts}"
     return f"{address} — {relay}: {facts}" if facts else f"{address} — {relay}"
 
@@ -194,22 +261,63 @@ def _section(event: Event) -> str:
         return "would_disable" if event.observe else "disabled"
     if event.kind is EventKind.RESTORED:
         return "would_restore" if event.observe else "restored"
+    if event.kind is EventKind.DEAD:
+        return "would_die" if event.observe else "dead"
+    if event.kind is EventKind.ALIVE:
+        return "would_revive" if event.observe else "alive"
     return "chronic" if event.kind is EventKind.CHRONIC else "paused"
 
 
-SECTION_ORDER = ("disabled", "would_disable", "restored", "would_restore", "chronic", "paused")
+SECTION_ORDER = (
+    "disabled", "would_disable", "restored", "would_restore", "chronic",
+    "dead", "would_die", "alive", "would_revive", "paused",
+)
 
 
-def format_digest(events: list[Event], owners: dict[str, str], lang: str) -> list[str]:
+def telegram_events(events: list[Event], scope: NotifyScope) -> list[Event]:
+    return [event for event in events if event.kind in TELEGRAM_KINDS[scope]]
+
+
+def _digest_lines(events: list[Event], owners: dict[str, str], texts: dict) -> list[tuple[str, str]]:
+    """Строки сводки с их разделами. Нода, у которой не работают (или снова работают)
+    все адреса, — одна строка вместо строки на каждый адрес."""
+    def code(text: str) -> str:
+        return f"<code>{text}</code>"
+
+    def bold(text: str) -> str:
+        return f"<b>{text}</b>"
+
+    whole_nodes: dict[tuple[str, Optional[str]], int] = {}
+    for event in events:
+        if event.node_total:
+            key = (_section(event), _owner(event, owners))
+            whole_nodes[key] = max(whole_nodes.get(key, 0), event.node_total)
+
+    lines: list[tuple[str, str]] = []
+    told: set[tuple[str, Optional[str]]] = set()
+    for event in events:
+        section = _section(event)
+        key = (section, _owner(event, owners))
+        if event.kind not in ADDRESS_STATE or key not in whole_nodes:
+            lines.append((section, _line(event, owners, texts, html.escape, code, bold)))
+        elif key not in told:
+            told.add(key)
+            state = texts["node_dead" if event.kind is EventKind.DEAD else "node_alive"](whole_nodes[key])
+            lines.append((section, f"{texts['node']} {bold(html.escape(key[1] or ''))} — {html.escape(state)}"))
+    return lines
+
+
+def format_digest(events: list[Event], owners: dict[str, str], lang: str,
+                  scope: NotifyScope = NotifyScope.ALL) -> list[str]:
     """Сообщения Telegram (HTML); длинная сводка делится между строками, заголовок
     раздела повторяется в каждой части."""
+    events = telegram_events(events, scope)
     if not events:
         return []
     texts = _texts(lang)
     sections: dict[str, list[str]] = {}
-    for event in events:
-        line = _line(event, owners, texts, html.escape, lambda s: f"<code>{s}</code>", lambda s: f"<b>{s}</b>")
-        sections.setdefault(_section(event), []).append(f"• {line}")
+    for section, line in _digest_lines(events, owners, texts):
+        sections.setdefault(section, []).append(f"• {line}")
 
     parts: list[list[str]] = [[]]
     size = 0
@@ -236,6 +344,18 @@ def format_digest(events: list[Event], owners: dict[str, str], lang: str) -> lis
     return messages
 
 
+def _state_details(event: Event, owners: dict[str, str]) -> dict:
+    return {
+        "target": event.target,
+        "owner": _owner(event, owners),
+        "failing": event.failing,
+        "total": event.total,
+        "reasons": [kind.value for kind in event.reasons],
+        "observe": event.observe,
+        "node_total": event.node_total,
+    }
+
+
 def history_records(events: list[Event], owners: dict[str, str], lang: str) -> list[HistoryRecord]:
     texts = _texts(lang)
     records = []
@@ -250,7 +370,7 @@ def history_records(events: list[Event], owners: dict[str, str], lang: str) -> l
             alert_type=alert_type,
             severity=severity,
             message=message,
-            details={
+            details=_state_details(event, owners) if event.kind in ADDRESS_STATE else {
                 "target": event.target,
                 "owner": _owner(event, owners),
                 "reason": event.reason_kind.value if event.reason_kind else None,

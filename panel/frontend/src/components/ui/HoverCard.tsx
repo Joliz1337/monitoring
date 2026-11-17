@@ -17,6 +17,9 @@ interface HoverCardProps {
   openDelay?: number
   closeDelay?: number
   offset?: number
+  // «beside» — сбоку от триггера: под ним и над ним ничего не закрыто. Нужно в списках,
+  // где такой же триггер есть в соседних строках
+  side?: 'below' | 'beside'
   className?: string
   triggerClassName?: string
 }
@@ -43,6 +46,7 @@ export function HoverCard({
   openDelay = 250,
   closeDelay = 150,
   offset = 8,
+  side = 'below',
   className = '',
   triggerClassName = '',
 }: HoverCardProps) {
@@ -76,6 +80,17 @@ export function HoverCard({
       const rect = trigger.getBoundingClientRect()
       const width = card.offsetWidth
       const height = card.offsetHeight
+      if (side === 'beside') {
+        // Справа от триггера, а если не влезает — слева
+        const right = rect.right + offset
+        const fitsRight = right + width <= window.innerWidth - VIEWPORT_PAD
+        const top = Math.min(rect.top, window.innerHeight - height - VIEWPORT_PAD)
+        setCoords({
+          top: Math.max(VIEWPORT_PAD, top),
+          left: Math.max(VIEWPORT_PAD, fitsRight ? right : rect.left - offset - width),
+        })
+        return
+      }
       const below = rect.bottom + offset
       const above = rect.top - offset - height
       const fitsBelow = below + height <= window.innerHeight - VIEWPORT_PAD
@@ -95,7 +110,7 @@ export function HoverCard({
       window.removeEventListener('scroll', compute, true)
       window.removeEventListener('resize', compute)
     }
-  }, [open, offset])
+  }, [open, offset, side])
 
   useEffect(() => {
     if (!open) return

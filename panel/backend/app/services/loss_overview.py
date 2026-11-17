@@ -22,6 +22,10 @@ from app.services.node_capabilities import learn_from_denial, server_allows_path
 logger = logging.getLogger(__name__)
 
 CHECK_PATH = "/api/loss-probe/check"
+WAYS_PATH = "/api/loss-probe/ways"
+# Подсказка открывается по наведению: дольше ждать ноду незачем
+WAYS_TIMEOUT_SEC = 5.0
+WAY_FIELDS = ("local_ip", "used", "loss_pct", "rtt_ms", "samples", "answers", "span_sec")
 CHECK_CONCURRENCY = 20
 # Серия на ноде — пара секунд; запас на медленный канал до ноды
 CHECK_TIMEOUT_SEC = 15.0
@@ -156,6 +160,39 @@ async def _check_one(server: Server, ip: str, port: int, client_probe: bool) -> 
         "answers": answers,
         "rtt_ms": body.get("rtt_ms"),
         "samples": body.get("samples"),
+    }
+
+
+def _no_ways(status: CheckStatus) -> dict:
+    return {"status": status, "ways": []}
+
+
+async def ways_from_server(server: Server, ip: str, port: int) -> dict:
+    """Потери и ответ сервера с каждого своего адреса релея — как их видит сама нода.
+    Читаются уже набранные окна: нода по этому запросу никуда не подключается."""
+    allowed, _, _ = server_allows_path(server, WAYS_PATH, "GET")
+    if not allowed:
+        return _no_ways(CheckStatus.DENIED)
+    try:
+        response = await get_node_client(server).get(
+            f"{server.url}{WAYS_PATH}", headers=node_auth_headers(server),
+            params={"ip": ip, "port": port}, timeout=WAYS_TIMEOUT_SEC,
+        )
+    except httpx.HTTPError as exc:
+        logger.info("loss_ways_unreachable server_id=%s error=%s", server.id, exc)
+        return _no_ways(CheckStatus.UNREACHABLE)
+    if response.status_code == 404:
+        return _no_ways(CheckStatus.UNSUPPORTED)
+    if response.status_code == 403:
+        await learn_from_denial(server.id, response.status_code, _json_or_none(response))
+        return _no_ways(CheckStatus.DENIED)
+    body = _json_or_none(response)
+    ways = body.get("ways") if response.status_code == 200 and isinstance(body, dict) else None
+    if not isinstance(ways, list):
+        return _no_ways(CheckStatus.UNREACHABLE)
+    return {
+        "status": CheckStatus.OK,
+        "ways": [{field: way.get(field) for field in WAY_FIELDS} for way in ways if isinstance(way, dict)],
     }
 
 

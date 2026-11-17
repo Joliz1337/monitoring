@@ -8,6 +8,7 @@
 
 import json
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,9 +25,19 @@ DOWNS_THRESHOLD_BOUNDS = (2, 20)
 CALM_SECONDS_BOUNDS = (120, 3600)
 CHRONIC_STRIKES_BOUNDS = (2, 20)
 MAX_SHARE_PCT_BOUNDS = (10, 90)
+NOTIFY_DEAD_SHARE_BOUNDS = (10, 100)
+NOTIFY_DEAD_SHARE_DEFAULT = 70
 
 # ip без порта — все порты адреса
 ExemptTarget = tuple[str, Optional[int]]
+
+
+class NotifyScope(str, Enum):
+    """О чём писать в Telegram."""
+    # Каждое отключение и возврат пары «релей — адрес»
+    ALL = "all"
+    # Только адрес, отключённый почти на всех релеях, и его возврат
+    DEAD = "dead"
 
 
 @dataclass(frozen=True)
@@ -34,6 +45,9 @@ class QuarantineSettings:
     mode: Mode = Mode.OFF
     policy: QuarantinePolicy = QuarantinePolicy()
     notify: bool = True
+    notify_scope: NotifyScope = NotifyScope.ALL
+    # Адрес считается умершим, когда отключён на такой доле своих релеев
+    notify_dead_share_pct: int = NOTIFY_DEAD_SHARE_DEFAULT
     # Просить релеи проверять адреса назначения «как клиент» (TLS-рукопожатие)
     client_probe: bool = False
     exempt_server_ids: frozenset[int] = frozenset()
@@ -57,6 +71,8 @@ class QuarantineSettings:
             "max_share_pct": self.policy.max_share_pct,
             "drop_sessions": self.policy.drop_sessions,
             "notify": self.notify,
+            "notify_scope": self.notify_scope.value,
+            "notify_dead_share_pct": self.notify_dead_share_pct,
             "client_probe": self.client_probe,
             "exempt_server_ids": sorted(self.exempt_server_ids),
             "exempt_targets": [format_endpoint(ip, port) for ip, port in self.exempt_targets],
@@ -79,6 +95,13 @@ def _mode(value: Any) -> Mode:
         return Mode(value)
     except ValueError:
         return Mode.OFF
+
+
+def _scope(value: Any) -> NotifyScope:
+    try:
+        return NotifyScope(value)
+    except ValueError:
+        return NotifyScope.ALL
 
 
 def _server_ids(value: Any) -> frozenset[int]:
@@ -115,6 +138,10 @@ def settings_from_dict(data: dict) -> QuarantineSettings:
             drop_sessions=_flag(data.get("drop_sessions"), defaults.drop_sessions),
         ),
         notify=_flag(data.get("notify"), True),
+        notify_scope=_scope(data.get("notify_scope")),
+        notify_dead_share_pct=int(_number(
+            data.get("notify_dead_share_pct"), NOTIFY_DEAD_SHARE_BOUNDS, NOTIFY_DEAD_SHARE_DEFAULT,
+        )),
         client_probe=_flag(data.get("client_probe"), False),
         exempt_server_ids=_server_ids(data.get("exempt_server_ids")),
         exempt_targets=_targets(data.get("exempt_targets")),

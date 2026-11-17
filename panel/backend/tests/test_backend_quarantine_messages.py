@@ -18,9 +18,12 @@ from app.services.backend_quarantine_messages import (  # noqa: E402
     MESSAGE_LIMIT,
     format_digest,
     history_records,
+    telegram_events,
 )
+from app.services.backend_quarantine_settings import NotifyScope  # noqa: E402
 
 TARGET = "193.141.60.129:8443"
+SECOND = "193.141.60.130:8443"
 OWNERS = {"193.141.60.129": "nl-3"}
 
 
@@ -36,6 +39,21 @@ def restored(cause: RestoreCause, **fields) -> Event:
 
 def text(events: list[Event], lang: str = "ru") -> str:
     [message] = format_digest(events, OWNERS, lang)
+    return message
+
+
+def dead(**fields) -> Event:
+    base = dict(kind=EventKind.DEAD, relay_id=1, relay_name="msk-1", target=TARGET, failing=5, total=6,
+                reasons=(ReasonKind.LOSS,), owner="nl-3")
+    return Event(**{**base, **fields})
+
+
+def alive(**fields) -> Event:
+    return dead(**{"kind": EventKind.ALIVE, "failing": 0, "reasons": (), **fields})
+
+
+def dead_text(events: list[Event], lang: str = "ru") -> str:
+    [message] = format_digest(events, OWNERS, lang, NotifyScope.DEAD)
     return message
 
 
@@ -225,6 +243,108 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("Disabled", text([disabled()], lang="de"))
 
 
+class ScopeTests(unittest.TestCase):
+    """Режим уведомлений выбирает, что уходит в Telegram; история алертов получает всё."""
+
+    def test_all_events_scope_ignores_address_state(self):
+        self.assertEqual(format_digest([disabled(), dead(), alive()], OWNERS, "ru"),
+                         format_digest([disabled()], OWNERS, "ru"))
+        self.assertEqual(format_digest([dead()], OWNERS, "ru"), [])
+
+    def test_dead_scope_sends_only_address_state_and_relay_pause(self):
+        chronic = Event(EventKind.CHRONIC, 1, "msk-1", TARGET, strikes=4, relays=("msk-1",))
+        paused = Event(EventKind.RELAY_PAUSED, 2, "msk-2")
+        message = dead_text([disabled(), restored(RestoreCause.CALM), chronic, dead(), paused])
+        for part in ("Адрес не работает", "Автоотключение приостановлено", "msk-2"):
+            self.assertIn(part, message)
+        for part in ("Отключены", "Возвращены", "Постоянные проблемы"):
+            self.assertNotIn(part, message)
+
+    def test_dead_scope_with_nothing_of_its_own_is_silent(self):
+        events = [disabled(), restored(RestoreCause.CALM)]
+        self.assertEqual(format_digest(events, OWNERS, "ru", NotifyScope.DEAD), [])
+
+    def test_telegram_events_by_scope(self):
+        events = [disabled(), dead(), alive(), Event(EventKind.RELAY_PAUSED, 2, "msk-2")]
+        self.assertEqual([event.kind for event in telegram_events(events, NotifyScope.ALL)],
+                         [EventKind.DISABLED, EventKind.RELAY_PAUSED])
+        self.assertEqual([event.kind for event in telegram_events(events, NotifyScope.DEAD)],
+                         [EventKind.DEAD, EventKind.ALIVE, EventKind.RELAY_PAUSED])
+
+
+class DeadLineTests(unittest.TestCase):
+    def test_dead_line_names_spread_and_reasons(self):
+        message = dead_text([dead(reasons=(ReasonKind.LOSS, ReasonKind.NO_REPLY))])
+        self.assertIn("• <code>193.141.60.129:8443</code> · nl-3 — не работает на 5 из 6 релеев: "
+                      "потери, не отвечает на проверку", message)
+
+    def test_every_reason_has_a_name(self):
+        message = dead_text([dead(reasons=tuple(ReasonKind))])
+        self.assertIn(": потери, падения, не отвечает клиентам, не отвечает на проверку", message)
+
+    def test_alive_line(self):
+        self.assertTrue(dead_text([alive()]).endswith("· nl-3 — снова работает"))
+        self.assertIn("— снова работает, отключён на 1 из 6 релеев", dead_text([alive(failing=1)]))
+
+    def test_sections_of_the_dead_scope_keep_a_fixed_order(self):
+        message = dead_text([Event(EventKind.RELAY_PAUSED, 2, "msk-2"), alive(), dead()])
+        order = [message.index(title) for title in
+                 ("Адрес не работает", "Адрес снова работает", "Автоотключение приостановлено")]
+        self.assertEqual(order, sorted(order))
+
+    def test_event_owner_wins_over_registry(self):
+        [message] = format_digest([dead(owner="old-name")], {}, "ru", NotifyScope.DEAD)
+        self.assertIn("· old-name —", message)
+
+    def test_owner_falls_back_to_registry(self):
+        self.assertIn("· nl-3 —", dead_text([dead(owner=None)]))
+
+    def test_observe_sections_are_marked(self):
+        message = dead_text([dead(observe=True), alive(observe=True)])
+        self.assertIn("Не работал бы (режим наблюдения)", message)
+        self.assertIn("Снова работал бы (режим наблюдения)", message)
+        self.assertNotIn("<b>Адрес не работает</b>", message)
+
+    def test_owner_name_is_escaped(self):
+        self.assertIn("&lt;b&gt;x&lt;/b&gt;", dead_text([dead(owner="<b>x</b>")]))
+
+    def test_english_dead_digest_has_no_russian(self):
+        events = [dead(reasons=tuple(ReasonKind)), alive(failing=1),
+                  dead(target="1.1.1.1:443", node_total=2, owner="nl-9"), dead(observe=True), alive(observe=True)]
+        message = dead_text(events, lang="en")
+        self.assertNotRegex(message, "[а-яА-ЯёЁ]")
+        self.assertIn("is down on 5 of 6 relays", message)
+
+
+class NodeLineTests(unittest.TestCase):
+    """Нода, у которой не работают все адреса, — одна строка, а не строка на адрес."""
+
+    def test_dead_node_is_one_line(self):
+        message = dead_text([dead(), dead(target=SECOND, node_total=2)])
+        self.assertIn("• нода <b>nl-3</b> — не работают все 2 адреса", message)
+        self.assertNotIn("<code>", message)
+
+    def test_address_count_is_declined(self):
+        for count, form in ((2, "2 адреса"), (5, "5 адресов"), (11, "11 адресов"), (21, "21 адрес"), (22, "22 адреса")):
+            with self.subTest(count=count):
+                self.assertTrue(dead_text([dead(node_total=count)]).endswith(f"все {form}"))
+
+    def test_alive_node_is_one_line(self):
+        message = dead_text([alive(), alive(target=SECOND, node_total=2)])
+        self.assertIn("• нода <b>nl-3</b> — снова работают все 2 адреса", message)
+        self.assertNotIn("<code>", message)
+
+    def test_other_owner_keeps_its_own_line(self):
+        message = dead_text([dead(node_total=2), dead(target="10.9.9.9:443", owner="de-1")])
+        self.assertIn("нода <b>nl-3</b>", message)
+        self.assertIn("<code>10.9.9.9:443</code> · de-1", message)
+
+    def test_dead_node_does_not_swallow_its_revived_address(self):
+        message = dead_text([dead(node_total=2), alive(target=SECOND)])
+        self.assertIn("нода <b>nl-3</b> — не работают", message)
+        self.assertIn(f"<code>{SECOND}</code>", message)
+
+
 class HistoryTests(unittest.TestCase):
     def test_one_record_per_event_behind_its_relay(self):
         events = [disabled(), restored(RestoreCause.MANUAL, relay_id=2, relay_name="spb-2"),
@@ -255,6 +375,28 @@ class HistoryTests(unittest.TestCase):
         [record] = history_records([disabled(reason_kind=ReasonKind.STALLED, loss_pct=0.0)], OWNERS, "ru")
         self.assertEqual(record.details["reason"], "stalled")
         self.assertIn("сервер не отвечает клиентам", record.message)
+
+    def test_history_of_dead_and_alive(self):
+        died, revived = history_records(
+            [dead(reasons=(ReasonKind.LOSS, ReasonKind.NO_REPLY)), alive(failing=1)], OWNERS, "ru",
+        )
+        self.assertEqual((died.alert_type, died.severity, died.server_id, died.server_name),
+                         ("backend_dead", "critical", 1, "msk-1"))
+        self.assertEqual((revived.alert_type, revived.severity), ("backend_alive", "info"))
+        self.assertEqual(died.message, "193.141.60.129:8443 · nl-3 — не работает на 5 из 6 релеев: "
+                                       "потери, не отвечает на проверку")
+        self.assertEqual(died.details, {
+            "target": TARGET, "owner": "nl-3", "failing": 5, "total": 6, "reasons": ["loss", "no_reply"],
+            "observe": False, "node_total": 0,
+        })
+
+    def test_history_keeps_a_row_per_address_of_a_dead_node(self):
+        records = history_records([dead(), dead(target=SECOND, node_total=2)], OWNERS, "ru")
+        self.assertEqual([record.details["target"] for record in records], [TARGET, SECOND])
+
+    def test_observe_dead_is_marked_in_history(self):
+        [record] = history_records([dead(observe=True)], OWNERS, "ru")
+        self.assertTrue(record.message.startswith("[наблюдение] "))
 
     def test_observe_events_are_marked_in_history(self):
         [record] = history_records([disabled(observe=True, term_sec=0)], OWNERS, "ru")
