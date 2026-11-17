@@ -17,80 +17,22 @@ import asyncssh
 from sqlalchemy.exc import OperationalError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
+
+from ssh_fakes import FakeDb, LiveSshCase, public_text  # noqa: E402
 
 from app.models import Server  # noqa: E402
 from app.routers import node_image, servers  # noqa: E402
 from app.services import deploy_job_manager, deploy_service, node_image_delivery, ssh_target  # noqa: E402
 from app.services.deploy_job_manager import DeployJob, DeployJobManager, PostDeployOptions  # noqa: E402
+from app.services.ssh_access import store_server_access  # noqa: E402
 from app.services.ssh_target import (  # noqa: E402
     HostKeyChangedError,
+    SshAccessRules,
     SSHTarget,
-    open_ssh_connection,
     resolve_ssh_target,
     ssh_connect_kwargs,
 )
-
-
-def public_text(key: asyncssh.SSHKey) -> str:
-    return key.export_public_key("openssh").decode().strip()
-
-
-def sshd_recording(seen: list[str]):
-    """sshd, который записывает, до какого шага дошёл клиент."""
-
-    class Sshd(asyncssh.SSHServer):
-        def connection_made(self, conn):
-            seen.append("connect")
-
-        def begin_auth(self, username: str) -> bool:
-            seen.append("auth")
-            return True
-
-        def password_auth_supported(self) -> bool:
-            return True
-
-        def validate_password(self, username: str, password: str) -> bool:
-            seen.append("password")
-            return password == "pw"
-
-        def server_requested(self, listen_host: str, listen_port: int) -> bool:
-            return True
-
-    return Sshd
-
-
-async def _finish_ok(process: asyncssh.SSHServerProcess) -> None:
-    process.stdout.write("installed\n")
-    process.exit(0)
-
-
-class LiveSshCase(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.seen: list[str] = []
-        self.host_key = asyncssh.generate_private_key("ssh-ed25519")
-        self.port = await self.start_sshd(self.host_key)
-        self.remember = mock.AsyncMock()
-        patcher = mock.patch.object(ssh_target, "_remember_host_key", self.remember)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    async def start_sshd(self, host_key: asyncssh.SSHKey) -> int:
-        acceptor = await asyncssh.create_server(
-            sshd_recording(self.seen), "127.0.0.1", 0,
-            server_host_keys=[host_key], process_factory=_finish_ok,
-        )
-        self.addAsyncCleanup(acceptor.wait_closed)
-        self.addCleanup(acceptor.close)
-        return acceptor.sockets[0].getsockname()[1]
-
-    def target(self, **fields) -> SSHTarget:
-        return SSHTarget(host="127.0.0.1", port=self.port, password="pw", **fields)
-
-    async def open(self, target: SSHTarget, connect_kwargs: dict | None = None) -> None:
-        kwargs = ssh_connect_kwargs(target) if connect_kwargs is None else connect_kwargs
-        conn = await open_ssh_connection(kwargs, None, target.server_id)
-        conn.close()
-        await conn.wait_closed()
 
 
 class OpenConnectionTests(LiveSshCase):
@@ -173,7 +115,7 @@ class ResolveTargetTests(unittest.TestCase):
     def test_target_carries_server_and_its_pinned_key(self):
         server = Server(id=5, name="n", url="https://10.0.0.5:9100", ssh_password="x", ssh_host_key="KEY")
 
-        target = resolve_ssh_target(server)
+        target = resolve_ssh_target(server, SshAccessRules())
 
         self.assertEqual((target.server_id, target.host_key), (5, "KEY"))
 
@@ -299,7 +241,8 @@ def pinned_server(**fields) -> Server:
 
 class StoreCredsTests(unittest.TestCase):
     def store(self, server: Server, **access) -> None:
-        node_image._store_creds(server, node_image.SSHAccessRequest(**access))
+        request = node_image.SSHAccessRequest(**access)
+        store_server_access(server, request.to_change(), ssh_host=request.ssh_host)
 
     def test_retyped_secret_resets_pinned_key(self):
         for secret in ({"ssh_password": "same"}, {"ssh_private_key": "KEY"}, {"ssh_password": ""}):
@@ -321,18 +264,6 @@ class StoreCredsTests(unittest.TestCase):
         self.assertEqual(server.ssh_host_key, "KEY")
 
 
-class _OneServerDb:
-    def __init__(self, server: Server):
-        self._server = server
-        self.commit = mock.AsyncMock()
-
-    async def execute(self, _query):
-        result = mock.MagicMock()
-        result.scalar_one_or_none.return_value = self._server
-        result.scalars.return_value.all.return_value = [self._server]
-        return result
-
-
 class BulkSaveCredsTests(unittest.IsolatedAsyncioTestCase):
     async def test_saved_access_starts_delivery_without_old_key(self):
         server = pinned_server()
@@ -341,7 +272,7 @@ class BulkSaveCredsTests(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(node_image, "get_image_delivery_manager", return_value=manager), \
                 mock.patch.object(node_image.update_channel, "current_image_tag", return_value="latest"):
-            await node_image.deliver_image_bulk(request, _OneServerDb(server))
+            await node_image.deliver_image_bulk(request, FakeDb([server]))
 
         target = manager.start.call_args.args[2]
         self.assertIsNone(server.ssh_host_key)
@@ -353,7 +284,7 @@ class ServerUrlChangeTests(unittest.IsolatedAsyncioTestCase):
     async def update_url(self, server: Server, url: str) -> None:
         blocklist = mock.MagicMock(sync_single_node_by_id=mock.AsyncMock())
         with mock.patch.object(servers, "get_blocklist_manager", return_value=blocklist):
-            await servers.update_server(1, servers.ServerUpdate(url=url), _OneServerDb(server))
+            await servers.update_server(1, servers.ServerUpdate(url=url), FakeDb([server]))
 
     async def test_new_address_forgets_key_of_previous_machine(self):
         server = pinned_server()

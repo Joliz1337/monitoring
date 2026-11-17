@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
 from app.models import AlertHistory, AlertSettings, NodeUpdateAttempt, Server
-from app.services import update_channel
+from app.services import ssh_access, update_channel
 from app.services.http_client import get_node_client, node_auth_headers
 from app.services.node_capabilities import server_allows_path
 from app.services.node_image_delivery import get_image_delivery_manager
@@ -225,8 +225,9 @@ def _reason_text(lang: str, reason: FailureReason, detail: Optional[str]) -> str
 def _problem_text(lang: str, problem: FallbackProblem, detail: Optional[str]) -> str:
     if lang == "ru":
         texts = {
-            FallbackProblem.NO_CREDS: "Обновить по SSH не получится: у сервера не сохранён SSH-доступ. "
-                                      "Сохраните его на странице «Обновления» или обновите ноду вручную.",
+            FallbackProblem.NO_CREDS: "Обновить по SSH не получится: SSH-доступ не задан ни у сервера, "
+                                      "ни у его папки, ни общий. Задайте его на странице «Обновления» → "
+                                      "«SSH-доступ» или обновите ноду вручную.",
             FallbackProblem.NOT_ROOT: "Обновить по SSH не получится: сохранённый SSH-доступ не root, а нужен root.",
             FallbackProblem.NO_HOST: "Обновить по SSH не получится: не удалось определить SSH-адрес сервера.",
             FallbackProblem.SSH_FAILED: f"Обновление по SSH тоже не удалось: {detail}",
@@ -235,8 +236,9 @@ def _problem_text(lang: str, problem: FallbackProblem, detail: Optional[str]) ->
         }
     else:
         texts = {
-            FallbackProblem.NO_CREDS: "Updating over SSH is not possible: the server has no saved SSH access. "
-                                      "Save it on the Updates page or update the node manually.",
+            FallbackProblem.NO_CREDS: "Updating over SSH is not possible: no SSH access is set for the server, "
+                                      "its folder or the whole fleet. Set it on the Updates page → SSH access, "
+                                      "or update the node manually.",
             FallbackProblem.NOT_ROOT: "Updating over SSH is not possible: the saved SSH access is not root, "
                                       "and root is required.",
             FallbackProblem.NO_HOST: "Updating over SSH is not possible: the server's SSH address could not be determined.",
@@ -522,8 +524,10 @@ class NodeUpdateWatcher:
         return None
 
     async def _fall_back(self, attempt: NodeUpdateAttempt, server: Server, decision: Decision) -> None:
+        async with async_session() as db:
+            rules = await ssh_access.load_rules(db)
         try:
-            target = resolve_ssh_target(server)
+            target = resolve_ssh_target(server, rules)
         except SSHTargetError as exc:
             logger.warning(
                 f"Node {server.name} ({server.id}) failed to update ({decision.reason.value}), "

@@ -18,6 +18,7 @@ from app.auth import verify_auth
 from app.database import get_db
 from app.routers.node_image import SSHAccessRequest
 from app.routers.proxy import get_server_by_id, require_capability
+from app.services import ssh_access
 from app.services.haproxy_upgrade import get_haproxy_upgrade_manager, running_job_id, start_upgrade
 from app.services.node_capabilities import Capability
 from app.services.ssh_target import SSHTargetError, resolve_ssh_target
@@ -27,7 +28,7 @@ router = APIRouter(prefix="/servers", tags=["haproxy-upgrade"])
 
 class HAProxyUpgradeRequest(BaseModel):
     # Сервер за ТСПУ: обновление по SSH, пакеты качаются через панель.
-    # ssh — разовые креды поверх сохранённых у сервера
+    # ssh — разовые креды поверх SSH-доступа сервера (свой, папки или общий)
     via_panel: bool = False
     ssh: SSHAccessRequest = Field(default_factory=SSHAccessRequest)
 
@@ -45,10 +46,11 @@ async def start_haproxy_upgrade(
 ):
     server = await get_server_by_id(server_id, db)
     req = req or HAProxyUpgradeRequest()
+    rules = await ssh_access.load_rules(db)
     ssh_target = None
     if req.via_panel:
         try:
-            ssh_target = resolve_ssh_target(server, **req.ssh.model_dump())
+            ssh_target = resolve_ssh_target(server, rules, **req.ssh.model_dump())
         except SSHTargetError as exc:
             raise HTTPException(400, str(exc)) from exc
     else:
@@ -56,7 +58,7 @@ async def start_haproxy_upgrade(
         require_capability(server, Capability.EXEC, write=True)
     if running_job_id(server.id):
         raise HTTPException(409, "Обновление HAProxy на этом сервере уже идёт")
-    return {"job_id": start_upgrade(server, ssh_target)}
+    return {"job_id": start_upgrade(server, rules, ssh_target)}
 
 
 @router.get("/haproxy-upgrade/jobs")

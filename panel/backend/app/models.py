@@ -119,6 +119,10 @@ class Server(Base):
     ssh_passphrase = Column(EncryptedString, nullable=True)
     # Ключ хоста, принятый при первом SSH-подключении; смена ключа = отказ, а не молчаливое доверие
     ssh_host_key = Column(Text, nullable=True)
+    # SOCKS5-прокси только для SSH ("ip:port" или "ip:port@login:pass") и его режим
+    # (ssh_target.ProxyMode). proxy_url выше заворачивает весь трафик панели к ноде
+    ssh_proxy = Column(EncryptedString, nullable=True)
+    ssh_proxy_mode = Column(String(10), nullable=True)
 
     # Кэш фактического порта sshd с ноды (из /api/ssh/status и применений SSH-конфига).
     # Не путать с ssh_port выше — это порт из кредов доставки образа.
@@ -208,6 +212,27 @@ class Server(Base):
     # "5201,8443-8450"); при рассылке объединяются с общим списком из
     # panel_settings (ключ reserved_ports_global)
     reserved_ports = Column(Text, nullable=True)
+
+
+class SshAccessProfile(Base):
+    """SSH-доступ панели для группы серверов: общий (folder == "") или для папки.
+
+    Свой доступ сервера лежит в servers.ssh_*; какой уровень достанется серверу,
+    решает services/ssh_target.resolve_ssh_target. Папка — по имени, как в
+    servers.folder: отдельной таблицы папок в панели нет.
+    """
+    __tablename__ = "ssh_access_profiles"
+
+    id = Column(Integer, primary_key=True)
+    folder = Column(String(200), nullable=False, unique=True, server_default="")
+    ssh_user = Column(String(100), nullable=True)
+    ssh_port = Column(Integer, nullable=True)
+    ssh_password = Column(EncryptedString, nullable=True)
+    ssh_private_key = Column(EncryptedString, nullable=True)
+    ssh_passphrase = Column(EncryptedString, nullable=True)
+    ssh_proxy = Column(EncryptedString, nullable=True)
+    ssh_proxy_mode = Column(String(10), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class ServerCache(Base):

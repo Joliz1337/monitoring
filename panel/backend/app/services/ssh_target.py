@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
 import asyncssh
@@ -26,6 +27,60 @@ from app.services.http_client import parse_proxy_input, sanitize_proxy
 logger = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 30
+DEFAULT_SSH_PORT = 22
+DEFAULT_SSH_USER = "root"
+
+
+class ProxyMode(str, Enum):
+    FALLBACK = "fallback"  # основной путь, прокси — если он не подключился
+    ALWAYS = "always"
+    OFF = "off"  # отказ от прокси, заданного уровнем выше
+
+
+class AccessLevel(str, Enum):
+    SERVER = "server"
+    FOLDER = "folder"
+    GLOBAL = "global"
+
+
+@dataclass(frozen=True)
+class LevelAccess:
+    """Что задано на одном уровне: у сервера, у папки или общее."""
+    user: Optional[str] = None
+    port: Optional[int] = None
+    password: Optional[str] = None
+    private_key: Optional[str] = None
+    passphrase: Optional[str] = None
+    proxy: Optional[str] = None
+    proxy_mode: Optional[str] = None
+
+    @property
+    def has_login(self) -> bool:
+        return bool(self.password or self.private_key)
+
+    @property
+    def has_proxy(self) -> bool:
+        return bool(self.proxy) or self.proxy_mode == ProxyMode.OFF
+
+
+@dataclass(frozen=True)
+class SshAccessRules:
+    """Общий доступ и доступ папок. Свой доступ сервера лежит в его записи."""
+    shared: Optional[LevelAccess] = None
+    folders: Mapping[str, LevelAccess] = field(default_factory=dict)
+
+
+def level_from(row) -> LevelAccess:
+    """Уровень из записи сервера или строки ssh_access_profiles: колонки ssh_* у них одноимённые."""
+    return LevelAccess(
+        user=row.ssh_user,
+        port=row.ssh_port,
+        password=row.ssh_password,
+        private_key=row.ssh_private_key,
+        passphrase=row.ssh_passphrase,
+        proxy=row.ssh_proxy,
+        proxy_mode=row.ssh_proxy_mode,
+    )
 
 
 @dataclass
@@ -36,9 +91,11 @@ class SSHTarget:
     password: Optional[str] = None
     private_key: Optional[str] = None
     passphrase: Optional[str] = None
-    # SOCKS5-прокси панель→сервер ("ip:port[@login:pass]"): сервер, до которого
-    # панель достаёт только через прокси, по SSH напрямую тоже не ответит
-    socks5_proxy: Optional[str] = None
+    # Пути до сервера по порядку: None — напрямую, строка — SOCKS5-прокси
+    # ("ip:port[@login:pass]"). Следующий путь берётся, когда предыдущий не подключился
+    routes: tuple[Optional[str], ...] = (None,)
+    # С какого уровня взят вход; None — из запроса
+    login_level: Optional[AccessLevel] = None
     # Запись сервера и закреплённый за ней ключ хоста (формат OpenSSH): с ключом
     # сервер сверяется до аутентификации, без него первое подключение его запоминает
     server_id: Optional[int] = None
@@ -59,8 +116,8 @@ class HostKeyChangedError(Exception):
         super().__init__(
             f"SSH: ключ хоста {host} не совпадает с запомненным при первом подключении — "
             "соединение прервано до входа, пароль и ключ не отправлены. Если сервер "
-            "переустановлен, сохраните его SSH-доступ заново (с паролем или ключом): "
-            "панель примет новый ключ хоста"
+            "переустановлен, откройте «SSH-доступ» на странице «Обновления», запустите "
+            "проверку и примите новый ключ хоста у этого сервера"
         )
 
 
@@ -72,8 +129,63 @@ def has_stored_creds(server: "Server") -> bool:
     return bool(server.ssh_password or server.ssh_private_key)
 
 
+def login_level(rules: SshAccessRules, folder: Optional[str], has_own_login: bool) -> Optional[AccessLevel]:
+    """С какого уровня серверу достаётся вход. Секреты сервера для ответа не нужны —
+    сводкам на весь парк хватает признака «свой вход есть»."""
+    if has_own_login:
+        return AccessLevel.SERVER
+    folder_level = rules.folders.get(folder) if folder else None
+    if folder_level is not None and folder_level.has_login:
+        return AccessLevel.FOLDER
+    if rules.shared is not None and rules.shared.has_login:
+        return AccessLevel.GLOBAL
+    return None
+
+
+def ssh_routes(primary: Optional[str], proxy: Optional[str], mode: Optional[str]) -> tuple[Optional[str], ...]:
+    """Пути до сервера: primary — как панель ходит к нему обычно (напрямую или через
+    прокси из его карточки), proxy — прокси только для SSH и его режим."""
+    if not proxy or mode == ProxyMode.OFF:
+        return (primary,)
+    if mode == ProxyMode.ALWAYS:
+        return (proxy,)
+    return (primary,) if proxy == primary else (primary, proxy)
+
+
+@dataclass(frozen=True)
+class SavedAccess:
+    """Доступ сервера по уровням — без разовых кредов из запроса. Вход, порт и
+    прокси берутся каждый со своего ближайшего уровня, где заданы."""
+    login_level: Optional[AccessLevel]
+    login: LevelAccess  # уровень, давший вход; пустой, если входа нет нигде
+    port: int
+    proxy: LevelAccess  # уровень, давший прокси; пустой, если прокси не задан
+
+    @property
+    def user(self) -> str:
+        return (self.login.user or DEFAULT_SSH_USER).strip()
+
+
+def saved_access(server: "Server", rules: SshAccessRules) -> SavedAccess:
+    levels = [(AccessLevel.SERVER, level_from(server))]
+    folder_level = rules.folders.get(server.folder) if server.folder else None
+    if folder_level is not None:
+        levels.append((AccessLevel.FOLDER, folder_level))
+    if rules.shared is not None:
+        levels.append((AccessLevel.GLOBAL, rules.shared))
+
+    source, login = next(((name, level) for name, level in levels if level.has_login), (None, LevelAccess()))
+    return SavedAccess(
+        login_level=source,
+        login=login,
+        port=next((level.port for _, level in levels if level.port), DEFAULT_SSH_PORT),
+        proxy=next((level for _, level in levels if level.has_proxy), LevelAccess()),
+    )
+
+
 def resolve_ssh_target(
     server: "Server",
+    rules: SshAccessRules,
     *,
     ssh_host: Optional[str] = None,
     ssh_port: Optional[int] = None,
@@ -82,26 +194,38 @@ def resolve_ssh_target(
     ssh_private_key: Optional[str] = None,
     ssh_passphrase: Optional[str] = None,
 ) -> SSHTarget:
-    """SSH-цель сервера: переданные поля поверх сохранённых у сервера."""
+    """SSH-цель сервера: доступ по уровням, поля запроса — поверх него."""
+    saved = saved_access(server, rules)
+    if ssh_password or ssh_private_key:
+        # Введённый пароль или ключ заменяет вход целиком: сохранённый ключ рядом
+        # с введённым паролем при подключении молча победил бы
+        source, login = None, LevelAccess(password=ssh_password or None, private_key=ssh_private_key or None)
+    else:
+        source, login = saved.login_level, saved.login
+
     host = (ssh_host or server.ssh_host or host_from_url(server.url)).strip()
-    port = ssh_port or server.ssh_port or 22
-    user = (ssh_user or server.ssh_user or "root").strip()
-    password = ssh_password if ssh_password is not None else server.ssh_password
-    private_key = ssh_private_key if ssh_private_key is not None else server.ssh_private_key
-    passphrase = ssh_passphrase if ssh_passphrase is not None else server.ssh_passphrase
+    user = (ssh_user or login.user or DEFAULT_SSH_USER).strip()
 
     if not host:
         raise SSHTargetError("no_host", "Не удалось определить SSH-хост ноды")
-    if user != "root":
+    if user != DEFAULT_SSH_USER:
         raise SSHTargetError("not_root", "Нужен root-доступ по SSH")
-    if not password and not private_key:
-        raise SSHTargetError("no_creds", "Нет SSH-кредов: сохраните их у сервера или укажите в запросе")
+    if not login.has_login:
+        raise SSHTargetError(
+            "no_creds", "Нет SSH-доступа: задайте его серверу, его папке или общий — либо укажите в запросе",
+        )
 
     return SSHTarget(
-        host=host, port=port, user=user,
-        password=password, private_key=private_key, passphrase=passphrase,
-        socks5_proxy=server.proxy_url or None,
-        server_id=server.id, host_key=server.ssh_host_key,
+        host=host,
+        port=ssh_port or saved.port,
+        user=user,
+        password=login.password,
+        private_key=login.private_key,
+        passphrase=ssh_passphrase if ssh_passphrase is not None else login.passphrase,
+        routes=ssh_routes(server.proxy_url or None, saved.proxy.proxy, saved.proxy.proxy_mode),
+        server_id=server.id,
+        host_key=server.ssh_host_key,
+        login_level=source,
     )
 
 
@@ -160,6 +284,66 @@ async def open_ssh_connection(
         conn.close()
         raise
     return conn
+
+
+@dataclass
+class RouteConnection:
+    conn: asyncssh.SSHClientConnection
+    route: Optional[str]  # None — напрямую
+    # Пути, которыми не вышло, и причина каждого — для лога задачи
+    skipped: list[tuple[Optional[str], str]]
+
+
+class SshRoutesFailed(OSError):
+    """Не подключились ни одним путём."""
+
+    def __init__(self, attempts: list[tuple[Optional[str], str]]):
+        super().__init__("; ".join(f"{route_label(route)}: {reason}" for route, reason in attempts))
+
+
+def route_label(route: Optional[str]) -> str:
+    return f"через SOCKS5 {sanitize_proxy(route)}" if route else "напрямую"
+
+
+def prefer_route(routes: tuple[Optional[str], ...], working: Optional[str]) -> tuple[Optional[str], ...]:
+    """Рабочий путь первым: переподключения той же задачи идут сразу им."""
+    return (working, *(route for route in routes if route != working))
+
+
+def connect_error_text(connect_kwargs: dict, exc: BaseException) -> str:
+    # asyncssh обрывает подключение по connect_timeout через asyncio.wait_for —
+    # исключение приходит без текста
+    if isinstance(exc, asyncio.TimeoutError):
+        return (
+            f"{connect_kwargs['host']}:{connect_kwargs['port']} не ответил "
+            f"за {connect_kwargs['connect_timeout']} с"
+        )
+    return str(exc) or type(exc).__name__
+
+
+async def open_ssh_routes(
+    connect_kwargs: dict, routes: Sequence[Optional[str]], server_id: Optional[int] = None,
+) -> RouteConnection:
+    """Подключиться первым путём, которым получится.
+
+    На следующий путь переводит только сетевая ошибка. Неверный пароль и чужой
+    ключ хоста вторым путём не повторяются: на сервере копились бы неудачные
+    входы, а подменённому серверу ушёл бы пароль. Единственный путь отдаёт своё
+    исключение как есть.
+    """
+    skipped: list[tuple[Optional[str], str]] = []
+    for route in routes:
+        try:
+            conn = await open_ssh_connection(connect_kwargs, route, server_id)
+        except asyncssh.PermissionDenied:
+            raise
+        except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
+            if len(routes) == 1:
+                raise
+            skipped.append((route, connect_error_text(connect_kwargs, exc)))
+            continue
+        return RouteConnection(conn, route, skipped)
+    raise SshRoutesFailed(skipped)
 
 
 async def _pin_host_key(

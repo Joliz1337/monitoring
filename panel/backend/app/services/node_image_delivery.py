@@ -31,13 +31,14 @@ from typing import AsyncIterator, Optional
 
 import asyncssh
 
-from app.services.http_client import sanitize_proxy
 from app.services.node_image_cache import NodeImageArchive, ensure_image, image_ref
 from app.services.ssh_target import (
-    CONNECT_TIMEOUT,
     HostKeyChangedError,
     SSHTarget,
-    open_ssh_connection,
+    connect_error_text,
+    open_ssh_routes,
+    prefer_route,
+    route_label,
     ssh_connect_kwargs,
 )
 
@@ -83,14 +84,6 @@ AGENT_HEALTH_PROBE = (
 
 def _error_text(exc: BaseException) -> str:
     return str(exc) or type(exc).__name__
-
-
-def _connect_error_text(target: SSHTarget, exc: BaseException) -> str:
-    # asyncssh обрывает подключение по connect_timeout через asyncio.wait_for —
-    # исключение приходит без текста
-    if isinstance(exc, asyncio.TimeoutError):
-        return f"{target.host}:{target.port} не ответил за {CONNECT_TIMEOUT} с"
-    return _error_text(exc)
 
 
 async def _run_streamed(conn, command: str, timeout: int) -> AsyncIterator[dict]:
@@ -317,10 +310,11 @@ def _session_error_text(exc: BaseException) -> str:
 
 async def _connect(target: SSHTarget, connect_kwargs: dict) -> AsyncIterator:
     """Подключиться с повторами. Отдаёт события лога и последним — само подключение;
-    не подключился — событие error."""
+    не подключился — событие error. Путь, которым подключились, становится первым
+    у цели: следующие сеансы той же задачи начинают с него."""
     for attempt in range(1, SSH_CONNECT_ATTEMPTS + 1):
         try:
-            conn = await open_ssh_connection(connect_kwargs, target.socks5_proxy, target.server_id)
+            opened = await open_ssh_routes(connect_kwargs, target.routes, target.server_id)
         except asyncssh.PermissionDenied:
             yield {"type": "error", "message": "SSH: неверный логин, пароль или ключ"}
             return
@@ -328,7 +322,7 @@ async def _connect(target: SSHTarget, connect_kwargs: dict) -> AsyncIterator:
             yield {"type": "error", "message": str(exc)}
             return
         except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
-            reason = _connect_error_text(target, exc)
+            reason = connect_error_text(connect_kwargs, exc)
             if attempt == SSH_CONNECT_ATTEMPTS:
                 yield {"type": "error", "message": f"Ошибка SSH: {reason} (попыток: {SSH_CONNECT_ATTEMPTS})"}
                 return
@@ -339,9 +333,12 @@ async def _connect(target: SSHTarget, connect_kwargs: dict) -> AsyncIterator:
             }
             await asyncio.sleep(SSH_CONNECT_RETRY_DELAY)
             continue
-        via_proxy = f" через SOCKS5 {sanitize_proxy(target.socks5_proxy)}" if target.socks5_proxy else ""
+        for route, reason in opened.skipped:
+            yield {"type": "log", "line": f"[panel] SSH {route_label(route)} не подключился: {reason}"}
+        target.routes = prefer_route(target.routes, opened.route)
+        via_proxy = f" {route_label(opened.route)}" if opened.route else ""
         yield {"type": "log", "line": f"[panel] SSH к {target.host}:{target.port} установлен{via_proxy}"}
-        yield conn
+        yield opened.conn
         return
 
 

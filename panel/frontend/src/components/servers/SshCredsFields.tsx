@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
 import type { ImageDeliveryCreds, ImageDeliverySettings } from '../../api/client'
 import { SecretInput } from '../ui/SecretInput'
@@ -33,8 +34,24 @@ export function credsFromSettings(settings: ImageDeliverySettings): SshCredsValu
   }
 }
 
+/** У сервера есть свой вход — его можно изменить и забыть */
 export function hasStoredSshSecret(settings: ImageDeliverySettings): boolean {
   return settings.has_ssh_password || settings.has_ssh_private_key
+}
+
+/** Вход есть на любом уровне: свой, папки или общий — форма доступа серверу не нужна */
+export function hasSshLogin(settings: ImageDeliverySettings): boolean {
+  return settings.ssh_access_level !== null
+}
+
+/** Одной строкой: с какого уровня сервер берёт вход и куда панель подключится */
+export function sshAccessSourceText(settings: ImageDeliverySettings, t: TFunction): string {
+  const address = { user: settings.ssh_user, host: settings.ssh_host, port: settings.ssh_port }
+  if (settings.ssh_access_level === 'folder') {
+    return t('imageDelivery.using_inherited_folder', { ...address, folder: settings.ssh_access_folder })
+  }
+  if (settings.ssh_access_level === 'global') return t('imageDelivery.using_inherited_global', address)
+  return t('imageDelivery.using_stored', address)
 }
 
 export function hasSshSecret(value: SshCredsValue): boolean {
@@ -77,7 +94,7 @@ export default function SshCredsFields({ value, onChange, disabled = false, show
   const userField = (
     <>
       <label className="block text-xs text-dark-400 mb-1">{t('imageDelivery.user')}</label>
-      <input className="input w-full" value={value.user} onChange={(e) => onChange({ user: e.target.value })} disabled={disabled} />
+      <input className="input w-full" placeholder="root" value={value.user} onChange={(e) => onChange({ user: e.target.value })} disabled={disabled} />
     </>
   )
 
@@ -87,7 +104,7 @@ export default function SshCredsFields({ value, onChange, disabled = false, show
         <div className="col-span-2">{showHost ? hostField : userField}</div>
         <div>
           <label className="block text-xs text-dark-400 mb-1">{t('imageDelivery.port')}</label>
-          <input className="input w-full" value={value.port} onChange={(e) => onChange({ port: e.target.value.replace(/\D/g, '') })} disabled={disabled} />
+          <input className="input w-full" placeholder="22" value={value.port} onChange={(e) => onChange({ port: e.target.value.replace(/\D/g, '') })} disabled={disabled} />
         </div>
       </div>
       {showHost && <div>{userField}</div>}

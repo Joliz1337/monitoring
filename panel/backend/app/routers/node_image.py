@@ -19,14 +19,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import verify_auth
 from app.database import get_db
 from app.models import Server
-from app.services import update_channel
+from app.services import ssh_access, update_channel
 from app.services.node_image_delivery import get_image_delivery_manager
+from app.services.ssh_access import AccessChange, store_server_access
 from app.services.ssh_target import (
+    AccessLevel,
     SSHTarget,
     SSHTargetError,
     has_stored_creds,
     host_from_url,
+    login_level,
     resolve_ssh_target,
+    saved_access,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,10 +50,19 @@ class SSHCreds(BaseModel):
     ssh_private_key: Optional[str] = None
     ssh_passphrase: Optional[str] = None
 
+    def to_change(self) -> AccessChange:
+        return AccessChange(
+            user=self.ssh_user,
+            port=self.ssh_port,
+            password=self.ssh_password,
+            private_key=self.ssh_private_key,
+            passphrase=self.ssh_passphrase,
+        )
+
 
 class SSHAccessRequest(SSHCreds):
-    """Разовые SSH-креды поверх сохранённых у сервера. Ими же ставится нода
-    Remnawave, когда сервер качает всё через панель."""
+    """Разовые SSH-креды поверх доступа сервера (свой, папки или общий). Ими же
+    ставится нода Remnawave, когда сервер качает всё через панель."""
     ssh_host: Optional[str] = None
 
 
@@ -58,37 +71,9 @@ class ImageDeliverySettings(SSHAccessRequest):
 
 
 class BulkDeliverRequest(SSHCreds):
-    """Креды из запроса идут только серверам без сохранённых — у остальных свои."""
+    """Креды из запроса идут только серверам без входа на любом уровне — у остальных свой доступ."""
     server_ids: list[int] = Field(min_length=1, max_length=MAX_BULK_SERVERS)
     save_creds: bool = False
-
-
-def _store_creds(server: Server, req: SSHAccessRequest) -> None:
-    """Write-only: обновляем только переданные поля; пустая строка — очистить.
-
-    Новый адрес, порт, пользователь или заново введённый пароль/ключ — доступ
-    сохраняют заново, в том числе после переустановки сервера: закреплённый ключ
-    хоста сбрасывается, и следующее подключение запомнит тот, что предъявит сервер.
-    """
-    address_before = (server.ssh_host, server.ssh_port, server.ssh_user)
-    if req.ssh_host is not None:
-        server.ssh_host = req.ssh_host.strip() or None
-    if req.ssh_port is not None:
-        server.ssh_port = req.ssh_port or None
-    if req.ssh_user is not None:
-        server.ssh_user = req.ssh_user.strip() or None
-    if req.ssh_password is not None:
-        server.ssh_password = req.ssh_password or None
-    if req.ssh_private_key is not None:
-        server.ssh_private_key = req.ssh_private_key or None
-    if req.ssh_passphrase is not None:
-        server.ssh_passphrase = req.ssh_passphrase or None
-
-    secret_sent = any(
-        value is not None for value in (req.ssh_password, req.ssh_private_key, req.ssh_passphrase)
-    )
-    if secret_sent or (server.ssh_host, server.ssh_port, server.ssh_user) != address_before:
-        server.ssh_host_key = None
 
 
 async def _get_server(server_id: int, db: AsyncSession) -> Server:
@@ -105,12 +90,16 @@ async def get_image_delivery(
     _: dict = Depends(verify_auth),
 ):
     server = await _get_server(server_id, db)
+    saved = saved_access(server, await ssh_access.load_rules(db))
     return {
         "image_delivery": server.image_delivery or "auto",
         "ssh_host": server.ssh_host or host_from_url(server.url),
-        "ssh_port": server.ssh_port or 22,
-        "ssh_user": server.ssh_user or "root",
-        # секреты не отдаём — только факт наличия
+        "ssh_port": saved.port,
+        "ssh_user": saved.user,
+        # откуда берётся вход: server | folder | global; None — входа нет нигде
+        "ssh_access_level": saved.login_level.value if saved.login_level else None,
+        "ssh_access_folder": server.folder if saved.login_level is AccessLevel.FOLDER else None,
+        # секреты не отдаём — только факт наличия своего входа у сервера
         "has_ssh_password": bool(server.ssh_password),
         "has_ssh_private_key": bool(server.ssh_private_key),
     }
@@ -130,7 +119,7 @@ async def set_image_delivery(
             raise HTTPException(400, "image_delivery: auto | ssh")
         server.image_delivery = req.image_delivery
 
-    _store_creds(server, req)
+    store_server_access(server, req.to_change(), ssh_host=req.ssh_host)
 
     await db.commit()
     return {"success": True}
@@ -146,7 +135,7 @@ async def deliver_image_to_server(
     """Доставить образ ноды по SSH и обновить её. Возвращает job_id — лог в стриме."""
     server = await _get_server(server_id, db)
     try:
-        target = resolve_ssh_target(server, **req.model_dump())
+        target = resolve_ssh_target(server, await ssh_access.load_rules(db), **req.model_dump())
     except SSHTargetError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -160,11 +149,12 @@ async def deliver_image_bulk(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth),
 ):
-    """Запустить доставку на несколько серверов. Серверы без кредов пропускаются с причиной."""
+    """Запустить доставку на несколько серверов. Серверы без доступа пропускаются с причиной."""
     servers = (await db.execute(
         select(Server).where(Server.id.in_(req.server_ids)).order_by(Server.position)
     )).scalars().all()
     found_ids = {s.id for s in servers}
+    rules = await ssh_access.load_rules(db)
 
     fallback = SSHAccessRequest(**req.model_dump(include=set(SSHCreds.model_fields)))
     targets: list[tuple[Server, SSHTarget]] = []
@@ -173,16 +163,16 @@ async def deliver_image_bulk(
         for sid in req.server_ids if sid not in found_ids
     ]
     for server in servers:
-        uses_fallback = not has_stored_creds(server)
+        uses_fallback = login_level(rules, server.folder, has_stored_creds(server)) is None
         try:
-            target = resolve_ssh_target(server, **fallback.model_dump()) if uses_fallback else resolve_ssh_target(server)
+            target = resolve_ssh_target(server, rules, **(fallback.model_dump() if uses_fallback else {}))
         except SSHTargetError as exc:
             skipped.append({"server_id": server.id, "name": server.name, "reason": exc.reason})
             continue
         if uses_fallback and req.save_creds:
-            _store_creds(server, fallback)
+            store_server_access(server, fallback.to_change())
             # Сохранение доступа сбросило закреплённый ключ хоста — цель без него
-            target = resolve_ssh_target(server)
+            target = resolve_ssh_target(server, rules)
         targets.append((server, target))
 
     if req.save_creds:

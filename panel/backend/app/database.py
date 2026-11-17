@@ -674,6 +674,8 @@ async def run_migrations(conn):
             ("ssh_private_key", "TEXT"),
             ("ssh_passphrase", "TEXT"),
             ("ssh_host_key", "TEXT"),
+            ("ssh_proxy", "TEXT"),
+            ("ssh_proxy_mode", "VARCHAR(10)"),
         ]
         for col_name, col_type in image_delivery_columns:
             if col_name not in columns:

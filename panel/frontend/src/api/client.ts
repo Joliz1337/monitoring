@@ -889,8 +889,13 @@ export const imageDeliveryJobStreamUrl = (jobId: string) =>
 export interface ImageDeliverySettings {
   image_delivery: 'auto' | 'ssh'
   ssh_host: string
+  // действующие порт и пользователь: свои, папки или общие
   ssh_port: number
   ssh_user: string
+  // откуда сервер берёт вход; null — входа нет ни на одном уровне
+  ssh_access_level: 'server' | 'folder' | 'global' | null
+  ssh_access_folder: string | null
+  // свой вход сервера
   has_ssh_password: boolean
   has_ssh_private_key: boolean
 }
@@ -950,6 +955,84 @@ export const nodeImageApi = {
       server_ids: serverIds, save_creds: saveCreds, ...creds,
     }),
   jobs: () => api.get<{ jobs: ImageDeliveryJobInfo[] }>('/servers/deliver-image/jobs'),
+}
+
+// SSH-доступ панели к серверам: общий, для папки, свой у сервера. Секреты write-only —
+// наружу только способ входа; прокси приходит без логина и пароля
+export type SshAccessScope = 'global' | 'folders' | 'servers'
+export type SshProxyMode = 'fallback' | 'always' | 'off'
+export type SshAccessPart = 'login' | 'port' | 'proxy'
+export type SshAccessLevelName = 'server' | 'folder' | 'global'
+
+export interface SshAccessLevel {
+  ssh_user: string | null
+  ssh_port: number | null
+  auth: 'password' | 'key' | null
+  proxy: string | null
+  proxy_mode: SshProxyMode | null
+}
+
+export interface SshAccessOverview {
+  global: SshAccessLevel | null
+  // servers === 0 — папка опустела, её доступ остался
+  folders: (SshAccessLevel & { folder: string; servers: number })[]
+  // серверы со своим входом или своим прокси
+  servers: (SshAccessLevel & { server_id: number; name: string; folder: string | null })[]
+  // откуда активные серверы берут вход
+  summary: { total: number; server: number; folder: number; global: number; none: number }
+  without_login: { server_id: number; name: string; folder: string | null }[]
+  without_login_total: number
+}
+
+export interface SshAccessTarget {
+  scope: SshAccessScope
+  folders?: string[]
+  server_ids?: number[]
+}
+
+// Поле не передано — не менять
+export type SshAccessChange = Omit<ImageDeliveryCreds, 'ssh_host'> & {
+  ssh_proxy?: string
+  ssh_proxy_mode?: SshProxyMode
+}
+
+export type SshCheckStatus =
+  | 'ok' | 'auth_failed' | 'unreachable' | 'host_key_changed' | 'bad_key' | 'no_creds' | 'not_root' | 'no_host'
+
+export interface SshCheckFailure {
+  server_id: number
+  name: string
+  status: SshCheckStatus
+  detail: string | null
+  // с какого уровня был вход, который не подошёл
+  login_level: SshAccessLevelName | null
+}
+
+export interface SshCheckState {
+  job_id: string
+  status: 'running' | 'done' | 'cancelled'
+  total: number
+  done: number
+  counts: Partial<Record<SshCheckStatus, number>>
+  // успешные входы, которым понадобился прокси
+  ok_via_proxy: number
+  // не больше лимита бэкенда; counts — по всем серверам
+  failed: SshCheckFailure[]
+  started_at: number
+  finished_at: number | null
+}
+
+export const sshAccessApi = {
+  overview: () => api.get<SshAccessOverview>('/ssh-access'),
+  save: (target: SshAccessTarget, change: SshAccessChange) =>
+    api.put<{ changed: number }>('/ssh-access', { ...target, ...change }),
+  clear: (target: SshAccessTarget, parts: SshAccessPart[]) =>
+    api.post<{ changed: number }>('/ssh-access/clear', { ...target, parts }),
+  startCheck: (target: SshAccessTarget) => api.post<{ job_id: string }>('/ssh-access/check', target),
+  checkState: () => api.get<{ check: SshCheckState | null }>('/ssh-access/check'),
+  cancelCheck: () => api.post<{ cancelled: boolean }>('/ssh-access/check/cancel'),
+  forgetHostKeys: (serverIds: number[]) =>
+    api.post<{ forgotten: number }>('/ssh-access/forget-host-keys', { server_ids: serverIds }),
 }
 
 export const serversApi = {

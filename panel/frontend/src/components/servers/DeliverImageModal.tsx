@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion } from 'framer-motion'
 import { X, Loader2, Upload, CheckCircle2, XCircle, RotateCcw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -6,11 +6,13 @@ import { toast } from 'sonner'
 import {
   nodeImageApi,
   imageDeliveryJobStreamUrl,
+  ImageDeliverySettings,
   NodeImageDeliveryEvent,
 } from '../../api/client'
 import { streamNdjsonGet } from '../../utils/ndjsonStream'
 import SshCredsFields, {
-  SSH_CREDS_DEFAULTS, SshCredsValue, credsFromSettings, hasStoredSshSecret, toDeliveryCreds,
+  SSH_CREDS_DEFAULTS, SshCredsValue, credsFromSettings, hasSshLogin, hasStoredSshSecret, sshAccessSourceText,
+  toDeliveryCreds,
 } from './SshCredsFields'
 import { Checkbox } from '../ui/Checkbox'
 
@@ -27,7 +29,8 @@ export default function DeliverImageModal({ serverId, serverName, jobId: initial
   const { t } = useTranslation()
 
   const [creds, setCreds] = useState<SshCredsValue>(SSH_CREDS_DEFAULTS)
-  const [hasStoredCreds, setHasStoredCreds] = useState(false)
+  // SSH-доступ сервера с бэкенда: свой, папки или общий; null — ещё не загружен
+  const [access, setAccess] = useState<ImageDeliverySettings | null>(null)
   const [saveCreds, setSaveCreds] = useState(false)
   const [editCreds, setEditCreds] = useState(false)
 
@@ -38,15 +41,22 @@ export default function DeliverImageModal({ serverId, serverName, jobId: initial
 
   const logEndRef = useRef<HTMLDivElement | null>(null)
 
-  useEffect(() => {
+  const loadAccess = useCallback(() => (
     nodeImageApi
       .getSettings(serverId)
       .then(({ data }) => {
         setCreds(credsFromSettings(data))
-        setHasStoredCreds(hasStoredSshSecret(data))
+        setAccess(data)
       })
       .catch(() => {})
-  }, [serverId])
+  ), [serverId])
+
+  useEffect(() => {
+    loadAccess()
+  }, [loadAccess])
+
+  const hasLogin = access !== null && hasSshLogin(access)
+  const hasOwnLogin = access !== null && hasStoredSshSecret(access)
 
   // Стрим переигрывает весь лог задачи, поэтому повторное открытие окна показывает его целиком
   useEffect(() => {
@@ -76,8 +86,8 @@ export default function DeliverImageModal({ serverId, serverName, jobId: initial
   const handleForgetCreds = async () => {
     try {
       await nodeImageApi.setSettings(serverId, { ssh_password: '', ssh_private_key: '', ssh_passphrase: '' })
-      setHasStoredCreds(false)
-      setEditCreds(true)
+      // Без своего входа серверу может достаться доступ папки или общий — это знает бэкенд
+      await loadAccess()
       toast.success(t('imageDelivery.creds_forgotten'))
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || t('imageDelivery.failed'))
@@ -86,7 +96,7 @@ export default function DeliverImageModal({ serverId, serverName, jobId: initial
 
   const handleDeliver = async () => {
     setStarting(true)
-    const useForm = !hasStoredCreds || editCreds
+    const useForm = !hasLogin || editCreds
     const body = useForm ? toDeliveryCreds(creds) : {}
     try {
       if (useForm && saveCreds) {
@@ -131,18 +141,20 @@ export default function DeliverImageModal({ serverId, serverName, jobId: initial
         ) : (
           <>
             <p className="text-sm text-dark-400 mb-4">{t('imageDelivery.desc')}</p>
-            {(hasStoredCreds && !editCreds) ? (
+            {(access && hasLogin && !editCreds) ? (
               <div className="mb-4 space-y-2">
                 <div className="text-sm text-dark-300 bg-dark-800/40 border border-dark-700/40 rounded-lg px-3 py-2">
-                  {t('imageDelivery.using_stored', { user: creds.user, host: creds.host, port: creds.port })}
+                  {sshAccessSourceText(access, t)}
                 </div>
                 <div className="flex gap-4 text-xs">
                   <button type="button" onClick={() => setEditCreds(true)} className="text-accent-400 hover:underline">
-                    {t('imageDelivery.change_creds')}
+                    {t(hasOwnLogin ? 'imageDelivery.change_creds' : 'imageDelivery.set_own_creds')}
                   </button>
-                  <button type="button" onClick={handleForgetCreds} className="text-danger hover:underline">
-                    {t('imageDelivery.forget_creds')}
-                  </button>
+                  {hasOwnLogin && (
+                    <button type="button" onClick={handleForgetCreds} className="text-danger hover:underline">
+                      {t('imageDelivery.forget_creds')}
+                    </button>
+                  )}
                 </div>
               </div>
             ) : (

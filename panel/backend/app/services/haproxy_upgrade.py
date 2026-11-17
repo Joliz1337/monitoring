@@ -31,7 +31,7 @@ from app.services.deploy_service import (
 )
 from app.services.http_client import get_external_client
 from app.services.remnawave_node_install import HostInstallJobManager, run_install_on_node
-from app.services.ssh_target import SSHTarget, SSHTargetError, resolve_ssh_target
+from app.services.ssh_target import SshAccessRules, SSHTarget, SSHTargetError, resolve_ssh_target
 
 logger = logging.getLogger(__name__)
 
@@ -218,18 +218,19 @@ async def _agent_then_ssh(
         yield event
 
 
-def _saved_ssh_target(server: Server) -> tuple[Optional[SSHTarget], Optional[str]]:
+def _saved_ssh_target(server: Server, rules: SshAccessRules) -> tuple[Optional[SSHTarget], Optional[str]]:
     try:
-        return resolve_ssh_target(server), None
+        return resolve_ssh_target(server, rules), None
     except SSHTargetError as exc:
         return None, str(exc)
 
 
-def start_upgrade(server: Server, ssh_target: Optional[SSHTarget] = None) -> str:
+def start_upgrade(server: Server, rules: SshAccessRules, ssh_target: Optional[SSHTarget] = None) -> str:
     """Запустить обновление по SSH с загрузкой через панель (ssh_target) или через
-    агента ноды — с повтором по сохранённому SSH-доступу, если сервер не скачал обновление."""
+    агента ноды — с повтором по SSH-доступу сервера (свой, папки или общий), если
+    сервер не скачал обновление."""
     if ssh_target is not None:
         events = install_via_panel(ssh_target, build_haproxy_upgrade_command)
     else:
-        events = _agent_then_ssh(server, *_saved_ssh_target(server))
+        events = _agent_then_ssh(server, *_saved_ssh_target(server, rules))
     return _manager.start(server, _queued(events))

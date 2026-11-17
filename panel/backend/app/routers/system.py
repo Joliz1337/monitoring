@@ -23,12 +23,20 @@ from app.database import get_db, async_session
 from app.models import Server, PanelSettings
 from app.routers.proxy import start_node_update
 from app.security import is_direct_local_request
-from app.services import node_rollout, node_update_watcher, release_versions, update_channel, upstream_commit
+from app.services import (
+    node_rollout,
+    node_update_watcher,
+    release_versions,
+    ssh_access,
+    update_channel,
+    upstream_commit,
+)
 from app.services.haproxy_upgrade import describe_haproxy
 from app.services.net_utils import panel_ip_info
 from app.services.panel_host_metrics import HostHistoryPeriod, load_host_history
 from app.services.server_status import get_offline_threshold, resolve_status
 from app.services.shutdown_hooks import run_shutdown_hooks
+from app.services.ssh_target import login_level
 from app.services.update_source import GIT_REF_PATTERN, render_clone_step
 from app.services.wildcard_ssl import USE_FOR_PANEL_SETTING
 
@@ -270,21 +278,28 @@ async def get_version_base(
     current_version = get_current_version()
     latest = await release_versions.latest_versions()
 
+    # Страница перечитывает этот ответ раз в несколько секунд, поэтому свой вход
+    # сервера проверяется признаком в запросе: загрузка записей целиком
+    # расшифровывала бы SSH-секреты всего парка на каждый опрос
     result = await db.execute(
-        select(Server).where(Server.is_active == True).order_by(Server.position)
+        select(
+            Server.id, Server.name, Server.url, Server.folder,
+            Server.ssh_password.isnot(None).label("has_password"),
+            Server.ssh_private_key.isnot(None).label("has_private_key"),
+        ).where(Server.is_active == True).order_by(Server.position)
     )
-    servers = result.scalars().all()
+    rules = await ssh_access.load_rules(db)
 
     nodes = [
         {
-            "id": s.id,
-            "name": s.name,
-            "url": s.url,
-            "folder": s.folder,
-            # для массовой доставки образа по SSH: кому хватит сохранённых кредов
-            "has_ssh_creds": bool(s.ssh_password or s.ssh_private_key),
+            "id": row.id,
+            "name": row.name,
+            "url": row.url,
+            "folder": row.folder,
+            # для массовых окон: у кого SSH-доступ есть — свой, папки или общий
+            "has_ssh_creds": login_level(rules, row.folder, row.has_password or row.has_private_key) is not None,
         }
-        for s in servers
+        for row in result.all()
     ]
 
     return {

@@ -10,8 +10,11 @@ import { writeStorage } from '../../utils/storage'
 const EXPANDED_FOLDERS_KEY = 'ssh_expanded_folders'
 const NO_FOLDER = '__no_folder__'
 
+// Список умеет выбирать всё, у чего есть имя, адрес и папка, — не только серверы из стора
+type SelectableServer = Pick<ServerType, 'id' | 'name' | 'url' | 'folder' | 'is_active'>
+
 interface ServerSelectorProps {
-  servers: ServerType[]
+  servers: SelectableServer[]
   selectedIds: number[]
   onChange: (ids: number[]) => void
   activeId?: number | null
@@ -31,8 +34,8 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
   })
 
   const grouped = useMemo(() => {
-    const folders = new Map<string, ServerType[]>()
-    const noFolder: ServerType[] = []
+    const folders = new Map<string, SelectableServer[]>()
+    const noFolder: SelectableServer[] = []
     for (const s of servers) {
       if (s.folder) {
         if (!folders.has(s.folder)) folders.set(s.folder, [])
@@ -59,9 +62,9 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim()
     if (!q) return grouped
-    const matches = (s: ServerType) =>
+    const matches = (s: SelectableServer) =>
       s.name.toLowerCase().includes(q) || s.url.toLowerCase().includes(q)
-    const folders = new Map<string, ServerType[]>()
+    const folders = new Map<string, SelectableServer[]>()
     for (const [name, list] of grouped.folders) {
       const m = list.filter(matches)
       if (m.length) folders.set(name, m)
@@ -78,7 +81,7 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
     onChange(selectedIds.includes(id) ? selectedIds.filter(x => x !== id) : [...selectedIds, id])
   }
 
-  const toggleFolder = (folderServers: ServerType[]) => {
+  const toggleFolder = (folderServers: SelectableServer[]) => {
     const ids = folderServers.map(s => s.id)
     const allSelected = ids.every(id => selectedIds.includes(id))
     onChange(allSelected
@@ -86,7 +89,7 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
       : [...new Set([...selectedIds, ...ids])])
   }
 
-  const folderCheckState = (folderServers: ServerType[]): 'none' | 'some' | 'all' => {
+  const folderCheckState = (folderServers: SelectableServer[]): 'none' | 'some' | 'all' => {
     const ids = folderServers.map(s => s.id)
     const count = ids.filter(id => selectedIds.includes(id)).length
     if (count === 0) return 'none'
@@ -109,7 +112,7 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
     onChange(selectedIds.filter(id => !visible.has(id)))
   }
 
-  const renderServerRow = (server: ServerType) => (
+  const renderServerRow = (server: SelectableServer) => (
     <motion.label
       key={server.id}
       className={`flex items-center gap-3 p-2 rounded-xl cursor-pointer transition-all
@@ -143,7 +146,7 @@ export function ServerSelector({ servers, selectedIds, onChange, activeId, onOpe
     </motion.label>
   )
 
-  const renderGroup = (key: string, label: string, allServers: ServerType[], visibleServers: ServerType[], isNoFolder: boolean) => {
+  const renderGroup = (key: string, label: string, allServers: SelectableServer[], visibleServers: SelectableServer[], isNoFolder: boolean) => {
     const checkState = folderCheckState(allServers)
     const isCollapsed = !expandedFolders.has(key)
     const selectedInGroup = allServers.filter(s => selectedIds.includes(s.id)).length

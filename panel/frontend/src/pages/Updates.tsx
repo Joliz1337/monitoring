@@ -21,6 +21,7 @@ import {
   ChevronRight,
   X,
   Globe,
+  KeyRound,
   type LucideIcon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -42,6 +43,7 @@ import BulkDeliverImageModal from '../components/servers/BulkDeliverImageModal'
 import NodeUpdateCard, { NodeState } from '../components/updates/NodeUpdateCard'
 import HAProxyUpgradeModal, { HAProxyUpgradeTarget } from '../components/updates/HAProxyUpgradeModal'
 import DownloadProxyModal, { DownloadProxyTarget } from '../components/updates/DownloadProxyModal'
+import SshAccessModal, { SshAccessNode } from '../components/sshAccess/SshAccessModal'
 
 // Пока идёт обновление ноды, SSH-доставка или обновление HAProxy хоть на одной ноде — статусы на карточках обновляются с этим шагом
 const JOB_POLL_INTERVAL_MS = 3_000
@@ -193,6 +195,11 @@ export default function Updates() {
   const [nodeUpdates, setNodeUpdates] = useState<Map<number, NodeUpdateProgress>>(new Map())
   const [haproxyModal, setHaproxyModal] = useState<{ targets: HAProxyUpgradeTarget[]; jobId: string | null } | null>(null)
   const [proxyModal, setProxyModal] = useState<DownloadProxyTarget[] | null>(null)
+  // Окно SSH-доступа; serverIds — выбранные ноды, с ними оно открывается на «Серверам».
+  // Список нод окно получает снимком на момент открытия: состояние нод меняется на каждый
+  // ответ обхода, а окну нужны только имя, адрес и папка — так оно не перерисовывается вместе со страницей
+  const [sshAccessModal, setSshAccessModal] = useState<{ nodes: SshAccessNode[]; serverIds: number[] } | null>(null)
+  const closeSshAccess = useCallback(() => setSshAccessModal(null), [])
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [collapsedFolders, toggleFolderCollapsed] = useCollapsedFolders(COLLAPSED_FOLDERS_KEY)
 
@@ -708,6 +715,13 @@ export default function Updates() {
     await updateNodesInBulk(targets)
   }
 
+  const openSshAccess = (serverIds: number[]) => {
+    setSshAccessModal({
+      serverIds,
+      nodes: loadedNodes.map(({ id, name, url, folder }) => ({ id, name, url, folder })),
+    })
+  }
+
   const handleBulkDeliveryStarted = () => {
     setSelected(new Set())
     fetchDeliveryJobs()
@@ -1096,6 +1110,14 @@ export default function Updates() {
                 {t('updates.select_all')}
               </label>
             )}
+            {loadedNodes.length > 0 && (
+              <Tooltip label={t('updates.ssh_access_hint')} maxWidth={300}>
+                <button onClick={() => openSshAccess([])} className="btn btn-secondary">
+                  <KeyRound className="w-4 h-4" />
+                  {t('updates.ssh_access')}
+                </button>
+              </Tooltip>
+            )}
             {updateAllCount > 0 && (
               <motion.button
                 onClick={handleUpdateAllNodes}
@@ -1141,6 +1163,15 @@ export default function Updates() {
                   <button onClick={() => setBulkDeliverOpen(true)} className="btn btn-primary text-sm">
                     <Upload className="w-4 h-4" />
                     {t('updates.update_selected_ssh', { count: selectedNodes.length })}
+                  </button>
+                </Tooltip>
+                <Tooltip label={t('updates.ssh_access_hint')} maxWidth={300}>
+                  <button
+                    onClick={() => openSshAccess(selectedNodes.map(n => n.id))}
+                    className="btn btn-secondary text-sm"
+                  >
+                    <KeyRound className="w-4 h-4" />
+                    {t('updates.ssh_access_selected', { count: selectedNodes.length })}
                   </button>
                 </Tooltip>
                 <Tooltip label={t('updates.haproxy_selected_hint')} maxWidth={300}>
@@ -1282,6 +1313,15 @@ export default function Updates() {
             fetchHaproxyJobs()
           }}
           onClose={() => setHaproxyModal(null)}
+        />
+      )}
+
+      {sshAccessModal && (
+        <SshAccessModal
+          nodes={sshAccessModal.nodes}
+          initialServerIds={sshAccessModal.serverIds}
+          onChanged={loadBase}
+          onClose={closeSshAccess}
         />
       )}
 

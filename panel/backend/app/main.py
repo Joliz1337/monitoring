@@ -20,7 +20,7 @@ logging.getLogger("asyncssh").setLevel(logging.WARNING)
 
 from app.database import init_db, async_session
 from app.config import InsecureSettingsError, JWT_SECRET_MIN_LENGTH, get_settings
-from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles, reserved_ports, node_image, remnawave_install, haproxy_upgrade, xray_test, exit_proxy, source_pool, loss, port_usage
+from app.routers import servers, server_deploy, node_install_keys, auth_router, proxy, settings as settings_router, system, bulk_actions, blocklist, remnawave, alerts, billing, backup, ssh_security, ssh_access, infra, notes, wildcard_ssl, haproxy_profiles, torrent_blocker, firewall_profiles, antiddos, remnawave_nginx_profiles, traffic, dnat_profiles, reserved_ports, node_image, remnawave_install, haproxy_upgrade, xray_test, exit_proxy, source_pool, loss, port_usage
 from app.routers import gre, ip_search
 from app.services.metrics_collector import start_collector, stop_collector
 from app.services.blocklist_manager import get_blocklist_manager
@@ -260,6 +260,7 @@ app.include_router(alerts.router)
 app.include_router(billing.router)
 app.include_router(backup.router)
 app.include_router(ssh_security.router)
+app.include_router(ssh_access.router)
 app.include_router(infra.router)
 app.include_router(notes.router)
 app.include_router(wildcard_ssl.router)

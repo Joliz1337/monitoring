@@ -21,10 +21,11 @@ from app.models import Server
 from app.routers.node_image import SSHAccessRequest
 from app.routers.proxy import get_server_by_id, require_capability
 from app.routers.server_deploy import resolve_remnawave_cert
+from app.services import ssh_access
 from app.services.deploy_service import build_remnawave_install_command, install_via_panel
 from app.services.node_capabilities import Capability
 from app.services.remnawave_node_install import get_remnawave_install_manager, run_install_on_node
-from app.services.ssh_target import SSHTarget, SSHTargetError, resolve_ssh_target
+from app.services.ssh_target import SshAccessRules, SSHTarget, SSHTargetError, resolve_ssh_target
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ class RemnawaveInstallRequest(BaseModel):
     save_remnawave_cert: bool = False
     save_remnawave_cert_name: Optional[str] = None
     # Сервер за ТСПУ: установка по SSH, всё качается через панель.
-    # ssh — разовые креды поверх сохранённых у сервера
+    # ssh — разовые креды поверх SSH-доступа сервера (свой, папки или общий)
     via_panel: bool = False
     ssh: SSHAccessRequest = Field(default_factory=SSHAccessRequest)
 
@@ -55,7 +56,9 @@ async def install_remnawave(
 ):
     """Запустить фоновую установку ноды Remnawave на сервере."""
     server = await get_server_by_id(server_id, db)
-    ssh_target = _ssh_target_or_400(server, req.ssh) if req.via_panel else None
+    ssh_target = (
+        _ssh_target_or_400(server, await ssh_access.load_rules(db), req.ssh) if req.via_panel else None
+    )
     if ssh_target is None:
         # По SSH агент не участвует — право exec нужно только установке через него
         require_capability(server, Capability.EXEC, write=True)
@@ -77,9 +80,9 @@ async def install_remnawave(
     return {"job_id": job_id}
 
 
-def _ssh_target_or_400(server: Server, access: SSHAccessRequest) -> SSHTarget:
+def _ssh_target_or_400(server: Server, rules: SshAccessRules, access: SSHAccessRequest) -> SSHTarget:
     try:
-        return resolve_ssh_target(server, **access.model_dump())
+        return resolve_ssh_target(server, rules, **access.model_dump())
     except SSHTargetError as exc:
         raise HTTPException(400, str(exc)) from exc
 

@@ -11,9 +11,12 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
 
 try:
-    from app.models import Server  # noqa: E402
+    from ssh_fakes import FakeDb  # noqa: E402
+
+    from app.models import Server, SshAccessProfile  # noqa: E402
     from app.routers import node_image  # noqa: E402
 except ImportError as e:  # рантайм панели не установлен
     raise unittest.SkipTest(f"node image router requires the panel runtime: {e}")
@@ -21,17 +24,6 @@ except ImportError as e:  # рантайм панели не установле�
 
 def make_server(sid: int, **creds) -> Server:
     return Server(id=sid, name=f"node-{sid}", url=f"https://10.0.0.{sid}:9100", position=sid, **creds)
-
-
-class FakeDb:
-    def __init__(self, servers: list[Server]):
-        self._servers = servers
-        self.commit = mock.AsyncMock()
-
-    async def execute(self, _query):
-        result = mock.MagicMock()
-        result.scalars.return_value.all.return_value = self._servers
-        return result
 
 
 class BulkDeliverTests(unittest.IsolatedAsyncioTestCase):
@@ -83,6 +75,21 @@ class BulkDeliverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.ssh_password, "own-pass")
         self.assertEqual(bare.ssh_password, "shared")
         db.commit.assert_awaited_once()
+
+    async def test_inherited_access_counts_as_saved(self):
+        # Общий доступ задан заранее: серверу без своих кредов форма не нужна и не применяется
+        own = make_server(1, ssh_password="own-pass")
+        bare = make_server(2)
+        db = FakeDb([own, bare], [SshAccessProfile(folder="", ssh_password="shared-rule", ssh_port=2022)])
+        req = node_image.BulkDeliverRequest(server_ids=[1, 2], ssh_password="from-form", save_creds=True)
+
+        result = await node_image.deliver_image_bulk(req, db)
+
+        targets = self.started_targets()
+        self.assertEqual(targets[1].password, "own-pass")
+        self.assertEqual((targets[2].password, targets[2].port), ("shared-rule", 2022))
+        self.assertEqual(result["skipped"], [])
+        self.assertIsNone(bare.ssh_password)
 
     async def test_non_root_user_is_skipped(self):
         db = FakeDb([make_server(1)])

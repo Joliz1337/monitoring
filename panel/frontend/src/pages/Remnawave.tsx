@@ -9,7 +9,7 @@ import {
 import { remnawaveApi, serversApi, remnawaveInstallApi, remnawaveInstallStreamUrl, nodeImageApi } from '../api/client'
 import type {
   RemnawaveHwidDevice, RemnawaveAnomaly,
-  Server as ServerInfo, RemnawaveCertProfile, RemnawaveInstallEvent,
+  Server as ServerInfo, RemnawaveCertProfile, RemnawaveInstallEvent, ImageDeliverySettings,
 } from '../api/client'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -23,7 +23,8 @@ import { nodeAllows } from '../utils/nodeCapabilities'
 import { cleanInstallLogLine } from '../utils/installLog'
 import { Checkbox } from '../components/ui/Checkbox'
 import SshCredsFields, {
-  SSH_CREDS_DEFAULTS, SshCredsValue, credsFromSettings, hasSshSecret, hasStoredSshSecret, toDeliveryCreds,
+  SSH_CREDS_DEFAULTS, SshCredsValue, credsFromSettings, hasSshLogin, hasSshSecret, hasStoredSshSecret,
+  sshAccessSourceText, toDeliveryCreds,
 } from '../components/servers/SshCredsFields'
 import OverviewTab from '../components/remnawave/OverviewTab'
 import UserGeoDetails from '../components/remnawave/UserGeoDetails'
@@ -805,7 +806,9 @@ function InstallTab() {
   const [jobName, setJobName] = useState('')
   const [viaPanel, setViaPanel] = useState(false)
   const [sshCreds, setSshCreds] = useState<SshCredsValue>(SSH_CREDS_DEFAULTS)
-  const [hasStoredSsh, setHasStoredSsh] = useState(false)
+  // SSH-доступ выбранного сервера: свой, папки или общий; null — не загружен или входа нет
+  const [sshAccess, setSshAccess] = useState<ImageDeliverySettings | null>(null)
+  const hasStoredSsh = sshAccess !== null && hasSshLogin(sshAccess)
   const [editSsh, setEditSsh] = useState(false)
   const [saveSsh, setSaveSsh] = useState(false)
   // Сервер, чей сохранённый SSH-доступ уже загружен: до ответа форму не показываем,
@@ -837,12 +840,12 @@ function InstallTab() {
       .then(({ data }) => {
         if (cancelled) return
         setSshCreds(credsFromSettings(data))
-        setHasStoredSsh(hasStoredSshSecret(data))
+        setSshAccess(data)
       })
       .catch(() => {
         if (cancelled) return
         setSshCreds(SSH_CREDS_DEFAULTS)
-        setHasStoredSsh(false)
+        setSshAccess(null)
       })
       .finally(() => {
         if (cancelled) return
@@ -934,7 +937,7 @@ function InstallTab() {
       const cert = certMode === 'saved'
         ? { remnawave_cert_profile_id: certProfileId }
         : { remnawave_cert_inline: certInline.trim() }
-      // Пустое ssh — бэк возьмёт сохранённый у сервера доступ
+      // Пустое ssh — бэк возьмёт доступ сервера: свой, папки или общий
       const useSshForm = !hasStoredSsh || editSsh
       const ssh = useSshForm ? toDeliveryCreds(sshCreds) : {}
       if (viaPanel && useSshForm && saveSsh) {
@@ -1144,13 +1147,11 @@ function InstallTab() {
         {viaPanel && selectedServer && (
           sshLoadedFor !== selectedId ? (
             <Loader2 className="w-4 h-4 animate-spin text-dark-500" />
-          ) : hasStoredSsh && !editSsh ? (
+          ) : sshAccess && hasStoredSsh && !editSsh ? (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-              <span className="text-dark-300">
-                {t('imageDelivery.using_stored', { user: sshCreds.user, host: sshCreds.host, port: sshCreds.port })}
-              </span>
+              <span className="text-dark-300">{sshAccessSourceText(sshAccess, t)}</span>
               <button type="button" onClick={() => setEditSsh(true)} className="text-xs text-accent-400 hover:underline">
-                {t('imageDelivery.change_creds')}
+                {t(hasStoredSshSecret(sshAccess) ? 'imageDelivery.change_creds' : 'imageDelivery.set_own_creds')}
               </button>
             </div>
           ) : (

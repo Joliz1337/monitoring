@@ -21,17 +21,18 @@ import string
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator, Callable, Sequence
 
 import asyncssh
 
-from app.services.http_client import sanitize_proxy
 from app.services.install_tunnel import InstallTunnel, TunnelForwardingDenied, open_install_tunnel
 from app.services.ssh_target import (
     HostKeyChangedError,
     SSHTarget,
     open_ssh_connection,
+    open_ssh_routes,
     presented_host_key,
+    route_label,
     ssh_connect_kwargs,
 )
 from app.services import update_channel
@@ -283,7 +284,7 @@ def _run_install_once(connect_kwargs: dict, params: DeployParams) -> AsyncIterat
     needs_sudo = params.ssh_user.strip() != "root"
     return _stream_ssh_install(
         connect_kwargs,
-        params.socks5_proxy,
+        (params.socks5_proxy,),
         params.via_panel,
         lambda tunnel_proxy: _build_command(params, tunnel_proxy),
         sudo_password=params.ssh_password if needs_sudo else None,
@@ -304,7 +305,7 @@ async def install_via_panel(target: SSHTarget, command_for: CommandForProxy) -> 
         return
 
     async for event in _stream_ssh_install(
-        connect_kwargs, target.socks5_proxy, True, command_for, server_id=target.server_id,
+        connect_kwargs, target.routes, True, command_for, server_id=target.server_id,
     ):
         if event["type"] == "_result":
             yield {"type": "done", "exit_code": event["exit_code"]}
@@ -314,7 +315,7 @@ async def install_via_panel(target: SSHTarget, command_for: CommandForProxy) -> 
 
 async def _stream_ssh_install(
     connect_kwargs: dict,
-    socks5_proxy: str | None,
+    routes: Sequence[str | None],
     via_panel: bool,
     command_for: CommandForProxy,
     sudo_password: str | None = None,
@@ -331,8 +332,11 @@ async def _stream_ssh_install(
     result: dict | None = None
 
     try:
-        async with await open_ssh_connection(connect_kwargs, socks5_proxy, server_id) as conn:
-            via_proxy =f" через SOCKS5 {sanitize_proxy(socks5_proxy)}" if socks5_proxy else ""
+        opened = await open_ssh_routes(connect_kwargs, routes, server_id)
+        async with opened.conn as conn:
+            for route, reason in opened.skipped:
+                yield {"type": "log", "line": f"[panel] SSH {route_label(route)} не подключился: {reason}"}
+            via_proxy = f" {route_label(opened.route)}" if opened.route else ""
             yield {
                 "type": "log",
                 "line": f"[panel] SSH-подключение к {connect_kwargs['host']}:{connect_kwargs['port']} "

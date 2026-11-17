@@ -24,7 +24,7 @@ from app.services.node_capabilities import (
 from app.database import get_db
 from app.models import SERVER_NOTE_MAX_LENGTH, Server, ServerTraffic
 from app.auth import verify_auth
-from app.services import ping_block
+from app.services import ping_block, ssh_access
 from app.services.blocklist_manager import get_blocklist_manager
 from app.services.fleet_history import FleetPeriod, load_fleet_history
 from app.services.latest_metrics import get_latest_metrics
@@ -565,6 +565,7 @@ async def rename_server_folder(
         s.folder = new_name
     await db.commit()
     await ping_block.rename_folder(db, data.old_name, new_name)
+    await ssh_access.rename_folder(db, data.old_name, new_name)
     _invalidate_list_cache()
     # При слиянии с уже выбранной папкой ping закрывается и у пришедших серверов
     get_blocklist_manager().request_allowlist_push()
@@ -583,6 +584,7 @@ async def delete_server_folder(
         s.folder = None
     await db.commit()
     await ping_block.forget_folder(db, folder_name)
+    await ssh_access.forget_folder(db, folder_name)
     _invalidate_list_cache()
     get_blocklist_manager().request_allowlist_push()
     return {"success": True, "unfoldered": len(servers)}

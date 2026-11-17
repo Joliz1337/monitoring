@@ -213,7 +213,7 @@ class FailureMessageTest(unittest.TestCase):
     def test_no_creds_ru(self):
         text = failure_message("ru", "nl-1", FailureReason.IMAGE_UNAVAILABLE, None, FallbackProblem.NO_CREDS)
         self.assertIn("nl-1", text)
-        self.assertIn("не сохранён SSH-доступ", text)
+        self.assertIn("SSH-доступ не задан", text)
 
     def test_ssh_failed_en(self):
         text = failure_message(

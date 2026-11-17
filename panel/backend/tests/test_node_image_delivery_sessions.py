@@ -7,9 +7,7 @@
 успех; к серверу с SOCKS5-прокси панель и по SSH ходит через него.
 """
 
-import asyncio
 import hashlib
-import ipaddress
 import os
 import shlex
 import sys
@@ -22,6 +20,9 @@ from unittest import mock
 import asyncssh
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
+
+from ssh_fakes import Socks5Proxy  # noqa: E402
 
 from app.services import node_image_delivery as module  # noqa: E402
 from app.services.node_image_cache import NodeImageArchive  # noqa: E402
@@ -150,59 +151,6 @@ def sftp_for(node: FakeNode):
     return NodeSftp
 
 
-class Socks5Proxy:
-    """SOCKS5 без аутентификации: запоминает, куда через него подключались."""
-
-    def __init__(self):
-        self.destinations: list[tuple[str, int]] = []
-        self._tasks: set[asyncio.Task] = set()
-        self._server: Optional[asyncio.AbstractServer] = None
-
-    async def start(self) -> int:
-        self._server = await asyncio.start_server(self._accept, "127.0.0.1", 0)
-        return self._server.sockets[0].getsockname()[1]
-
-    async def stop(self) -> None:
-        self._server.close()
-        for task in self._tasks:
-            task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-
-    async def _accept(self, reader, writer):
-        task = asyncio.current_task()
-        self._tasks.add(task)
-        try:
-            _version, methods = await reader.readexactly(2)
-            await reader.readexactly(methods)
-            writer.write(b"\x05\x00")
-            _version, _command, _reserved, address_type = await reader.readexactly(4)
-            if address_type == 1:
-                host = str(ipaddress.ip_address(await reader.readexactly(4)))
-            else:
-                host = (await reader.readexactly((await reader.readexactly(1))[0])).decode()
-            port = int.from_bytes(await reader.readexactly(2), "big")
-            self.destinations.append((host, port))
-            upstream_reader, upstream_writer = await asyncio.open_connection(host, port)
-            writer.write(b"\x05\x00\x00\x01" + bytes(6))
-            await asyncio.gather(
-                self._pipe(reader, upstream_writer), self._pipe(upstream_reader, writer),
-            )
-        except (asyncio.IncompleteReadError, OSError):
-            pass
-        finally:
-            writer.close()
-            self._tasks.discard(task)
-
-    @staticmethod
-    async def _pipe(reader, writer):
-        try:
-            while data := await reader.read(65536):
-                writer.write(data)
-                await writer.drain()
-        finally:
-            writer.close()
-
-
 class DeliverySessionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -234,7 +182,7 @@ class DeliverySessionTests(unittest.IsolatedAsyncioTestCase):
         self.port = acceptor.sockets[0].getsockname()[1]
 
     async def deliver(self, socks5_proxy: Optional[str] = None) -> list[dict]:
-        target = SSHTarget(host="127.0.0.1", port=self.port, password="pw", socks5_proxy=socks5_proxy)
+        target = SSHTarget(host="127.0.0.1", port=self.port, password="pw", routes=(socks5_proxy,))
         return [event async for event in module.deliver_image(target, "dev")]
 
     @staticmethod

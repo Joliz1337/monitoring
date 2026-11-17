@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { toast } from 'sonner'
 import Updates from '../src/pages/Updates'
-import { haproxyUpgradeApi, nodeImageApi, systemApi } from '../src/api/client'
+import { haproxyUpgradeApi, nodeImageApi, sshAccessApi, systemApi } from '../src/api/client'
 
 const settings = vi.hoisted(() => ({ updateBranch: 'main', fetchSettings: () => {} }))
 vi.mock('../src/stores/settingsStore', () => ({ useSettingsStore: () => settings }))
@@ -97,5 +97,36 @@ describe('Updates: запуск обновления нод со страниц�
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith(`srv-3: ${REFUSAL}`), WAIT)
     expect(updateNode).toHaveBeenCalledTimes(1)
     expect(toast.warning).not.toHaveBeenCalled()
+  })
+})
+
+describe('Updates: SSH-доступ настраивается заранее, без запуска обновления', () => {
+  const NO_ACCESS = {
+    global: null, folders: [], servers: [],
+    summary: { total: FLEET_SIZE, server: 0, folder: 0, global: 0, none: FLEET_SIZE },
+    without_login: [], without_login_total: 0,
+  }
+
+  it('кнопка «SSH-доступ» открывает окно, сохранение перечитывает список нод', async () => {
+    const { updateNode } = mockApi()
+    vi.spyOn(sshAccessApi, 'overview').mockImplementation(() => respond(NO_ACCESS))
+    vi.spyOn(sshAccessApi, 'checkState').mockImplementation(() => respond({ check: null }))
+    const save = vi.spyOn(sshAccessApi, 'save').mockImplementation(() => respond({ changed: 1 }))
+    const deliverBulk = vi.spyOn(nodeImageApi, 'deliverBulk')
+    render(<Updates />)
+    await screen.findByRole('button', { name: `Обновить все ноды (${FLEET_SIZE})` }, WAIT)
+    const baseReads = vi.mocked(systemApi.getVersionBase).mock.calls.length
+
+    fireEvent.click(screen.getByRole('button', { name: 'SSH-доступ' }))
+    expect(await screen.findByText('SSH-доступ для обновлений', {}, WAIT)).toBeTruthy()
+    fireEvent.change(screen.getByPlaceholderText('SSH-пароль'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }))
+
+    await waitFor(() => expect(save).toHaveBeenCalledWith({ scope: 'global' }, { ssh_password: 'pw' }), WAIT)
+    await waitFor(
+      () => expect(vi.mocked(systemApi.getVersionBase).mock.calls.length).toBeGreaterThan(baseReads), WAIT,
+    )
+    expect(updateNode).not.toHaveBeenCalled()
+    expect(deliverBulk).not.toHaveBeenCalled()
   })
 })
