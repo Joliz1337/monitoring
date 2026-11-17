@@ -21,14 +21,21 @@ export interface AddressGroup {
   chronicStrikes?: number
 }
 
-export interface NodeGroup {
-  owner: string | null
+// Карточки блока — по нодам, чьи это адреса, либо по релеям, на которых они отключены
+export type GroupBy = 'node' | 'relay'
+
+export interface CardGroup {
+  // Имя ноды-владельца либо id релея
+  key: string
+  // Подпись карточки; null — адреса не ноды панели
+  title: string | null
   addresses: AddressGroup[]
 }
 
 type AddressRef = Pick<QuarantineItem, 'target' | 'ip' | 'port' | 'owner'>
+type Addresses = Pick<QuarantineOverview, 'items' | 'chronic'>
 
-function groupByAddress({ items, chronic }: QuarantineOverview, mergePorts: boolean): AddressGroup[] {
+function groupByAddress({ items, chronic }: Addresses, mergePorts: boolean): AddressGroup[] {
   const groups = new Map<string, AddressGroup>()
   const groupOf = ({ target, ip, port, owner }: AddressRef): AddressGroup => {
     const key = mergePorts ? ip : target
@@ -65,14 +72,39 @@ function attentionFirst(addresses: AddressGroup[]): AddressGroup[] {
   return [...addresses].sort((left, right) => ranks.get(left)! - ranks.get(right)!)
 }
 
-export function groupByNode(view: QuarantineOverview, mergePorts: boolean): NodeGroup[] {
+export function groupByNode(view: QuarantineOverview, mergePorts: boolean): CardGroup[] {
   const nodes = new Map<string | null, AddressGroup[]>()
   for (const address of groupByAddress(view, mergePorts)) {
     const addresses = nodes.get(address.owner) ?? []
     nodes.set(address.owner, addresses)
     addresses.push(address)
   }
-  return [...nodes].map(([owner, addresses]) => ({ owner, addresses: attentionFirst(addresses) }))
+  return [...nodes].map(([owner, addresses]) => ({ key: owner ?? '', title: owner, addresses: attentionFirst(addresses) }))
+}
+
+// Карточка релея — что отключено именно на нём. Адрес с постоянными проблемами, который сейчас
+// в работе, ни на одном релее не отключён и сюда не попадает. Выше — релей с большим числом
+// адресов: карточек показывается ограниченное число, и нужнее всего те, где больше отключено
+export function groupByRelay({ items }: QuarantineOverview, mergePorts: boolean): CardGroup[] {
+  const relays = new Map<number, { name: string; items: QuarantineItem[] }>()
+  for (const item of items) {
+    const relay = relays.get(item.server_id) ?? { name: item.server_name, items: [] }
+    relays.set(item.server_id, relay)
+    relay.items.push(item)
+  }
+  return [...relays]
+    .map(([id, relay]) => ({
+      key: String(id),
+      title: relay.name,
+      addresses: attentionFirst(groupByAddress({ items: relay.items, chronic: [] }, mergePorts)),
+    }))
+    .sort((left, right) =>
+      right.addresses.length - left.addresses.length || left.title.localeCompare(right.title, undefined, { numeric: true }))
+}
+
+// Сколько адресов в блоке — одно число при любой группировке карточек
+export function countAddresses(view: QuarantineOverview, mergePorts: boolean): number {
+  return groupByAddress(view, mergePorts).length
 }
 
 // Релеи адреса с одним состоянием и одной причиной идут одной строкой

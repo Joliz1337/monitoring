@@ -494,6 +494,148 @@ describe('Потери: блок «Отключённые адреса»', () =>
   })
 })
 
+describe('Потери: отключённые адреса по релеям', () => {
+  const GROUP_BY_KEY = 'loss_quarantine_group_by'
+  const byRelays = () => fireEvent.click(screen.getByRole('radio', { name: 'По релеям' }))
+  const cardNames = () => screen.getAllByRole('region').map(region => region.getAttribute('aria-label'))
+  const rowIn = (relay: string, address: string) =>
+    within(card(relay)).getByText(address).closest('li') as HTMLElement
+
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(Date, 'now').mockReturnValue(NOW * 1000)
+  })
+
+  it('по умолчанию карточки — ноды, по переключателю — релеи со своими адресами', () => {
+    show(overview([
+      ...on('176.97.210.169:8449', [BRIDGE_3, BRIDGE_5], { owner: 'тубо' }),
+      ...on('193.141.60.121:8449', [BRIDGE_3]),
+    ]))
+    expect(cardNames()).toEqual(['тубо', 'Тубо 2'])
+
+    byRelays()
+
+    expect(cardNames()).toEqual(['Вк мост 3', 'Вк мост 5'])
+    expect(rowsOf('Вк мост 3')).toHaveLength(2)
+    expect(rowsOf('Вк мост 5')).toHaveLength(1)
+    expect(card('Вк мост 3').textContent).toContain('2 адреса · отключено 2')
+  })
+
+  it('в строке адреса — чья это нода, а не список релеев', () => {
+    show(overview(on('176.97.210.169:8449', [BRIDGE_3, BRIDGE_5], { owner: 'тубо', sessions: 7 })))
+    byRelays()
+
+    const row = rowIn('Вк мост 3', '176.97.210.169:8449').textContent
+    expect(row).toContain('тубо · не отвечает как клиент · 7 соед.')
+    expect(row).not.toContain('Вк мост 5')
+  })
+
+  it('адрес не ноды панели подписан как чужой', () => {
+    show(overview(on('203.0.113.7:443', [BRIDGE_3], { owner: null })))
+    byRelays()
+
+    expect(rowIn('Вк мост 3', '203.0.113.7:443').textContent).toContain('не нода панели · не отвечает как клиент')
+  })
+
+  it('выбор запоминается', () => {
+    const view = overview(on('193.141.60.121:8449', [BRIDGE_3]))
+    const { unmount } = show(view)
+    byRelays()
+    expect(localStorage.getItem(GROUP_BY_KEY)).toBe('relay')
+    unmount()
+
+    show(view)
+    expect(cardNames()).toEqual(['Вк мост 3'])
+    fireEvent.click(screen.getByRole('radio', { name: 'По серверам' }))
+    expect(cardNames()).toEqual(['Тубо 2'])
+    expect(localStorage.getItem(GROUP_BY_KEY)).toBe('node')
+  })
+
+  it('выше — релей, где отключено больше адресов, при равенстве — по имени', () => {
+    show(overview([
+      ...on('193.141.60.121:8449', [BRIDGE_5, BRIDGE_3, [9, 'Ланд']]),
+      ...on('193.141.60.129:8449', [BRIDGE_5]),
+    ]))
+    byRelays()
+
+    expect(cardNames()).toEqual(['Вк мост 5', 'Вк мост 3', 'Ланд'])
+  })
+
+  it('число в заголовке — адреса, а не пары «релей — адрес»', () => {
+    show(overview([
+      ...on('193.141.60.121:8449', [BRIDGE_3, BRIDGE_5]),
+      ...on('193.141.60.129:8449', [BRIDGE_3]),
+    ]))
+    const title = () => screen.getByRole('heading', { name: 'Отключённые адреса' }).parentElement?.textContent
+    expect(title()).toContain('Отключённые адреса2')
+
+    byRelays()
+
+    expect(title()).toContain('Отключённые адреса2')
+  })
+
+  it('«Вернуть» возвращает адрес только на релее этой карточки', async () => {
+    const release = vi.spyOn(lossApi, 'releaseQuarantine').mockResolvedValue({ data: { released: true } } as never)
+    const { onReleased } = show(overview(on('193.141.60.129:8443', [BRIDGE_3, BRIDGE_5])))
+    byRelays()
+
+    fireEvent.click(within(rowIn('Вк мост 5', '193.141.60.129:8443')).getByRole('button', { name: 'Действия' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Вернуть' }))
+
+    await waitFor(() => expect(onReleased).toHaveBeenCalledTimes(1))
+    expect(release.mock.calls).toEqual([[5, '193.141.60.129:8443']])
+  })
+
+  it('«Вернуть все» возвращает всё отключённое на этом релее', async () => {
+    const release = vi.spyOn(lossApi, 'releaseQuarantine').mockResolvedValue({ data: { released: true } } as never)
+    const { onReleased } = show(overview([
+      ...on('193.141.60.121:8449', [BRIDGE_3, BRIDGE_5]),
+      ...on('193.141.60.129:8449', [BRIDGE_3]),
+    ]))
+    byRelays()
+
+    fireEvent.click(releaseAllButton('Вк мост 3', 'Вернуть все 2'))
+    fireEvent.click(releaseAllButton('Вк мост 3', 'Точно вернуть 2?'))
+
+    await waitFor(() => expect(onReleased).toHaveBeenCalledTimes(1))
+    expect(release.mock.calls).toEqual([[3, '193.141.60.121:8449'], [3, '193.141.60.129:8449']])
+  })
+
+  it('«Не различать порты» склеивает порты адреса и в карточке релея', () => {
+    show(overview([
+      ...on('193.141.60.129:8443', [BRIDGE_3]),
+      ...on('193.141.60.129:8449', [BRIDGE_3]),
+    ]))
+    byRelays()
+    expect(rowsOf('Вк мост 3')).toHaveLength(2)
+
+    mergePorts()
+
+    expect(rowsOf('Вк мост 3')).toHaveLength(1)
+    expect(rowIn('Вк мост 3', '193.141.60.129').textContent).toContain(':8443, :8449')
+  })
+
+  it('адрес, который сейчас в работе, в карточки релеев не попадает — об этом сказано', () => {
+    show(overview([], {
+      chronic: [{ target: '194.107.126.137:8443', ip: '194.107.126.137', port: 8443, owner: 'Аворо нода', strikes: 5 }],
+    }))
+    byRelays()
+
+    expect(screen.queryAllByRole('region')).toHaveLength(0)
+    expect(screen.getByText(/На релеях сейчас ничего не отключено/)).toBeTruthy()
+  })
+
+  it('карточек показано не больше тридцати, остальные — по кнопке', () => {
+    show(overview(on('193.141.60.129:8443', relays(34))))
+    byRelays()
+    expect(screen.getAllByRole('region')).toHaveLength(30)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Показать все 34' }))
+
+    expect(screen.getAllByRole('region')).toHaveLength(34)
+  })
+})
+
 describe('Потери: насколько широко адрес не работает', () => {
   it('«везде» — только когда релеев больше одного и не работает на всех', () => {
     expect(spreadLevel({ failing: 12, total: 12 })).toBe('all')

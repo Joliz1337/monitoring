@@ -38,6 +38,8 @@ export interface AddressActions {
 
 interface Props extends AddressActions {
   group: AddressGroup
+  // Строка в карточке релея: релей уже назван карточкой, в строке — чья это нода
+  byRelay: boolean
   mergePorts: boolean
   now: number
   // null — судить не о чем: таблица потерь не загружена, адреса в ней нет или он везде работает
@@ -97,22 +99,27 @@ function When({ items, now }: { items: QuarantineItem[]; now: number }) {
   return <span className="text-dark-500">{t('loss.quarantine_in_service')}</span>
 }
 
-function Facts({ group }: { group: AddressGroup }) {
+function Where({ names }: { names: string[] }) {
+  const { t } = useTranslation()
+  if (names.length <= RELAYS_INLINE) return <>{names.join(', ')}</>
+  return (
+    <span title={relayList(names, t)} className="underline decoration-dotted decoration-dark-600 underline-offset-4">
+      {t('loss.quarantine_relays_count', { count: names.length })}
+    </span>
+  )
+}
+
+function Facts({ group, byRelay }: { group: AddressGroup; byRelay: boolean }) {
   const { t } = useTranslation()
   if (group.items.length === 0) return <>{t('loss.quarantine_chronic_in_service', { count: group.chronicStrikes })}</>
 
   const working = group.items.filter(item => item.state !== 'blocked')
   // Адрес, который нигде не отключён, описывается по релеям, где отключить его не удалось
   const shown = working.length > 0 ? working : group.items
-  const names = relayNames(shown)
   const sessions = working.reduce((sum, item) => sum + item.sessions, 0)
   return (
     <>
-      {names.length <= RELAYS_INLINE ? names.join(', ') : (
-        <span title={relayList(names, t)} className="underline decoration-dotted decoration-dark-600 underline-offset-4">
-          {t('loss.quarantine_relays_count', { count: names.length })}
-        </span>
-      )}
+      {byRelay ? (group.owner ?? t('loss.owner_unknown')) : <Where names={relayNames(shown)} />}
       {' · '}
       {reasonsBrief(shown, t)}
       {sessions > 0 && ` · ${t('loss.quarantine_sessions_short', { sessions: formatCount(sessions) })}`}
@@ -138,7 +145,7 @@ function Situation({ relays, sustainedSeconds, now }: { relays: QuarantineItem[]
 }
 
 export default function QuarantineAddressRow({
-  group, mergePorts, now, spread, sustainedSeconds, canExempt, onReleased, onExempt, onEdit,
+  group, byRelay, mergePorts, now, spread, sustainedSeconds, canExempt, onReleased, onExempt, onEdit,
 }: Props) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
@@ -209,7 +216,7 @@ export default function QuarantineAddressRow({
                 )}
               </span>
             </span>
-            <span className="block text-xs text-dark-400"><Facts group={group} /></span>
+            <span className="block text-xs text-dark-400"><Facts group={group} byRelay={byRelay} /></span>
             {refusals(group.items).map(([reason, relays]) => (
               <span key={reason} className="flex items-center gap-1.5 text-xs text-danger">
                 <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
