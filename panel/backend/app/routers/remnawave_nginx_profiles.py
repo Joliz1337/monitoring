@@ -20,6 +20,7 @@ from app.database import async_session_maker, get_db
 from app.models import RemnawaveNginxProfile, RemnawaveNginxSyncLog, Server
 from app.routers.rollouts import profile_rollout_state, start_profile_rollout
 from app.services.haproxy_profile_sync import compute_config_hash, is_server_online
+from app.services.node_capabilities import Capability
 from app.services.profile_rollouts import NO_PROGRESS, RolloutProgress
 from app.services.remnawave_nginx_config import (
     CLOUDFLARE_RANGES,
@@ -39,6 +40,11 @@ from app.services.remnawave_nginx_config import (
     replace_domain_with_placeholder,
     splice_rules,
 )
+from app.services.remnawave_nginx_power import (
+    set_nginx_enabled,
+    stop_nginx_after_unlink,
+    unlink_stop_skip,
+)
 from app.services.remnawave_nginx_sync import (
     NginxLinkError,
     apply_server_link,
@@ -47,7 +53,7 @@ from app.services.remnawave_nginx_sync import (
     sync_profile_to_servers,
 )
 from app.services.remnawave_nginx_validator import validate_config
-from app.routers.proxy import get_server_by_id, proxy_request
+from app.routers.proxy import get_server_by_id, proxy_request, require_capability
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +120,10 @@ class ServerDomainRequest(BaseModel):
     @classmethod
     def _check_domain(cls, v: str) -> str:
         return _normalize_domain(v)
+
+
+class ServerPowerRequest(BaseModel):
+    enabled: bool
 
 
 class RuleData(BaseModel):
@@ -438,6 +448,7 @@ async def delete_profile(profile_id: int, db: AsyncSession = Depends(get_db), _=
         .values(
             active_remnawave_nginx_profile_id=None,
             remnawave_nginx_sync_status=None,
+            remnawave_nginx_disabled=False,
         )
     )
     await db.delete(profile)
@@ -526,21 +537,61 @@ async def update_server_domain(
     return {"success": True}
 
 
-@router.delete("/{profile_id}/servers/{server_id}")
-async def unlink_server(profile_id: int, server_id: int, db: AsyncSession = Depends(get_db), _=Depends(verify_auth)):
+@router.put("/{profile_id}/servers/{server_id}/power")
+async def set_server_power(
+    profile_id: int, server_id: int, data: ServerPowerRequest,
+    db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
+):
+    """Включает или выключает nginx на привязанной ноде и запоминает выбор.
+
+    Отказ ноды — не ошибка запроса: ответ несёт `success: false` с её сообщением
+    и то состояние, которое в итоге записано в панели (`nginx_enabled`).
+    """
     server = await db.get(Server, server_id)
-    if not server:
-        raise HTTPException(404, "Server not found")
+    if not server or server.active_remnawave_nginx_profile_id != profile_id:
+        raise HTTPException(404, "Server not linked to this profile")
+    require_capability(server, Capability.REMNAWAVE, write=True)
+
+    result = await set_nginx_enabled(db, server, data.enabled)
+    return {
+        "success": result.success,
+        "message": result.message,
+        "nginx_enabled": not server.remnawave_nginx_disabled,
+    }
+
+
+@router.delete("/{profile_id}/servers/{server_id}")
+async def unlink_server(
+    profile_id: int, server_id: int, bg: BackgroundTasks,
+    db: AsyncSession = Depends(get_db), _=Depends(verify_auth),
+):
+    server = await db.get(Server, server_id)
+    # Отвязка гасит nginx на ноде, поэтому чужой профиль не трогаем: страница
+    # могла устареть, а сервер — уже работать под другим профилем
+    if not server or server.active_remnawave_nginx_profile_id != profile_id:
+        raise HTTPException(404, "Server not linked to this profile")
 
     # Домен сохраняем — это свойство ноды, пригодится при повторной привязке.
-    # Конфиг на ноде не трогаем: nginx принадлежит Remnawave-установке.
+    # Конфиг на ноде остаётся как есть.
     server.active_remnawave_nginx_profile_id = None
     server.remnawave_nginx_sync_status = None
     server.remnawave_nginx_config_hash = None
     server.remnawave_nginx_node_hash = None
     server.remnawave_nginx_last_sync_at = None
+    server.remnawave_nginx_disabled = False
     await db.commit()
-    return {"success": True}
+
+    # Без профиля панель nginx не управляет — гасим его, как HAProxy при отвязке.
+    # Офлайн-ноду, закрытый раздел и старый агент остановить нельзя: причину
+    # страница узнаёт из ответа и не обещает оператору остановку
+    skip = unlink_stop_skip(server)
+    if skip is None:
+        bg.add_task(_bg_stop_nginx, server_id)
+    return {
+        "success": True,
+        "nginx_stop_scheduled": skip is None,
+        "nginx_stop_skipped": skip.value if skip else None,
+    }
 
 
 # ==================== Sync ====================
@@ -627,6 +678,7 @@ async def get_servers_status(profile_id: int, db: AsyncSession = Depends(get_db)
             "sync_status": s.remnawave_nginx_sync_status,
             "is_synced": expected_hash is not None and s.remnawave_nginx_config_hash == expected_hash,
             "detected": s.remnawave_nginx_detected,
+            "nginx_enabled": not s.remnawave_nginx_disabled,
             "last_sync_at": s.remnawave_nginx_last_sync_at.isoformat() if s.remnawave_nginx_last_sync_at else None,
         })
     return items
@@ -729,3 +781,16 @@ async def _bg_sync_server(profile_id: int, server_id: int):
                 await sync_profile_to_servers(profile, db, server_ids=[server_id], ensure_started=True)
         except Exception as e:
             logger.error("Background remnawave nginx sync failed for server %s: %s", server_id, e)
+
+
+async def _bg_stop_nginx(server_id: int):
+    """Остановка nginx на ноде после отвязки от профиля."""
+    async with async_session_maker() as db:
+        server = await db.get(Server, server_id)
+    # Сервер успели привязать снова — привязка сама поднимает nginx, гасить нельзя
+    if not server or server.active_remnawave_nginx_profile_id is not None:
+        return
+    try:
+        await stop_nginx_after_unlink(server)
+    except Exception as e:
+        logger.error("Background remnawave nginx stop failed for server %s: %s", server_id, e)

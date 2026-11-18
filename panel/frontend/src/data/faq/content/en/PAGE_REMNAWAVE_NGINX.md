@@ -61,6 +61,16 @@ The certificate itself must already exist on the node — before applying, the n
 
 Set when linking and substituted for `{{DOMAIN}}` — in `server_name` and, if the placeholder is left there, in the certificate paths. Use the domain clients actually connect to on that node. If the profile options set a wildcard domain, the field is hidden — every node serves its subdomains.
 
+## Turning nginx off on a node
+
+The button in a linked server's row stops the `remnawave-nginx` container; clients going through it are disconnected, `remnanode` keeps running.
+
+- An nginx that is turned off stays off: it does not come back after a server reboot, and a profile rollout writes the config to disk without starting the container. If it is started on the node behind the panel's back (`docker compose up -d`, a certbot hook), the panel stops it again within half a minute.
+- Turn it back on with the same button. If nginx crashes on start (port in use, broken config), the node stops it and returns the reason from the container log.
+- Restarting the container is unavailable while nginx is off — turn it on first.
+- **Unlinking a server from the profile stops nginx too** — like HAProxy in HAProxy configs. The config on the node stays. The panel cannot stop an offline node and says so; linking the server to a profile again starts nginx.
+- Requires node agent 10.36.2 or newer — on an older one the panel asks you to update it.
+
 ## For Xray to see the real IP
 
 Without this, stats, device limits and bans all show `127.0.0.1`:

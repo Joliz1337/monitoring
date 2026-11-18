@@ -3464,6 +3464,7 @@ export interface RemnawaveNginxServerStatus {
   sync_status: 'synced' | 'pending' | 'failed' | 'denied' | null
   is_synced: boolean
   detected: boolean
+  nginx_enabled: boolean
   last_sync_at: string | null
 }
 
@@ -3500,7 +3501,14 @@ export const remnawaveNginxApi = {
   updateServerDomain: (profileId: number, serverId: number, domain: string) =>
     api.put(`/remnawave-nginx-profiles/${profileId}/servers/${serverId}/domain`, { domain }),
   unlinkServer: (profileId: number, serverId: number) =>
-    api.delete(`/remnawave-nginx-profiles/${profileId}/servers/${serverId}`),
+    api.delete<{ success: boolean; nginx_stop_scheduled: boolean; nginx_stop_skipped: 'offline' | 'denied' | 'old_agent' | null }>(
+      `/remnawave-nginx-profiles/${profileId}/servers/${serverId}`,
+    ),
+  // Запуск на ноде ждёт docker compose up и проверку, что nginx не упал сразу
+  setServerPower: (profileId: number, serverId: number, enabled: boolean) =>
+    api.put<{ success: boolean; message: string; nginx_enabled: boolean }>(
+      `/remnawave-nginx-profiles/${profileId}/servers/${serverId}/power`, { enabled }, { timeout: 140000 },
+    ),
   syncAll: (profileId: number) =>
     api.post<{ job: ProfileRollout<RemnawaveNginxSyncResult> }>(`/remnawave-nginx-profiles/${profileId}/sync`),
   syncState: (profileId: number) =>

@@ -65,6 +65,11 @@ CERT_HINT = (
 # (http внутри http), поэтому монтирование переводится на главный конфиг.
 FULL_CONFIG_MOUNT = "/etc/nginx/nginx.conf"
 
+# `restart: always` из compose поднимает остановленный вручную контейнер после
+# перезапуска Docker или сервера. `unless-stopped` отличается только этим:
+# остановленное вручную остаётся остановленным
+STOPPED_RESTART_POLICY = "unless-stopped"
+
 # Строки, помеченные этим маркером, панель заполняет безопасными дефолтами,
 # а нода пересчитывает под конкретный хост при каждом применении. Убрал
 # маркер — значение считается заданным вручную и не трогается.
@@ -103,6 +108,7 @@ _DOCKER_TIMEOUT = 30
 _RELOAD_TIMEOUT = 30
 _RESTART_TIMEOUT = 90
 _COMPOSE_UP_TIMEOUT = 100
+_STOP_TIMEOUT = 30
 _VALIDATE_TIMEOUT = 60
 # nginx с занятым портом или битым рантаймом падает в первую секунду после
 # старта; столько контейнер должен прожить, чтобы считаться поднявшимся
@@ -130,6 +136,14 @@ class DockerResult:
     @property
     def output(self) -> str:
         return (self.stdout + self.stderr).strip()
+
+
+@dataclass
+class RunState:
+    """Контейнер в данный момент; контейнера нет — пустые поля и ноль рестартов."""
+    container_id: str
+    status: str
+    restarts: int
 
 
 def validate_install_path(path: str) -> str:
@@ -743,7 +757,7 @@ class RemnawaveNginxManager:
         return self._apply_result(True, "Конфиг применён; " + "; ".join(changes),
                                   validated=True, reloaded=True, hash_=new_hash, remounted=remounted)
 
-    async def _container_survived_start(self) -> tuple[bool, str]:
+    async def _container_survived_start(self, expected_restarts: int = 0) -> tuple[bool, str]:
         """После пересоздания контейнер должен не просто стартовать, а пережить
         запуск nginx: `nginx -t` кандидата не биндит порты, и занятый порт
         валит nginx уже в работающем контейнере. `restart: always` тут же
@@ -751,6 +765,10 @@ class RemnawaveNginxManager:
         рестартом («unable to upgrade to tcp, received 409») — без логов
         причины. Поэтому статус опрашивается несколько секунд, а при падении
         логи контейнера забираются в отчёт до отката, пока они ещё есть.
+
+        `expected_restarts` — счётчик рестартов, с которым контейнер должен
+        дожить до конца проверки: ноль после запуска или пересоздания, прежнее
+        значение у контейнера, который уже работал.
         """
         deadline = time.monotonic() + _STARTUP_GRACE_SEC
         while True:
@@ -759,10 +777,10 @@ class RemnawaveNginxManager:
                 NGINX_CONTAINER, timeout=10,
             )
             if not state.success:
-                return False, f"контейнер не найден после пересоздания: {state.output}"
+                return False, f"контейнер не найден после запуска: {state.output}"
             status, _, rest = state.stdout.strip().partition("|")
             restarts, _, exit_code = rest.partition("|")
-            if status != "running" or restarts != "0":
+            if status != "running" or restarts != str(expected_restarts):
                 logs = await _docker("logs", "--tail", _STARTUP_LOG_LINES, NGINX_CONTAINER, timeout=10)
                 return False, (
                     f"nginx упал сразу после старта (статус {status}, код выхода {exit_code}, "
@@ -790,6 +808,67 @@ class RemnawaveNginxManager:
         if not result.success:
             return False, result.output
         return True, "Контейнер remnawave-nginx перезапущен"
+
+    async def stop(self) -> tuple[bool, str]:
+        async with self._apply_lock:
+            return await self._stop_for_good()
+
+    async def _stop_for_good(self) -> tuple[bool, str]:
+        container = await self.container_status()
+        if not container["exists"]:
+            return True, "Контейнер remnawave-nginx не найден — останавливать нечего"
+        result = await _docker("stop", NGINX_CONTAINER, timeout=_STOP_TIMEOUT)
+        if not result.success:
+            return False, f"Не удалось остановить контейнер: {result.output}"
+        # Политика меняется у уже остановленного контейнера. У работающего
+        # docker update идёт в runc и срывается, если nginx в эту секунду падает
+        # (цикл рестартов), — и до остановки дело бы не дошло
+        policy = await _docker("update", "--restart", STOPPED_RESTART_POLICY, NGINX_CONTAINER)
+        if not policy.success:
+            # Просили остановить — остановлен, поэтому это успех с оговоркой, а не
+            # отказ: по отказу панель сочла бы nginx работающим и разошлась с нодой
+            logger.warning("remnawave nginx: restart policy not changed: %s", policy.output)
+            return True, (
+                "Контейнер остановлен, но политика перезапуска не сменилась — после "
+                f"перезагрузки сервера он запустится снова: {policy.output}"
+            )
+        return True, "Контейнер remnawave-nginx остановлен"
+
+    async def _run_state(self) -> RunState:
+        result = await _docker(
+            "inspect", "-f", "{{.Id}}|{{.State.Status}}|{{.RestartCount}}", NGINX_CONTAINER, timeout=10,
+        )
+        if not result.success:
+            return RunState("", "", 0)
+        container_id, _, rest = result.stdout.strip().partition("|")
+        status, _, restarts = rest.partition("|")
+        return RunState(container_id, status, int(restarts) if restarts.isdigit() else 0)
+
+    async def start(self, path: str) -> tuple[bool, str]:
+        path = validate_install_path(path)
+        async with self._apply_lock:
+            before = await self._run_state()
+            # compose, а не docker start: правки docker-compose.yml, сделанные
+            # применением конфига при остановленном контейнере, подхватывает
+            # только пересоздание
+            started, message = await self._compose_up(path)
+            if not started:
+                return False, f"Контейнер не запустился: {message}"
+            # Запуск остановленного контейнера и пересоздание обнуляют счётчик
+            # рестартов; у контейнера, который работал и остался тем же, он
+            # прежний. Расти за время проверки он не должен ни в одном случае.
+            # По одному «запущен» судить нельзя: контейнер в цикле рестартов
+            # Docker тоже числит запущенным
+            after = await self._run_state()
+            untouched = before.status == "running" and after.container_id == before.container_id
+            survived, startup_report = await self._container_survived_start(
+                before.restarts if untouched else 0
+            )
+            if survived:
+                return True, "Контейнер remnawave-nginx запущен"
+            stopped, stop_message = await self._stop_for_good()
+            outcome = "контейнер остановлен обратно" if stopped else f"остановить его не удалось ({stop_message})"
+            return False, f"Запуск не удался, {outcome}: {explain_validation_error(startup_report)}"
 
     @staticmethod
     def _apply_result(success: bool, message: str, validated: bool = False,

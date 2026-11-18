@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities'
 import { useOpenIds } from '../hooks/useOpenIds'
 import { useProfileRollout } from '../hooks/useProfileRollout'
-import { Waypoints, Plus, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Globe, Lock, RotateCw, Download, Settings2, Power } from 'lucide-react'
+import { Waypoints, Plus, RefreshCw, Trash2, Server, ChevronDown, ChevronRight, Edit3, Link2, Unlink, Loader2, CheckCircle2, XCircle, AlertCircle, Clock, History, X, Code, Save, AlertTriangle, Activity, Globe, Lock, RotateCw, Download, Settings2, Power, Play, Square } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -422,6 +422,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const [loading, setLoading] = useState(true)
   const [syncingServerId, setSyncingServerId] = useState<number | null>(null)
   const [restartingServerId, setRestartingServerId] = useState<number | null>(null)
+  const [powerServerId, setPowerServerId] = useState<number | null>(null)
   const [showLog, setShowLog] = useState(false)
   const [showAddServer, setShowAddServer] = useState(false)
   const [linkingServer, setLinkingServer] = useState<RemnawaveNginxAvailableServer | null>(null)
@@ -687,6 +688,20 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
     } finally { setRestartingServerId(null) }
   }
 
+  const handleSetPower = async (serverId: number, enabled: boolean) => {
+    if (!enabled && !confirm(t('remnawave_nginx.disable_confirm'))) return
+    setPowerServerId(serverId)
+    try {
+      const res = await remnawaveNginxApi.setServerPower(profileId, serverId, enabled)
+      if (res.data.success) toast.success(t(enabled ? 'remnawave_nginx.nginx_switched_on' : 'remnawave_nginx.nginx_switched_off'))
+      else toast.error(res.data.message || t('remnawave_nginx.power_error'))
+      await fetchServersStatus()
+      refreshNodeStatus(serverId)
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || t('remnawave_nginx.power_error'))
+    } finally { setPowerServerId(null) }
+  }
+
   // ---- Server binding ----
   const handleLinkServer = async () => {
     if (!linkingServer) return
@@ -704,10 +719,13 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
   const handleUnlinkServer = async (serverId: number) => {
     if (!confirm(t('remnawave_nginx.unlink_confirm'))) return
     try {
-      await remnawaveNginxApi.unlinkServer(profileId, serverId)
-      toast.success(t('remnawave_nginx.server_unlinked'))
-      await fetchDetail(); onRefreshList()
+      const res = await remnawaveNginxApi.unlinkServer(profileId, serverId)
+      const skipped = res.data.nginx_stop_skipped
+      if (skipped) toast.warning(t(`remnawave_nginx.unlinked_not_stopped_${skipped}`))
+      else toast.success(t('remnawave_nginx.server_unlinked'))
     } catch { toast.error(t('remnawave_nginx.unlink_error')) }
+    // И после ошибки: сервер могли отвязать в другой вкладке, и строка на экране устарела
+    await fetchDetail(); onRefreshList()
   }
 
   const handleSaveDomain = async (serverId: number) => {
@@ -1072,6 +1090,10 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
               {serversStatus.map(s => {
                 const nodeStatus = nodeStatuses[s.server_id]
                 const running = nodeStatus?.container?.running
+                // У выключенного nginx остановленный контейнер — норма, о ней говорит метка;
+                // значок остаётся только для того, что успело подняться в обход панели
+                const showContainerState = s.online && running != null && (s.nginx_enabled || running)
+                const switching = powerServerId === s.server_id
                 return (
                   <div key={s.server_id} className={`flex items-center justify-between px-3 py-2 rounded-lg bg-dark-900/30 border border-dark-800/50 ${s.online ? '' : 'opacity-60'}`}>
                     <div className="flex items-center gap-2.5 min-w-0">
@@ -1082,7 +1104,7 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         </span>
                       </Tooltip>
                       <span className="text-sm text-dark-200 truncate">{s.server_name}</span>
-                      {s.online && running != null && (
+                      {showContainerState && (
                         <Tooltip label={running ? t('remnawave_nginx.container_running') : t('remnawave_nginx.container_stopped')}>
                           <Activity className={`w-3.5 h-3.5 shrink-0 ${running ? 'text-green-400/70' : 'text-red-400/70'}`} />
                         </Tooltip>
@@ -1112,9 +1134,24 @@ function ProfileDetailPanel({ profileId, onRefreshList }: { profileId: number; o
                         </button>
                       )}
                       <SyncStatusBadge status={s.sync_status} online={s.online} />
+                      {!s.nginx_enabled && (
+                        <Tooltip label={t('remnawave_nginx.nginx_off_hint')}>
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border text-dark-300 bg-dark-700/40 border-dark-600/40">
+                            <Square className="w-3 h-3" /> {t('remnawave_nginx.nginx_off')}
+                          </span>
+                        </Tooltip>
+                      )}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
                       {s.online && (
+                        <Tooltip label={t(s.nginx_enabled ? 'remnawave_nginx.disable_nginx' : 'remnawave_nginx.enable_nginx')}>
+                          <button onClick={() => handleSetPower(s.server_id, !s.nginx_enabled)} disabled={switching}
+                            className={`p-1.5 rounded-lg text-dark-400 transition-colors disabled:opacity-50 ${s.nginx_enabled ? 'hover:text-red-400 hover:bg-red-500/10' : 'hover:text-green-400 hover:bg-green-500/10'}`}>
+                            {switching ? <Loader2 className="w-4 h-4 animate-spin" /> : s.nginx_enabled ? <Square className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                          </button>
+                        </Tooltip>
+                      )}
+                      {s.online && s.nginx_enabled && (
                         <Tooltip label={t('remnawave_nginx.restart_container')}>
                           <button onClick={() => handleRestartNode(s.server_id)} disabled={restartingServerId === s.server_id}
                             className="p-1.5 rounded-lg text-dark-400 hover:text-yellow-400 hover:bg-yellow-500/10 transition-colors disabled:opacity-50">

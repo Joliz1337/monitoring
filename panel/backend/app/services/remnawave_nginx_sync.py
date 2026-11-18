@@ -56,6 +56,7 @@ def apply_server_link(
 
     Домен — свойство ноды: без нового значения прежний сохраняется,
     а обязателен он лишь когда шаблону есть что им заменить.
+    Сервер, у которого nginx был выключен в панели, после привязки включён.
     """
     if domain:
         server.remnawave_nginx_domain = domain
@@ -64,6 +65,8 @@ def apply_server_link(
 
     server.active_remnawave_nginx_profile_id = profile.id
     server.remnawave_nginx_sync_status = "pending"
+    # Привязка — явная просьба поднять nginx с этим профилем
+    server.remnawave_nginx_disabled = False
 
 
 @dataclass
@@ -283,7 +286,10 @@ async def sync_profile_to_servers(
     async def _guarded(server: Server) -> SyncResult:
         async with semaphore:
             result = await _sync_single_server(
-                server, profile.config_content, profile.id, install_path, ensure_started
+                server, profile.config_content, profile.id, install_path,
+                # Выключенный оператором nginx раскатка не поднимает: конфиг
+                # ложится на диск, контейнер остаётся остановленным
+                ensure_started and not server.remnawave_nginx_disabled,
             )
         progress.record(result)
         return result

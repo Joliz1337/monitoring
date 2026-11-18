@@ -198,6 +198,10 @@ class Server(Base):
     remnawave_nginx_last_sync_at = Column(DateTime(timezone=True), nullable=True)
     remnawave_nginx_sync_status = Column(String(20), nullable=True)  # synced | pending | failed
     remnawave_nginx_detected = Column(Boolean, default=False, server_default="false", nullable=False)
+    # nginx выключен оператором в панели: раскатки и досинхронизация его не
+    # запускают, а запущенный в обход панели останавливается снова.
+    # Имеет смысл только у привязанного сервера — отвязка флаг сбрасывает
+    remnawave_nginx_disabled = Column(Boolean, default=False, server_default="false", nullable=False)
 
     # Учёт трафика: версия агента решает, умеет ли нода отдавать счётчики портов,
     # tracked_ports — JSON-список портов, за которыми нода их ведёт

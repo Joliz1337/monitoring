@@ -308,6 +308,9 @@ class CallSiteCoverageTest(unittest.TestCase):
         "services/node_update_watcher.py",
         "services/recovery_reconciler.py",
         "services/remnawave_nginx_sync.py",
+        # кнопку гейтит роутер remnawave_nginx_profiles: require_capability(REMNAWAVE, write);
+        # отвязка и фоновая проверка — server_allows внутри, отказ = пропуск ноды
+        "services/remnawave_nginx_power.py",
         # гейт в роутере remnawave_install: require_capability(EXEC) до старта job
         "services/remnawave_node_install.py",
         "services/reserved_ports_sync.py",

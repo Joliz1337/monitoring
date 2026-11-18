@@ -1456,6 +1456,9 @@ async def restart_remnawave_nginx(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
+    # docker restart поднял бы остановленный контейнер в обход выключателя
+    if server.remnawave_nginx_disabled:
+        raise HTTPException(status_code=409, detail="nginx выключен в панели — сначала включите его")
     return await proxy_request(server, "/api/remnawave/nginx/restart", method="POST", timeout=120.0)
 
 

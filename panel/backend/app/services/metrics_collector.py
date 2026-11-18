@@ -1401,8 +1401,10 @@ class MetricsCollector:
 
     async def _haproxy_pending_sync_loop(self):
         """Досинхронизирует ожившие ноды с отложенной раскаткой конфигов (offline → online):
-        HAProxy-профили и nginx-профили Remnawave в одном цикле."""
+        HAProxy-профили и nginx-профили Remnawave в одном цикле. Здесь же гасится
+        nginx, который выключен в панели, но снова запущен на ноде."""
         from app.services.haproxy_profile_sync import retry_pending_haproxy_syncs
+        from app.services.remnawave_nginx_power import stop_reappeared_nginx
         from app.services.remnawave_nginx_sync import retry_pending_remnawave_nginx_syncs
 
         await asyncio.sleep(20)  # дать нодам подняться после старта
@@ -1421,6 +1423,10 @@ class MetricsCollector:
                     logger.info("Remnawave nginx: досинхронизировано %d оживших нод", synced)
             except Exception as e:
                 logger.error(f"Remnawave nginx pending sync error: {e}")
+            try:
+                await stop_reappeared_nginx()
+            except Exception as e:
+                logger.error(f"Remnawave nginx power check error: {e}")
             await asyncio.sleep(self.HAPROXY_RETRY_INTERVAL)
 
     async def _xray_check_loop(self):

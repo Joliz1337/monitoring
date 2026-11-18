@@ -108,3 +108,18 @@ async def nginx_reload():
 async def nginx_restart():
     success, message = await get_remnawave_nginx_manager().restart()
     return NginxActionResponse(success=success, message=message)
+
+
+@router.post("/nginx/stop", response_model=NginxActionResponse)
+async def nginx_stop():
+    success, message = await get_remnawave_nginx_manager().stop()
+    return NginxActionResponse(success=success, message=message)
+
+
+@router.post("/nginx/start", response_model=NginxActionResponse)
+async def nginx_start(path: str = PathParam):
+    try:
+        success, message = await get_remnawave_nginx_manager().start(path)
+    except InvalidInstallPathError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return NginxActionResponse(success=success, message=message)

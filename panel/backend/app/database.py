@@ -721,6 +721,7 @@ async def run_migrations(conn):
             ("remnawave_nginx_last_sync_at", "TIMESTAMP"),
             ("remnawave_nginx_sync_status", "VARCHAR(20)"),
             ("remnawave_nginx_detected", "BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("remnawave_nginx_disabled", "BOOLEAN NOT NULL DEFAULT FALSE"),
         ]
         for col_name, col_type in remnawave_nginx_columns:
             if col_name not in columns:
