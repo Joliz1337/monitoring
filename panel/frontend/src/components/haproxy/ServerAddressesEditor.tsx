@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { AlertTriangle, Loader2, Save } from 'lucide-react'
 import { haproxyProfilesApi, proxyApi, type HAProxyServerStatus } from '../../api/client'
 import { Checkbox } from '../ui/Checkbox'
+import { formatMoment, isAnswerCopyMissing } from '../servers/SavedAnswerNote'
 
 interface NodeAddress {
   address: string
@@ -40,13 +41,15 @@ export default function ServerAddressesEditor({ profileId, server, onSaved }: {
   server: HAProxyServerStatus
   onSaved: () => void
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [nodeAddresses, setNodeAddresses] = useState<NodeAddressesState>({ status: 'idle' })
   const [listen, setListen] = useState(() => new Set(server.listen_ips))
   const [source, setSource] = useState(() => new Set(server.source_ips))
   const [saving, setSaving] = useState(false)
+  // Сервер офлайн: панель отдаёт адреса, которые запомнила, с моментом, когда их получила
+  const [savedAt, setSavedAt] = useState<string | null>(null)
 
-  const canLoad = server.addresses_supported && server.online
+  const canLoad = server.addresses_supported
   const unsupportedText = t('haproxy_configs.addresses_unsupported', { version: server.addresses_min_node_version })
 
   useEffect(() => {
@@ -69,11 +72,15 @@ export default function ServerAddressesEditor({ profileId, server, onSaved }: {
           }
         }
         setNodeAddresses({ status: 'ready', addresses: [...found.values()] })
+        setSavedAt(res.data.saved_at ?? null)
       })
       .catch((err: any) => {
-        if (!cancelled) {
-          setNodeAddresses({ status: 'error', message: err?.response?.data?.detail || t('haproxy_configs.addresses_load_error') })
-        }
+        if (cancelled) return
+        setSavedAt(null)
+        const message = isAnswerCopyMissing(err)
+          ? t('haproxy_configs.addresses_offline')
+          : err?.response?.data?.detail || t('haproxy_configs.addresses_load_error')
+        setNodeAddresses({ status: 'error', message })
       })
     return () => { cancelled = true }
   }, [canLoad, server.server_id, unsupportedText, t])
@@ -90,12 +97,13 @@ export default function ServerAddressesEditor({ profileId, server, onSaved }: {
 
   const notice = !server.addresses_supported
     ? unsupportedText
-    : !server.online
-      ? t('haproxy_configs.addresses_offline')
-      : nodeAddresses.status === 'error'
-        ? nodeAddresses.message
-        : nodeAddresses.status === 'ready' && nodeRows.length === 0
-          ? t('haproxy_configs.addresses_no_ipv4')
+    : nodeAddresses.status === 'error'
+      ? nodeAddresses.message
+      : nodeAddresses.status === 'ready' && nodeRows.length === 0
+        ? t('haproxy_configs.addresses_no_ipv4')
+        : savedAt
+          // Правку адресов офлайн-серверу панель ставит в очередь — об этом и пометка
+          ? `${t('node_silent.title')}. ${t('node_silent.saved_queued', { time: formatMoment(savedAt, i18n.language) })}`
           : null
 
   const dirty = !sameAddresses(listen, server.listen_ips) || !sameAddresses(source, server.source_ips)

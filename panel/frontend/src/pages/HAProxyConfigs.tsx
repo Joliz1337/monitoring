@@ -1188,8 +1188,9 @@ const LinkedServerRow = memo(function LinkedServerRow({
             </span>
           </Tooltip>
           <span className="text-sm text-dark-200 truncate">{s.server_name}</span>
-          {/* Состояние службы HAProxy на ноде */}
-          {s.online && s.haproxy_running != null && (
+          {/* Состояние службы HAProxy на ноде; у сервера офлайн — последнее известное,
+              строка при этом приглушена и помечена красной точкой */}
+          {s.haproxy_running != null && (
             <Tooltip label={s.haproxy_running ? t('haproxy_configs.haproxy_running') : t('haproxy_configs.haproxy_stopped')}>
               <Activity className={`w-3.5 h-3.5 shrink-0 ${s.haproxy_running ? 'text-green-400/70' : 'text-red-400/70'}`} />
             </Tooltip>
