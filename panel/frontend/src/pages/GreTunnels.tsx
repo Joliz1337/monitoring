@@ -14,6 +14,8 @@ import {
 } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import SilentNodeBanner from '../components/servers/SilentNodeBanner'
+import { formatMoment } from '../components/servers/SavedAnswerNote'
 import GreTunnelCard from '../components/gre/GreTunnelCard'
 import GreTunnelForm from '../components/gre/GreTunnelForm'
 import { nodeAllows } from '../utils/nodeCapabilities'
@@ -48,7 +50,7 @@ const STATUS_ICON: Record<GreInstallStatus, { icon: JSX.Element; border: string 
 export default function GreTunnels() {
   const { uid, serverId } = useParams()
   const navigate = useNavigate()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const { servers, fetchServers } = useServersStore()
   const server = servers.find(s => s.id === Number(serverId))
   const systemWritable = nodeAllows(server, 'system', 'write')
@@ -141,6 +143,9 @@ export default function GreTunnels() {
   }
 
   const canConfigure = systemWritable && !!view && view.supported_by_node
+  // Правку туннелей молчащая нода не блокирует: она сохраняется в панели и доезжает,
+  // когда нода вернётся. Отключается только то, что спрашивает саму ноду
+  const nodeOffline = view?.online === false
   const status = view ? STATUS_ICON[view.install_status] : null
   const statusHint = view && ['failed', 'denied', 'unsupported', 'drift', 'pending'].includes(view.install_status)
     ? view.sync_error ?? view.node_error
@@ -183,7 +188,8 @@ export default function GreTunnels() {
         <Tooltip label={t('common.refresh_data')}>
           <motion.button
             onClick={handleRefresh}
-            disabled={isRefreshing}
+            disabled={isRefreshing || nodeOffline}
+            aria-label={t('common.refresh_data')}
             className="p-2.5 hover:bg-dark-800 rounded-xl text-dark-400 hover:text-dark-200 transition-all disabled:opacity-50"
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
@@ -195,17 +201,26 @@ export default function GreTunnels() {
 
       {!systemWritable && <div className="mb-4"><NodeRestrictedNotice server={server} variant="readonly" /></div>}
 
+      {nodeOffline && (
+        <SilentNodeBanner>
+          {view.last_state_at && t('node_silent.saved_queued', { time: formatMoment(view.last_state_at, i18n.language) })}
+        </SilentNodeBanner>
+      )}
+
       {isLoading ? (
         <div className="flex items-center justify-center h-48">
           <Loader2 className="w-6 h-6 animate-spin text-dark-500" />
         </div>
-      ) : error ? (
-        <div className="card text-center py-12">
-          <XCircle className="w-12 h-12 text-danger/50 mx-auto mb-3" />
-          <p className="text-danger">{error}</p>
-        </div>
-      ) : view && (
+      ) : view ? (
         <div className="space-y-4">
+          {/* Опрос не прошёл, но туннели уже показаны: ошибка встаёт над ними, а не вместо них */}
+          {error && (
+            <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-danger/10 border border-danger/20 text-sm text-danger">
+              <XCircle className="w-5 h-5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
           {!view.supported_by_node && (
             <div className="flex items-start gap-3 px-4 py-3 rounded-xl bg-warning/10 border border-warning/20">
               <AlertTriangle className="w-5 h-5 text-warning shrink-0 mt-0.5" />
@@ -257,6 +272,8 @@ export default function GreTunnels() {
               key={tunnel.slot}
               serverId={view.server_id}
               tunnel={tunnel}
+              nodeOnline={view.online}
+              lastStateAt={view.last_state_at}
               editable={canConfigure}
               busy={saving || editing !== null}
               onEdit={() => setEditing(tunnel.slot)}
@@ -285,6 +302,11 @@ export default function GreTunnels() {
               {t('gre.next_text')}
             </div>
           )}
+        </div>
+      ) : error && (
+        <div className="card text-center py-12">
+          <XCircle className="w-12 h-12 text-danger/50 mx-auto mb-3" />
+          <p className="text-danger">{error}</p>
         </div>
       )}
     </div>

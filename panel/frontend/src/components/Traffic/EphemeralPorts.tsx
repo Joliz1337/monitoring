@@ -3,10 +3,13 @@ import { ChevronRight, Hash } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import ProgressBar from '../ui/ProgressBar'
 import { FAQIcon } from '../FAQ'
+import { SnapshotNote } from './SilentServerNotes'
 import type { EphemeralDestination, EphemeralPorts as EphemeralPortsData } from '../../api/client'
 
 interface EphemeralPortsProps {
   data: EphemeralPortsData
+  /** Нода не отвечает: занятость портов — из её последнего ответа, полученного в этот момент */
+  snapshotAt?: string
 }
 
 // Пороги те же, что у полосы заполнения, иначе зелёное «свободно» спорило бы
@@ -22,7 +25,7 @@ const freeColor = (held: number, capacity: number): string => {
 const occupied = (destination: EphemeralDestination): number =>
   destination.fast_held ?? destination.held
 
-export default function EphemeralPorts({ data }: EphemeralPortsProps) {
+export default function EphemeralPorts({ data, snapshotAt }: EphemeralPortsProps) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState<string | null>(data.sources[0]?.ip ?? null)
 
@@ -40,6 +43,7 @@ export default function EphemeralPorts({ data }: EphemeralPortsProps) {
         {t('ephemeral.title')}
         <FAQIcon screen="TRAFFIC_EPHEMERAL_PORTS" size="sm" />
       </h3>
+      {snapshotAt && <SnapshotNote takenAt={snapshotAt} className="mb-1" />}
       <p className="text-xs text-dark-400 mb-4">
         {data.fast_capacity === undefined
           ? t('ephemeral.range', {

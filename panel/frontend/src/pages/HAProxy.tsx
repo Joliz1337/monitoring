@@ -33,6 +33,8 @@ import {
 import { proxyApi, HAProxyRule, HAProxyStatus, HAProxyLiveStats, HAProxyStatRow, Certificate, FirewallRule, haproxyProfilesApi, portUsageApi, PortRange } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import SilentNodeBanner from '../components/servers/SilentNodeBanner'
+import { NoSavedAnswerNote, SavedAnswerNote, formatMoment, isAnswerCopyMissing } from '../components/servers/SavedAnswerNote'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatUptime } from '../utils/format'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
@@ -54,11 +56,15 @@ function statsStatusClass(status: string): string {
   return 'bg-dark-700/50 text-dark-400 border-dark-600/30'
 }
 
+// У кнопок этой страницы нет своего вида для disabled: без приглушения отключённые
+// при молчащей ноде выглядели бы рабочими
+const SILENT_CONTENT_CLASS = '[&_button:disabled]:opacity-40 [&_button:disabled]:cursor-not-allowed'
+
 export default function HAProxy() {
   const { uid, serverId } = useParams()
   const navigate = useNavigate()
   const { servers, fetchServers } = useServersStore()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const profilesEnabled = useModuleEnabled('haproxy-configs')
 
   const [status, setStatus] = useState<HAProxyStatus | null>(null)
@@ -66,7 +72,13 @@ export default function HAProxy() {
   const [certs, setCerts] = useState<string[]>([])
   const [certDetails, setCertDetails] = useState<Record<string, Certificate>>({})
   const [stats, setStats] = useState<HAProxyLiveStats | null>(null)
-  const waysByAddr = useAllWays(Number(serverId), stats !== null)
+  // Нода не отвечает: на странице её последний сохранённый ответ, в саму ноду страница
+  // не ходит и менять ничего не даёт
+  const [nodeSilent, setNodeSilent] = useState(false)
+  // Отложенное живое обновление стартует из замыкания прошлого рендера — признак ему нужен свежий
+  const nodeSilentRef = useRef(false)
+  const [panelCopyAt, setPanelCopyAt] = useState<string | null>(null)
+  const waysByAddr = useAllWays(Number(serverId), stats !== null && !nodeSilent)
   // false после 404 от ноды — агент старой версии без эндпоинта /haproxy/stats
   const [statsSupported, setStatsSupported] = useState(true)
   
@@ -118,6 +130,8 @@ export default function HAProxy() {
   const [configPath, setConfigPath] = useState('')
   const [configLoading, setConfigLoading] = useState(false)
   const [configError, setConfigError] = useState<string | null>(null)
+  const [configSavedAt, setConfigSavedAt] = useState<string | null>(null)
+  const [configCopyMissing, setConfigCopyMissing] = useState(false)
   const [configModalMouseDownOnOverlay, setConfigModalMouseDownOnOverlay] = useState(false)
   
   // Firewall states
@@ -153,6 +167,8 @@ export default function HAProxy() {
   const haproxyReadable = nodeAllows(server, 'haproxy', 'read')
   const haproxyWritable = nodeAllows(server, 'haproxy', 'write')
   const firewallReadable = nodeAllows(server, 'firewall', 'read')
+  // Команды HAProxy и сертификатов выполняет сама нода: молчащей их отдать некому
+  const canCommandHaproxy = haproxyWritable && !nodeSilent
 
   // HAProxy config profile info
   const [profileInfo, setProfileInfo] = useState<{ name: string; id: number } | null>(null)
@@ -184,7 +200,17 @@ export default function HAProxy() {
     [firewallRules]
   )
   
-  const applyCachedResponse = useCallback((data: { status?: HAProxyStatus; stats?: HAProxyLiveStats; rules?: { rules: HAProxyRule[] }; certs?: { certificates: Certificate[] }; firewall?: { rules: FirewallRule[]; active: boolean } }) => {
+  const markNodeSilent = useCallback((silent: boolean, copySavedAt: string | null = null) => {
+    nodeSilentRef.current = silent
+    setNodeSilent(silent)
+    setPanelCopyAt(copySavedAt)
+    // Открытое меню «Перезагрузить» осталось бы с пунктами, которые ничего не делают
+    if (silent) setReloadMenuOpen(false)
+  }, [])
+
+  const applyCachedResponse = useCallback((data: { status?: HAProxyStatus; stats?: HAProxyLiveStats; rules?: { rules: HAProxyRule[] }; certs?: { certificates: Certificate[] }; firewall?: { rules: FirewallRule[]; active: boolean }; cached_at?: string; node_silent_since?: string }) => {
+    const silentSince = data.node_silent_since
+    markNodeSilent(Boolean(silentSince), silentSince ? data.cached_at ?? silentSince : null)
     setStatus(data.status || null)
     setRules(data.rules?.rules || [])
     setCerts((data.certs?.certificates || []).map(c => c.domain))
@@ -213,7 +239,7 @@ export default function HAProxy() {
       firewallActive: data.firewall?.active || false,
       stats: data.stats || null,
     })
-  }, [saveToCache, setIsCached, setCachedAt])
+  }, [markNodeSilent, saveToCache, setIsCached, setCachedAt])
 
   // Initial data load — single request from panel DB cache
   const fetchData = useCallback(async () => {
@@ -223,7 +249,10 @@ export default function HAProxy() {
     try {
       const { data } = await proxyApi.getHAProxyCached(Number(serverId))
       applyCachedResponse(data)
-    } catch {
+    } catch (err) {
+      // «Копии нет» панель отвечает только за молчащую ноду: идти в неё за живыми данными бесполезно
+      const copyMissing = isAnswerCopyMissing(err)
+      markNodeSilent(copyMissing)
       const cached = loadFromCache()
       if (cached) {
         setStatus(cached.status)
@@ -235,12 +264,13 @@ export default function HAProxy() {
         setStats(cached.stats ?? null)
         setError(null)
       } else {
-        setError(t('haproxy.failed_fetch'))
+        // Молчащая нода без копии — не сбой загрузки: страница скажет, что показать за неё нечего
+        setError(copyMissing ? null : t('haproxy.failed_fetch'))
       }
     } finally {
       setIsLoading(false)
     }
-  }, [serverId, applyCachedResponse, loadFromCache, t])
+  }, [serverId, applyCachedResponse, markNodeSilent, loadFromCache, t])
 
   // Auto-refresh — single request from panel DB cache (lightweight, no loader)
   // Skips if live data was fetched recently (within 35s) to prevent stale cache overwriting fresh data
@@ -259,6 +289,8 @@ export default function HAProxy() {
   // Each request has its own catch — partial success updates what it can
   const refreshData = useCallback(async () => {
     if (!serverId || isRefreshing) return
+    // Каждый из шести запросов к молчащей ноде провисел бы до таймаута
+    if (nodeSilentRef.current) return
     setIsRefreshing(true)
     
     try {
@@ -335,7 +367,7 @@ export default function HAProxy() {
   
   // Quick status-only refresh
   const refreshStatus = async () => {
-    if (!serverId) return
+    if (!serverId || nodeSilentRef.current) return
     try {
       const statusRes = await proxyApi.getHAProxyStatus(Number(serverId))
       setStatus(statusRes.data)
@@ -343,9 +375,31 @@ export default function HAProxy() {
       // Silent fail
     }
   }
-  
+
+  // Кнопка «Обновить»: у молчащей ноды спрашивать нечего, перечитывается её копия из базы панели
+  const handleRefreshClick = async () => {
+    if (!nodeSilent) {
+      await refreshData()
+      return
+    }
+    setIsRefreshing(true)
+    // Пауза после живого обновления бережёт свежие данные от копии постарше; у
+    // молчащей ноды свежее копии ничего нет — кнопка должна перечитать её сразу
+    lastLiveRefreshRef.current = 0
+    await refreshFromCache()
+    setIsRefreshing(false)
+  }
+
   const liveRefreshRef = useRef<() => Promise<void>>()
   liveRefreshRef.current = refreshData
+
+  // Нода вернулась: копия в базе панели успела от неё отстать, спрашиваем саму ноду
+  const wasSilentRef = useRef(false)
+  useEffect(() => {
+    const nodeReturned = wasSilentRef.current && !nodeSilent
+    wasSilentRef.current = nodeSilent
+    if (nodeReturned) liveRefreshRef.current?.()
+  }, [nodeSilent])
 
   useEffect(() => {
     fetchServers()
@@ -375,7 +429,7 @@ export default function HAProxy() {
 
   useAutoRefresh(refreshStats, {
     immediate: false,
-    enabled: haproxyReadable && statsSupported && !collapsedSections.liveStats,
+    enabled: haproxyReadable && statsSupported && !collapsedSections.liveStats && !nodeSilent,
   })
 
   // Конфиг-генератор кладёт frontend `X` и backend `backend_X` в разные pxname —
@@ -415,7 +469,7 @@ export default function HAProxy() {
   }, [])
 
   const handleReload = async () => {
-    if (!haproxyWritable) return
+    if (!canCommandHaproxy) return
     setActionLoading('reload')
     try {
       await proxyApi.reloadHAProxy(Number(serverId))
@@ -428,7 +482,7 @@ export default function HAProxy() {
   }
 
   const handleRestart = async () => {
-    if (!haproxyWritable) return
+    if (!canCommandHaproxy) return
     setActionLoading('restart')
     try {
       await proxyApi.restartHAProxy(Number(serverId))
@@ -441,7 +495,7 @@ export default function HAProxy() {
   }
   
   const handleRenewCerts = async () => {
-    if (!haproxyWritable) return
+    if (!canCommandHaproxy) return
     if (certs.length === 0) return
     
     setActionLoading('renew')
@@ -502,7 +556,7 @@ export default function HAProxy() {
   }
   
   const handleRenewSingleCert = async (domain: string) => {
-    if (!haproxyWritable) return
+    if (!canCommandHaproxy) return
     setActionLoading(`renew-${domain}`)
     setRenewLog(null)
     setRenewLogExpanded(false)
@@ -540,7 +594,7 @@ export default function HAProxy() {
   }
   
   const handleStartHAProxy = async () => {
-    if (!haproxyWritable) return
+    if (!canCommandHaproxy) return
     setActionLoading('start')
     try {
       await proxyApi.startHAProxy(Number(serverId))
@@ -555,7 +609,7 @@ export default function HAProxy() {
   }
   
   const handleStopHAProxy = async () => {
-    if (!haproxyWritable) return
+    if (!canCommandHaproxy) return
     if (!confirm(t('haproxy.confirm_stop'))) return
     setActionLoading('stop')
     try {
@@ -571,8 +625,8 @@ export default function HAProxy() {
   }
   
   const handleGenerateCert = async (e: FormEvent) => {
-    if (!haproxyWritable) return
     e.preventDefault()
+    if (!canCommandHaproxy) return
     setCertFormError('')
     setCertErrorLog(null)
     setCertErrorExpanded(false)
@@ -617,8 +671,8 @@ export default function HAProxy() {
   }
   
   const handleUploadCert = async (e: FormEvent) => {
-    if (!haproxyWritable) return
     e.preventDefault()
+    if (!canCommandHaproxy) return
     setCertFormError('')
     setActionLoading('upload-cert')
     
@@ -646,7 +700,7 @@ export default function HAProxy() {
   }
   
   const handleDeleteCert = async (domain: string) => {
-    if (!haproxyWritable) return
+    if (!canCommandHaproxy) return
     if (!confirm(t('haproxy.confirm_delete_cert', { domain }))) return
     setActionLoading(`delete-cert-${domain}`)
     try {
@@ -662,6 +716,7 @@ export default function HAProxy() {
   // Firewall handlers
   const handleAddFirewallRule = async (e: FormEvent) => {
     e.preventDefault()
+    if (nodeSilent) return
     setFirewallFormError('')
     setFirewallErrorLog(null)
     setFirewallErrorExpanded(false)
@@ -704,6 +759,7 @@ export default function HAProxy() {
   }
   
   const handleDeleteFirewallRule = async (ruleNumber: number, port: number, protocol: string) => {
+    if (nodeSilent) return
     if (!confirm(t('firewall.confirm_delete', { number: ruleNumber, port, protocol }))) return
     setActionLoading(`delete-fw-${ruleNumber}`)
     try {
@@ -717,6 +773,7 @@ export default function HAProxy() {
   }
   
   const handleEnableFirewall = async () => {
+    if (nodeSilent) return
     setActionLoading('enable-fw')
     setFirewallFormError('')
     setFirewallErrorLog(null)
@@ -749,6 +806,7 @@ export default function HAProxy() {
   }
   
   const handleDisableFirewall = async () => {
+    if (nodeSilent) return
     if (!confirm(t('firewall.confirm_disable'))) return
     setActionLoading('disable-fw')
     setFirewallFormError('')
@@ -786,12 +844,19 @@ export default function HAProxy() {
     setShowConfigModal(true)
     setConfigLoading(true)
     setConfigError(null)
-    
+    setConfigCopyMissing(false)
+
     try {
       const res = await proxyApi.getHAProxyConfig(Number(serverId))
       setConfigContent(res.data.content)
       setConfigPath(res.data.path)
+      setConfigSavedAt(res.data.saved_at ?? null)
     } catch (err: unknown) {
+      // Молчащая нода без копии конфига — не ошибка загрузки: окно скажет, что показать нечего
+      if (isAnswerCopyMissing(err)) {
+        setConfigCopyMissing(true)
+        return
+      }
       const error = err as { response?: { data?: { detail?: string } } }
       setConfigError(error.response?.data?.detail || 'Failed to load config')
     } finally {
@@ -820,7 +885,14 @@ export default function HAProxy() {
       </motion.div>
     )
   }
-  
+
+  // Копии в базе панели может не оказаться — тогда на странице то, что запомнил браузер
+  const copyShownAt = panelCopyAt ?? cachedAt?.toISOString()
+  // Подпись ко всему, что показано за молчащую ноду; null у неё — показать нечего
+  const copyMoment = nodeSilent && copyShownAt ? formatMoment(copyShownAt, i18n.language) : null
+  // Пульсация — знак живых данных, а у молчащей ноды состояние показано как снимок
+  const showsLivePulse = Boolean(status?.running) && !nodeSilent
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -873,7 +945,7 @@ export default function HAProxy() {
         </div>
         <Tooltip label={t('common.refresh_data')}>
           <motion.button
-            onClick={refreshData}
+            onClick={handleRefreshClick}
             disabled={isRefreshing}
             className="p-2.5 hover:bg-dark-800 rounded-xl text-dark-400 hover:text-dark-200 transition-all disabled:opacity-50"
             whileHover={{ scale: 1.05 }}
@@ -924,19 +996,27 @@ export default function HAProxy() {
             </motion.div>
             <p className="text-dark-400">{error}</p>
           </motion.div>
+        ) : nodeSilent && !copyMoment ? (
+          <motion.div key="nothing-saved">
+            <SilentNodeBanner>{t('node_silent.nothing_saved')}</SilentNodeBanner>
+          </motion.div>
         ) : !haproxyReadable && !firewallReadable ? (
           <motion.div key="restricted">
             <NodeRestrictedNotice server={server} />
           </motion.div>
         ) : (
-          <motion.div key="content">
+          <motion.div key="content" className={nodeSilent ? SILENT_CONTENT_CLASS : undefined}>
+            {copyMoment && (
+              <SilentNodeBanner>{t('node_silent.saved_readonly', { time: copyMoment })}</SilentNodeBanner>
+            )}
+
             {/* Cached data indicator */}
             <AnimatePresence>
-              {isCached && (
+              {isCached && !nodeSilent && (
                 <CachedDataBanner cachedAt={cachedAt} />
               )}
             </AnimatePresence>
-            
+
             {!haproxyReadable && <NodeRestrictedNotice server={server} compact />}
 
             {haproxyReadable && <>
@@ -976,7 +1056,7 @@ export default function HAProxy() {
                       className={`w-12 h-12 rounded-xl flex items-center justify-center ${
                         status?.running ? 'bg-success/10' : 'bg-danger/10'
                       }`}
-                      animate={status?.running ? { scale: [1, 1.05, 1] } : {}}
+                      animate={showsLivePulse ? { scale: [1, 1.05, 1] } : {}}
                       transition={{ duration: 2, repeat: Infinity }}
                     >
                       {status?.running ? (
@@ -992,7 +1072,7 @@ export default function HAProxy() {
                       </p>
                     </div>
                   </div>
-                  {status?.running && (
+                  {showsLivePulse && (
                     <motion.div
                       className="w-2 h-2 rounded-full bg-success"
                       animate={{ opacity: [1, 0.5, 1] }}
@@ -1056,7 +1136,7 @@ export default function HAProxy() {
                       <div className="relative flex-1" ref={reloadMenuRef}>
                         <motion.button
                           onClick={() => setReloadMenuOpen(!reloadMenuOpen)}
-                          disabled={!!actionLoading}
+                          disabled={!!actionLoading || nodeSilent}
                           className="btn btn-secondary w-full"
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.98 }}
@@ -1086,7 +1166,7 @@ export default function HAProxy() {
                       </div>
                       <motion.button
                         onClick={handleStopHAProxy}
-                        disabled={!!actionLoading}
+                        disabled={!!actionLoading || nodeSilent}
                         className="btn btn-danger flex-1"
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
@@ -1098,7 +1178,7 @@ export default function HAProxy() {
                   ) : (
                     <motion.button
                       onClick={handleStartHAProxy}
-                      disabled={!!actionLoading}
+                      disabled={!!actionLoading || nodeSilent}
                       className="btn btn-primary flex-1"
                       whileHover={{ scale: 1.02 }}
                       whileTap={{ scale: 0.98 }}
@@ -1136,6 +1216,9 @@ export default function HAProxy() {
                   {stats?.available && (
                     <span className="text-sm text-dark-500">({statsGroups.length})</span>
                   )}
+                  {copyMoment && stats && (
+                    <span className="text-xs text-warning">{t('node_silent.snapshot', { time: copyMoment })}</span>
+                  )}
                 </button>
                 {stats?.available && (
                   <div className="hidden sm:flex items-center gap-4 text-xs text-dark-400">
@@ -1158,6 +1241,8 @@ export default function HAProxy() {
                   <AlertTriangle className="w-10 h-10 mx-auto mb-3 opacity-50" />
                   <p>{t('haproxy.stats_node_too_old')}</p>
                 </div>
+              ) : !stats && nodeSilent ? (
+                <p className="text-sm text-dark-500 text-center py-8">{t('node_silent.not_in_copy')}</p>
               ) : !stats ? (
                 <div className="text-center py-8 text-dark-500">
                   <Loader2 className="w-6 h-6 mx-auto animate-spin opacity-50" />
@@ -1455,6 +1540,7 @@ export default function HAProxy() {
                       setCertForm({ domain: '', email: '', cert_content: '', key_content: '' })
                       setCertFormError('')
                     }}
+                    disabled={nodeSilent}
                     className="btn btn-primary text-sm"
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
@@ -1468,6 +1554,7 @@ export default function HAProxy() {
                       setCertForm({ domain: '', email: '', cert_content: '', key_content: '' })
                       setCertFormError('')
                     }}
+                    disabled={nodeSilent}
                     className="btn btn-secondary text-sm"
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
@@ -1477,7 +1564,7 @@ export default function HAProxy() {
                   </motion.button>
                   <motion.button
                     onClick={handleRenewCerts}
-                    disabled={actionLoading === 'renew'}
+                    disabled={actionLoading === 'renew' || nodeSilent}
                     className="btn btn-ghost text-sm"
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
@@ -1622,7 +1709,7 @@ export default function HAProxy() {
                         <div className="flex gap-3 pt-2">
                           <motion.button
                             type="submit"
-                            disabled={actionLoading === 'generate-cert'}
+                            disabled={actionLoading === 'generate-cert' || nodeSilent}
                             className="btn btn-primary"
                             whileHover={{ scale: 1.02 }}
                             whileTap={{ scale: 0.98 }}
@@ -1676,7 +1763,7 @@ export default function HAProxy() {
                         <div className="flex gap-3 pt-2">
                           <motion.button
                             type="submit"
-                            disabled={actionLoading === 'upload-cert'}
+                            disabled={actionLoading === 'upload-cert' || nodeSilent}
                             className="btn btn-primary"
                             whileHover={{ scale: 1.02 }}
                             whileTap={{ scale: 0.98 }}
@@ -1791,7 +1878,7 @@ export default function HAProxy() {
                             <Tooltip label={t('haproxy.renew')}>
                               <motion.button
                                 onClick={() => handleRenewSingleCert(domain)}
-                                disabled={!!actionLoading}
+                                disabled={!!actionLoading || nodeSilent}
                                 className="btn btn-ghost p-2.5 text-accent-400 hover:bg-accent-500/10"
                                 whileHover={{ scale: 1.1 }}
                                 whileTap={{ scale: 0.9 }}
@@ -1811,7 +1898,7 @@ export default function HAProxy() {
                             <Tooltip label={t('common.delete')}>
                               <motion.button
                                 onClick={() => handleDeleteCert(domain)}
-                                disabled={actionLoading === `delete-cert-${domain}`}
+                                disabled={actionLoading === `delete-cert-${domain}` || nodeSilent}
                                 className="btn btn-ghost p-2.5 text-danger hover:bg-danger/10"
                                 whileHover={{ scale: 1.1 }}
                                 whileTap={{ scale: 0.9 }}
@@ -2085,11 +2172,18 @@ export default function HAProxy() {
                             {t('haproxy.config_loading')}
                           </div>
                         </div>
+                      ) : configCopyMissing ? (
+                        <div className="flex items-center justify-center h-64">
+                          <NoSavedAnswerNote />
+                        </div>
                       ) : (
-                        <pre className="w-full h-[50vh] bg-dark-950 border border-dark-700 rounded-xl p-4
-                                     font-mono text-sm text-dark-200 overflow-auto
-                                     scrollbar-thin scrollbar-thumb-dark-700 scrollbar-track-transparent whitespace-pre"
-                        >{configContent}</pre>
+                        <>
+                          {configSavedAt && <SavedAnswerNote savedAt={configSavedAt} />}
+                          <pre className="w-full h-[50vh] bg-dark-950 border border-dark-700 rounded-xl p-4
+                                       font-mono text-sm text-dark-200 overflow-auto
+                                       scrollbar-thin scrollbar-thumb-dark-700 scrollbar-track-transparent whitespace-pre"
+                          >{configContent}</pre>
+                        </>
                       )}
                       
                       {/* Status messages */}
@@ -2162,7 +2256,7 @@ export default function HAProxy() {
                   {firewallActive ? (
                     <motion.button
                       onClick={handleDisableFirewall}
-                      disabled={!!actionLoading}
+                      disabled={!!actionLoading || nodeSilent}
                       className="btn btn-danger text-sm"
                       whileHover={{ scale: 1.02 }}
                       whileTap={{ scale: 0.98 }}
@@ -2177,7 +2271,7 @@ export default function HAProxy() {
                   ) : (
                     <motion.button
                       onClick={handleEnableFirewall}
-                      disabled={!!actionLoading}
+                      disabled={!!actionLoading || nodeSilent}
                       className="btn btn-success text-sm"
                       whileHover={{ scale: 1.02 }}
                       whileTap={{ scale: 0.98 }}
@@ -2197,6 +2291,7 @@ export default function HAProxy() {
                       setFirewallFormError('')
                       setFirewallErrorLog(null)
                     }}
+                    disabled={nodeSilent}
                     className="btn btn-primary text-sm"
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
@@ -2405,7 +2500,7 @@ export default function HAProxy() {
                       <div className="flex gap-3 pt-2">
                         <motion.button
                           type="submit"
-                          disabled={actionLoading === 'add-fw-rule'}
+                          disabled={actionLoading === 'add-fw-rule' || nodeSilent}
                           className="btn btn-primary"
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.98 }}
@@ -2484,7 +2579,7 @@ export default function HAProxy() {
                         <Tooltip label={t('firewall.close_port')}>
                           <motion.button
                             onClick={() => handleDeleteFirewallRule(rule.number, rule.port, rule.protocol)}
-                            disabled={actionLoading === `delete-fw-${rule.number}`}
+                            disabled={actionLoading === `delete-fw-${rule.number}` || nodeSilent}
                             className="btn btn-ghost p-2.5 text-danger hover:bg-danger/10"
                             whileHover={{ scale: 1.1 }}
                             whileTap={{ scale: 0.9 }}

@@ -22,6 +22,8 @@ import { toast } from 'sonner'
 import { proxyApi, trafficApi, TrafficSummary, TrafficStatus, TrafficSeries, TrafficScope, ServerMetrics, HistoryPoint, HistoryResponse } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import SilentNodeBanner from '../components/servers/SilentNodeBanner'
+import { SavedAnswerNote, formatMoment } from '../components/servers/SavedAnswerNote'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { useTranslation } from 'react-i18next'
 import { useSmartRefresh } from '../hooks/useAutoRefresh'
@@ -35,11 +37,17 @@ import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
 import MultiLineChart from '../components/Charts/MultiLineChart'
 import TcpStatesHistoryChart from '../components/Charts/TcpStatesHistoryChart'
+import FrozenHistoryNote, { chartPeriodOf } from '../components/Charts/FrozenHistoryNote'
 import { NETWORK_COLORS } from '../components/Charts/chartTheme'
 import TrafficUnsupportedNotice from '../components/Traffic/TrafficUnsupportedNotice'
 import EphemeralPorts from '../components/Traffic/EphemeralPorts'
+import { SnapshotNote, TrafficFrozenNote } from '../components/Traffic/SilentServerNotes'
 
 const SUMMARY_DAYS = 30
+
+// Когда часовых бакетов у молчащего сервера уже нет, панель отдаёт суточные итоги за
+// месяц — даты на графике подписываются как у этого периода, а не у выбранного
+const DAILY_TOTALS_PERIOD = '30d'
 
 // Stable identities keep the chart memos below from recomputing on every render
 const EMPTY_POINTS: HistoryPoint[] = []
@@ -64,7 +72,7 @@ export default function Traffic() {
   const { uid, serverId } = useParams()
   const navigate = useNavigate()
   const { servers, fetchServers } = useServersStore()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const networkDisplay = useChartDisplay('network')
 
   const [status, setStatus] = useState<TrafficStatus | null>(null)
@@ -86,6 +94,9 @@ export default function Traffic() {
   // Закрыть можно только управление списком отслеживаемых портов.
   const portsReadable = nodeAllows(server, 'traffic', 'read')
   const portsWritable = nodeAllows(server, 'traffic', 'write')
+  const silentSince = metrics?.node_silent_since
+  // Список портов меняет сама нода: пока она молчит, запрос принять некому
+  const portsEditable = portsWritable && !silentSince
 
   const fetchSummary = useCallback(async () => {
     if (!serverId) return
@@ -115,7 +126,7 @@ export default function Traffic() {
       const { data } = await proxyApi.getMetrics(Number(serverId))
       setMetrics(data)
     } catch {
-      // Нода офлайн — блок соединений просто не рисуется, трафик остаётся виден
+      // Ответа ноды у панели нет вовсе — блок соединений просто не рисуется, трафик остаётся виден
     }
   }, [serverId])
 
@@ -213,7 +224,7 @@ export default function Traffic() {
 
   const handleAddPort = async () => {
     const port = parseInt(newPort)
-    if (isNaN(port) || port < 1 || port > 65535 || !portsWritable) return
+    if (isNaN(port) || port < 1 || port > 65535 || !portsEditable) return
 
     setIsAddingPort(true)
     try {
@@ -236,7 +247,7 @@ export default function Traffic() {
   }
 
   const handleRemovePort = async (port: number) => {
-    if (!portsWritable) return
+    if (!portsEditable) return
     try {
       const res = await proxyApi.removeTrackedPort(Number(serverId), port)
       if (res.data.success) {
@@ -254,6 +265,7 @@ export default function Traffic() {
   }
 
   const trafficGaps = series?.gaps ?? []
+  const trafficChartPeriod = series?.coarser_than_period ? DAILY_TOTALS_PERIOD : period
 
   const networkHistory = useMemo(() => {
     const points = series?.points ?? []
@@ -272,6 +284,8 @@ export default function Traffic() {
   }, [series, t])
 
   const speedPoints = speedHistory?.data ?? EMPTY_POINTS
+
+  const speedChartPeriod = chartPeriodOf(speedHistory, speedPeriod)
   const speedGaps = speedHistory?.gaps ?? NO_GAPS
 
   const speedSeries = useMemo(() => [
@@ -373,6 +387,12 @@ export default function Traffic() {
     >
       {header}
 
+      {silentSince && (
+        <SilentNodeBanner>
+          {t('node_silent.last_data', { time: formatMoment(silentSince, i18n.language) })}
+        </SilentNodeBanner>
+      )}
+
       <AnimatePresence mode="wait">
         {error && (
           <motion.div
@@ -402,6 +422,8 @@ export default function Traffic() {
 
       {summary && (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+          {summary.frozen_at && <TrafficFrozenNote frozenAt={summary.frozen_at} className="mb-3" />}
+
           {/* Summary Cards */}
           <motion.div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
             <div className="card">
@@ -448,6 +470,7 @@ export default function Traffic() {
                     {metrics.system.connections_detailed.tcp.total}
                   </span>
                 </h3>
+                {silentSince && <SnapshotNote takenAt={silentSince} className="-mt-3 mb-4" />}
 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between p-2.5 bg-dark-800/50 rounded-lg">
@@ -533,6 +556,7 @@ export default function Traffic() {
                     {metrics.system.connections_detailed.udp.total}
                   </span>
                 </h3>
+                {silentSince && <SnapshotNote takenAt={silentSince} className="-mt-3 mb-4" />}
 
                 <div className="flex flex-col items-center justify-center py-6">
                   <div className="relative">
@@ -543,7 +567,8 @@ export default function Traffic() {
                         </span>
                       </div>
                     </div>
-                    <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-cyan-500 animate-pulse" />
+                    {/* Мигающая точка обещает живые цифры — у снимка молчащей ноды её нет */}
+                    {!silentSince && <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-cyan-500 animate-pulse" />}
                   </div>
                   <span className="mt-4 text-dark-400 text-sm">{t('traffic.active_udp')}</span>
                 </div>
@@ -562,10 +587,10 @@ export default function Traffic() {
         </motion.div>
       )}
 
-      {/* Занятость эфемерных портов — из живых метрик, сводка трафика для неё не нужна */}
+      {/* Занятость эфемерных портов — из метрик ноды, сводка трафика для неё не нужна */}
       {metrics?.system?.ephemeral_ports && (
         <motion.div className="mb-6" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-          <EphemeralPorts data={metrics.system.ephemeral_ports} />
+          <EphemeralPorts data={metrics.system.ephemeral_ports} snapshotAt={silentSince} />
         </motion.div>
       )}
 
@@ -588,20 +613,22 @@ export default function Traffic() {
             ]}
           />
         </div>
+        {/* Одна подпись на оба графика: скорость и состояния TCP строятся из одного ответа истории */}
+        {speedHistory && <FrozenHistoryNote history={speedHistory} className="-mt-2 mb-3" />}
         <MultiLineChart
           series={speedSeries}
           gaps={speedGaps}
           display={networkDisplay}
           formatValue={formatSpeed}
           height={250}
-          period={speedPeriod}
+          period={speedChartPeriod}
         />
       </motion.div>
 
       <motion.div className="mb-6" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
         <TcpStatesHistoryChart
           history={speedPoints}
-          period={speedPeriod}
+          period={speedChartPeriod}
           isLoading={isRefreshing}
         />
       </motion.div>
@@ -657,6 +684,13 @@ export default function Traffic() {
                 />
               </div>
             </div>
+            {series?.frozen_at && (
+              <TrafficFrozenNote
+                frozenAt={series.frozen_at}
+                dailyTotals={series.coarser_than_period}
+                className="-mt-2 mb-3"
+              />
+            )}
             {/* Сумма байт за бакет — сглаживать нечестно, рисуется как есть */}
             <MultiLineChart
               series={networkHistory}
@@ -664,7 +698,7 @@ export default function Traffic() {
               display={RAW_DISPLAY}
               formatValue={formatBytes}
               height={250}
-              period={period}
+              period={trafficChartPeriod}
             />
             {trafficGaps.length > 0 && (
               <p className="mt-2 text-xs text-dark-500">
@@ -689,6 +723,7 @@ export default function Traffic() {
               <TrafficUnsupportedNotice nodeVersion={status.node_version} minVersion={status.min_version} />
             ) : (
             <>
+            {silentSince && <SavedAnswerNote savedAt={silentSince} />}
             <div className="flex gap-3 mb-4">
               <input
                 type="number"
@@ -704,7 +739,7 @@ export default function Traffic() {
                 className="btn btn-primary disabled:opacity-40 disabled:cursor-not-allowed"
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
-                disabled={isAddingPort || !newPort || !portsWritable}
+                disabled={isAddingPort || !newPort || !portsEditable}
                 title={portsWritable ? undefined : t('node_caps.write_blocked')}
               >
                 <Plus className="w-4 h-4" />
@@ -748,12 +783,12 @@ export default function Traffic() {
                       <Tooltip label={portsWritable ? t('common.delete') : t('node_caps.write_blocked')}>
                         <motion.button
                           onClick={() => handleRemovePort(port)}
-                          disabled={!portsWritable}
+                          disabled={!portsEditable}
                           className={`p-2 rounded-lg text-dark-400 transition-colors ${
-                            portsWritable ? 'hover:bg-danger/20 hover:text-danger' : 'opacity-40 cursor-not-allowed'
+                            portsEditable ? 'hover:bg-danger/20 hover:text-danger' : 'opacity-40 cursor-not-allowed'
                           }`}
-                          whileHover={{ scale: portsWritable ? 1.1 : 1 }}
-                          whileTap={{ scale: portsWritable ? 0.9 : 1 }}
+                          whileHover={{ scale: portsEditable ? 1.1 : 1 }}
+                          whileTap={{ scale: portsEditable ? 0.9 : 1 }}
                         >
                           <Trash2 className="w-4 h-4" />
                         </motion.button>
@@ -766,6 +801,8 @@ export default function Traffic() {
             </>
             )}
           </motion.div>
+
+          {summary.frozen_at && <TrafficFrozenNote frozenAt={summary.frozen_at} className="-mt-3 mb-3" />}
 
           <motion.div className="grid grid-cols-1 xl:grid-cols-2 gap-4" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
             <div className="card">

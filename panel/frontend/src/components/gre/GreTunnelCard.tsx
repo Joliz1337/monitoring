@@ -11,6 +11,10 @@ import { apiErrorMessage } from '../../utils/gre'
 interface Props {
   serverId: number
   tunnel: GreTunnelView
+  /** Нода не отвечает — проверку туннеля слать некому */
+  nodeOnline: boolean
+  /** Последнее состояние, которое панель получила от ноды; null — ещё не получала */
+  lastStateAt: string | null
   editable: boolean
   busy: boolean
   onEdit: () => void
@@ -25,12 +29,14 @@ const LINK_STYLE: Record<string, string> = {
   conflict: 'bg-danger/10 text-danger border-danger/20',
 }
 
-function minutesSince(iso: string | null): number | null {
-  if (!iso) return null
-  return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000))
+const MINUTE_MS = 60000
+
+function minutesBetween(from: string | null, until: number): number | null {
+  if (!from) return null
+  return Math.max(0, Math.floor((until - new Date(from).getTime()) / MINUTE_MS))
 }
 
-export default function GreTunnelCard({ serverId, tunnel, editable, busy, onEdit, onDelete }: Props) {
+export default function GreTunnelCard({ serverId, tunnel, nodeOnline, lastStateAt, editable, busy, onEdit, onDelete }: Props) {
   const { t } = useTranslation()
   const [checking, setChecking] = useState(false)
   const [check, setCheck] = useState<GreCheckResult | null>(null)
@@ -46,7 +52,10 @@ export default function GreTunnelCard({ serverId, tunnel, editable, busy, onEdit
     }
   }
 
-  const minutes = minutesSince(tunnel.last_rx_at)
+  // activity молчащей ноды панель оценивает на момент её последнего состояния — и минуты
+  // считаются до него же: от «сейчас» простой связи с нодой выглядел бы простоем туннеля
+  const judgedAt = !nodeOnline && lastStateAt ? new Date(lastStateAt).getTime() : Date.now()
+  const minutes = minutesBetween(tunnel.last_rx_at, judgedAt)
   const activity = (() => {
     if (tunnel.activity === 'alive') {
       return {
@@ -84,7 +93,7 @@ export default function GreTunnelCard({ serverId, tunnel, editable, busy, onEdit
           {t(`gre.link_${tunnel.link ?? 'pending'}`)}
         </span>
         <div className="ml-auto flex items-center gap-1">
-          <button type="button" className="btn-tool btn-tool-accent" disabled={checking || tunnel.link !== 'ok'} onClick={runCheck}>
+          <button type="button" className="btn-tool btn-tool-accent" disabled={checking || !nodeOnline || tunnel.link !== 'ok'} onClick={runCheck}>
             {checking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Stethoscope className="w-3.5 h-3.5" />}
             {t('gre.check')}
           </button>

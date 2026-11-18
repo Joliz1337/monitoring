@@ -21,6 +21,8 @@ import {
 import { proxyApi, dnatProfilesApi, portUsageApi, DnatNodeState, DnatRuleCounters } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import SilentNodeBanner from '../components/servers/SilentNodeBanner'
+import { formatMoment, isAnswerCopyMissing } from '../components/servers/SavedAnswerNote'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatBitsPerSecLocalized } from '../utils/format'
 import { formatListen, formatTarget, protocolLabel } from '../utils/dnat'
@@ -74,7 +76,7 @@ function extractErrorMessage(err: unknown, fallback: string): string {
 export default function Dnat() {
   const { uid, serverId } = useParams()
   const navigate = useNavigate()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const { servers, fetchServers } = useServersStore()
   const server = servers.find(s => s.id === Number(serverId))
   const dnatReadable = nodeAllows(server, 'dnat', 'read')
@@ -87,6 +89,7 @@ export default function Dnat() {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [unsupported, setUnsupported] = useState(false)
+  const [copyMissing, setCopyMissing] = useState(false)
   const [actionLoading, setActionLoading] = useState<'reapply' | 'clear' | null>(null)
   const [profileInfo, setProfileInfo] = useState<{ name: string; id: number } | null>(null)
   const previousSampleRef = useRef<CounterSample | null>(null)
@@ -119,21 +122,28 @@ export default function Dnat() {
     setIsRefreshing(true)
     try {
       const res = await proxyApi.getDnatState(Number(serverId))
-      const sample: CounterSample = {
+      // Скорость — только между живыми ответами подряд: между двумя одинаковыми копиями вышел бы
+      // ноль, а между копией и ответом вернувшейся ноды — среднее за всё время молчания
+      const sample: CounterSample | null = res.data.saved_at ? null : {
         at: Date.now(),
         byName: Object.fromEntries(res.data.counters.map(c => [c.name, c])),
       }
-      setRates(computeRates(previousSampleRef.current, sample))
+      setRates(sample ? computeRates(previousSampleRef.current, sample) : {})
       previousSampleRef.current = sample
       setState(res.data)
       setError(null)
       setUnsupported(false)
+      setCopyMissing(false)
     } catch (err) {
       const status = (err as { response?: { status?: number } }).response?.status
       if (status === 404) {
         setUnsupported(true)
         setError(null)
+      } else if (isAnswerCopyMissing(err)) {
+        setCopyMissing(true)
+        setError(null)
       } else {
+        setCopyMissing(false)
         setError(extractErrorMessage(err, t('dnat.load_error')))
       }
     } finally {
@@ -177,6 +187,16 @@ export default function Dnat() {
     } finally {
       setActionLoading(null)
     }
+  }
+
+  const savedAt = state?.saved_at
+  // Молчащей ноде применять и снимать правила некому — есть её копия у панели или нет
+  const nodeSilent = copyMissing || Boolean(savedAt)
+
+  const speedLabel = (bytesPerSec: number | undefined): string | null => {
+    // У копии скорости нет: прочерк на её месте честнее и пустоты, и «0 бит/с»
+    if (savedAt) return '—'
+    return bytesPerSec === undefined ? null : formatBitsPerSecLocalized(bytesPerSec, t)
   }
 
   const countersByName = useMemo(
@@ -253,8 +273,8 @@ export default function Dnat() {
             <Tooltip label={t('dnat.reapply_hint')}>
               <motion.button
                 onClick={handleReapply}
-                disabled={actionLoading !== null}
-                className="btn btn-secondary text-sm"
+                disabled={actionLoading !== null || nodeSilent}
+                className="btn btn-secondary text-sm disabled:opacity-40"
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
               >
@@ -265,7 +285,7 @@ export default function Dnat() {
             <Tooltip label={t('dnat.clear_hint')}>
               <motion.button
                 onClick={handleClear}
-                disabled={actionLoading !== null || state.rules.length === 0}
+                disabled={actionLoading !== null || nodeSilent || state.rules.length === 0}
                 className="btn btn-secondary text-sm text-danger hover:bg-danger/10 disabled:opacity-40"
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
@@ -336,13 +356,26 @@ export default function Dnat() {
             <h2 className="text-lg font-semibold text-dark-200 mb-2">{t('dnat.node_too_old')}</h2>
             <p className="text-dark-400 text-sm">{t('dnat.node_too_old_hint')}</p>
           </motion.div>
-        ) : error ? (
-          <motion.div key="error" className="card text-center py-16" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-            <AlertTriangle className="w-16 h-16 text-warning/70 mx-auto mb-4" />
-            <p className="text-dark-400">{error}</p>
+        ) : copyMissing ? (
+          <motion.div key="copy-missing" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            <SilentNodeBanner>{t('node_silent.nothing_saved')}</SilentNodeBanner>
           </motion.div>
         ) : state && healthCard ? (
           <motion.div key="content" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            {savedAt && (
+              <SilentNodeBanner>
+                {t('node_silent.saved_readonly', { time: formatMoment(savedAt, i18n.language) })}
+              </SilentNodeBanner>
+            )}
+
+            {/* Таблица ниже осталась от прошлого удачного опроса: без этой строки она выглядела бы свежей */}
+            {error && (
+              <div className="flex items-center gap-3 px-4 py-3 mb-4 rounded-xl bg-danger/10 border border-danger/20 text-sm text-danger">
+                <XCircle className="w-5 h-5 shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
+
             {!dnatWritable && <div className="mb-4"><NodeRestrictedNotice server={server} variant="readonly" compact /></div>}
 
             {interceptedHaproxyPorts.length > 0 && (
@@ -445,6 +478,8 @@ export default function Dnat() {
                       {state.rules.map(rule => {
                         const counters = countersByName[rule.name]
                         const rate = rates[rule.name]
+                        const speedIn = speedLabel(rate?.bytesInPerSec)
+                        const speedOut = speedLabel(rate?.bytesOutPerSec)
                         const targetRows = (counters?.targets ?? []).length > 1 ? counters.targets : []
                         const singleTarget = counters?.targets.length === 1 ? counters.targets[0] : null
                         const ruleRanges = dnatTcpRanges([rule])
@@ -483,15 +518,11 @@ export default function Dnat() {
                             </td>
                             <td className="px-3 py-2 text-right font-mono text-dark-200 whitespace-nowrap">
                               {counters ? formatBytes(counters.bytes_in) : '—'}
-                              {rate && (
-                                <span className="block text-2xs text-dark-500">{formatBitsPerSecLocalized(rate.bytesInPerSec, t)}</span>
-                              )}
+                              {speedIn && <span className="block text-2xs text-dark-500">{speedIn}</span>}
                             </td>
                             <td className="px-3 py-2 text-right font-mono text-dark-200 whitespace-nowrap">
                               {counters ? formatBytes(counters.bytes_out) : '—'}
-                              {rate && (
-                                <span className="block text-2xs text-dark-500">{formatBitsPerSecLocalized(rate.bytesOutPerSec, t)}</span>
-                              )}
+                              {speedOut && <span className="block text-2xs text-dark-500">{speedOut}</span>}
                             </td>
                             <td className="px-3 py-2 text-right">
                               {!rule.enabled ? (
@@ -532,6 +563,11 @@ export default function Dnat() {
                 </div>
               )}
             </div>
+          </motion.div>
+        ) : error ? (
+          <motion.div key="error" className="card text-center py-16" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            <AlertTriangle className="w-16 h-16 text-warning/70 mx-auto mb-4" />
+            <p className="text-dark-400">{error}</p>
           </motion.div>
         ) : null}
       </AnimatePresence>

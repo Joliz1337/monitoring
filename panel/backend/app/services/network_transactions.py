@@ -356,6 +356,69 @@ async def fetch_state(server: Server, *, fresh_connection: bool = False) -> dict
     return await _request(get_node_client(server), "GET", url, headers=headers, timeout=STATE_TIMEOUT_SECONDS)
 
 
+LOOPBACK_INTERFACE = "lo"
+ADDRESS_FAMILIES = {"ipv4": 4, "ipv6": 6}
+
+
+def _address_from_metrics(entry: Any) -> Optional[dict]:
+    family = entry.get("type") if isinstance(entry, dict) else None
+    if family not in ADDRESS_FAMILIES:
+        return None
+    try:
+        address = ipaddress.ip_address(entry.get("address"))
+        # Маска в метриках — адресом (255.255.252.0, ffff:ffff::): длина префикса — число её единиц
+        netmask = entry.get("netmask")
+        prefix = address.max_prefixlen if not netmask else bin(int(ipaddress.ip_address(netmask))).count("1")
+    except ValueError:
+        return None
+    if address.version != ADDRESS_FAMILIES[family] or address.is_loopback or address.is_link_local:
+        return None
+    return {
+        "address": str(address), "prefix": prefix, "family": family, "scope": "global",
+        "managed": False, "primary": False, "dynamic": False,
+    }
+
+
+def state_from_metrics(metrics: Optional[dict]) -> Optional[dict]:
+    """Интерфейсы и адреса из последнего ответа ноды с метриками — в форме состояния сети.
+
+    Для ноды, которая замолчала раньше, чем панель сохранила её настоящее
+    состояние сети. Чего в метриках нет — какой адрес основной, шлюзы, что
+    добавила панель — остаётся пустым: в таком виде состояние годится только
+    для показа, и помечено `from_metrics`.
+    """
+    network = metrics.get("network") if isinstance(metrics, dict) else None
+    reported = network.get("interfaces") if isinstance(network, dict) else None
+    interfaces = [
+        {
+            "name": interface["name"],
+            "is_up": bool(interface.get("is_up")),
+            "is_default": False,
+            "kind": "physical",
+            "addresses": [
+                address
+                for address in map(_address_from_metrics, interface.get("addresses") or [])
+                if address is not None
+            ],
+        }
+        for interface in reported or []
+        if isinstance(interface, dict)
+        and interface.get("name")
+        and interface["name"] != LOOPBACK_INTERFACE
+        and not interface.get("is_virtual")
+    ]
+    if not interfaces:
+        return None
+    return {
+        "supported": True,
+        "from_metrics": True,
+        "interfaces": interfaces,
+        "managed": [],
+        "transaction": None,
+        "history": [],
+    }
+
+
 async def send_apply(server: Server, payload: dict) -> dict:
     return await _request(get_node_apply_client(server), "POST", f"{server.url}{APPLY_PATH}",
                           headers=node_auth_headers(server), timeout=APPLY_TIMEOUT_SECONDS, json_data=payload)

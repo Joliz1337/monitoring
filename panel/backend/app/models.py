@@ -250,6 +250,22 @@ class ServerCache(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
+class NodeAnswerCopy(Base):
+    """Последний удачный ответ ноды на запрос, который панель обычно делает вживую.
+
+    Лимит полосы, адреса интерфейсов и находки сканера доступов хостера есть
+    только на самой ноде. Пока она отвечает, страница сервера спрашивает её;
+    когда замолчала — показывает эту копию, а не крутит загрузку до таймаута.
+    Строка на пару «сервер, вид ответа» (`services/node_answer_copy.AnswerKind`).
+    """
+    __tablename__ = "node_answer_copies"
+
+    server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True)
+    kind = Column(String(32), primary_key=True)
+    data = Column(Text, nullable=False)
+    saved_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class NodePendingSync(Base):
     """Долг перед нодой: что применить на ней, когда она вернётся в сеть.
 

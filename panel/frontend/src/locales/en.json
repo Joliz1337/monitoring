@@ -352,6 +352,23 @@
     "no_tasks": "No tasks yet",
     "done": "Done"
   },
+  "node_silent": {
+    "title": "Server is not responding",
+    "last_data": "Showing the last data the panel received from it on {{time}}. The page refreshes on its own once the server is back.",
+    "history_frozen": "Charts cover the last period the server was running, up to {{time}}",
+    "history_coarser_hour": "Per-second history for that time is gone: showing hourly averages for the last day it was running",
+    "history_coarser_day": "Detailed history for that time is gone: showing daily averages for the last month it was running",
+    "saved_answer": "Server is not responding — showing what the panel saved on {{time}}. Changes will be possible once it is back.",
+    "saved_from_metrics": "Server is not responding — addresses come from its last answer ({{time}}). Which of them are primary or were added by the panel cannot be seen this way.",
+    "no_copy": "Server is not responding and the panel has no copy of this data: a copy is saved when the page is opened while the server is running.",
+    "saved_readonly": "Showing what the panel saved on {{time}}. Changes will be possible once it is back; the page refreshes on its own.",
+    "saved_queued": "Showing the state the panel received from it on {{time}}. Changes are saved in the panel and reach the server once it is back.",
+    "traffic_frozen": "Traffic covers the last period the server was running, up to {{time}}",
+    "traffic_coarser_day": "Hourly history for that time is gone: showing daily totals for the last month it was running",
+    "snapshot": "snapshot from {{time}}",
+    "nothing_saved": "The panel has no saved data for this page — nothing to show until it is back.",
+    "not_in_copy": "The saved copy does not include this data."
+  },
   "server_details": {
     "gre": "GRE tunnels",
     "source_pool": "Source IPs",

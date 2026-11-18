@@ -23,6 +23,7 @@ import { Checkbox } from '../ui/Checkbox'
 import { Toggle } from '../ui/Toggle'
 import { CopyableIp } from '../ui/CopyableIp'
 import { FAQIcon } from '../FAQ'
+import { NoSavedAnswerNote, SavedAnswerNote, isAnswerCopyMissing } from './SavedAnswerNote'
 
 const POLL_INTERVAL_MS = 3000
 const PREVIEW_DEBOUNCE_MS = 400
@@ -55,6 +56,8 @@ function lockReason(addr: NetworkAddress, accessAddress: string | null | undefin
 interface Props {
   serverId: number
   server?: Server | null
+  /** Нода не отвечает: смена значения — повод перечитать данные, ответ панели станет копией или снова живым */
+  nodeSilent?: boolean
 }
 
 type ApiError = { response?: { status?: number; data?: { detail?: string } } }
@@ -79,7 +82,7 @@ function secondsLeft(deadline: string | null | undefined, now: number): number |
 }
 
 /** Дополнительные IP-адреса интерфейсов ноды: транзакция с таймером отката, подтверждается панелью. */
-export default function NetworkAddressesCard({ serverId, server }: Props) {
+export default function NetworkAddressesCard({ serverId, server, nodeSilent }: Props) {
   const { t } = useTranslation()
   const writable = nodeAllows(server, 'system', 'write')
   const readable = nodeAllows(server, 'system', 'read')
@@ -88,6 +91,7 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
   const [unsupported, setUnsupported] = useState<{ version?: string; message?: string } | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
+  const [copyMissing, setCopyMissing] = useState(false)
   const [job, setJob] = useState<NetworkJobSnapshot | null>(null)
   const [showProgress, setShowProgress] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
@@ -113,8 +117,10 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
         if (res.data.job) setJob(res.data.job)
       }
       setLoadError(false)
+      setCopyMissing(false)
     } catch (err) {
       if (errorStatus(err) === 404) setUnsupported({})
+      else if (isAnswerCopyMissing(err)) setCopyMissing(true)
       else setLoadError(true)
     } finally {
       setLoading(false)
@@ -123,7 +129,7 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
 
   useEffect(() => {
     load()
-  }, [load])
+  }, [load, nodeSilent])
 
   const transaction = state?.transaction ?? null
   const transactionActive = transaction?.status === 'pending' || transaction?.status === 'applying'
@@ -257,7 +263,10 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
     )
   }
 
-  const canAct = writable && !busy && !inProgress
+  // Копия ответа молчащей ноды — только посмотреть: применять изменения некому
+  const savedAt = state?.saved_at
+  const editable = writable && !savedAt
+  const canAct = editable && !busy && !inProgress
 
   return (
     <div className="card">
@@ -298,6 +307,9 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
 
       {loading && <Loader2 className="w-4 h-4 animate-spin text-dark-500" />}
 
+      {savedAt && <SavedAnswerNote savedAt={savedAt} fromMetrics={state?.from_metrics} />}
+      {copyMissing && !loading && <NoSavedAnswerNote />}
+
       {loadError && !loading && (
         <div className="text-sm text-warning flex items-center gap-2 mb-3">
           <AlertTriangle className="w-4 h-4" />
@@ -318,7 +330,7 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
             && !iface.addresses.some(addr => addr.address === entry.address))}
           lockOf={addr => lockReason(addr, state.access_address, hosterRemoval)}
           minHosterVersion={minHosterVersion}
-          selectable={writable}
+          selectable={editable}
           canRemove={canAct}
           selected={selected[iface.name]}
           onSelect={(cidrs, checked) => setSelection(iface.name, cidrs, checked)}
@@ -331,11 +343,12 @@ export default function NetworkAddressesCard({ serverId, server }: Props) {
         />
       ))}
 
-      {state && (
+      {/* В метриках нет ни шлюзов, ни состояния службы: по ним раздел соврал бы про старую ноду */}
+      {state && !state.from_metrics && (
         <NicRoutingSection
           state={state}
           minVersion={state.min_node_version_nic_routing ?? MIN_NODE_VERSION_NIC_ROUTING}
-          writable={writable}
+          writable={editable}
           busy={nicRoutingBusy}
           onToggle={toggleNicRouting}
         />

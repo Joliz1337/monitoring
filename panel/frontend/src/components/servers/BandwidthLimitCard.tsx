@@ -6,6 +6,7 @@ import { proxyApi, BandwidthLimitState, type Server } from '../../api/client'
 import { nodeAllows } from '../../utils/nodeCapabilities'
 import { Tooltip } from '../ui/Tooltip'
 import { Checkbox } from '../ui/Checkbox'
+import { NoSavedAnswerNote, SavedAnswerNote, isAnswerCopyMissing } from './SavedAnswerNote'
 
 const MIN_MBIT = 1
 const MAX_MBIT = 100_000
@@ -13,16 +14,19 @@ const MAX_MBIT = 100_000
 interface Props {
   serverId: number
   server?: Server | null
+  /** Нода не отвечает: смена значения — повод перечитать данные, ответ панели станет копией или снова живым */
+  nodeSilent?: boolean
 }
 
 /** Искусственный лимит полосы ноды (tc tbf; cake — legacy), ставится и восстанавливается агентом. */
-export default function BandwidthLimitCard({ serverId, server }: Props) {
+export default function BandwidthLimitCard({ serverId, server, nodeSilent }: Props) {
   const { t } = useTranslation()
   const writable = nodeAllows(server, 'system', 'write')
   const readable = nodeAllows(server, 'system', 'read')
 
   const [state, setState] = useState<BandwidthLimitState | null>(null)
   const [unsupported, setUnsupported] = useState(false)
+  const [copyMissing, setCopyMissing] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [enabled, setEnabled] = useState(false)
@@ -39,8 +43,10 @@ export default function BandwidthLimitCard({ serverId, server }: Props) {
       setEnabled(res.data.enabled)
       setMbitText(res.data.mbit ? String(res.data.mbit) : '')
       setUnsupported(false)
+      setCopyMissing(false)
     } catch (err) {
       if ((err as { response?: { status?: number } }).response?.status === 404) setUnsupported(true)
+      setCopyMissing(isAnswerCopyMissing(err))
     } finally {
       setLoading(false)
     }
@@ -48,7 +54,7 @@ export default function BandwidthLimitCard({ serverId, server }: Props) {
 
   useEffect(() => {
     load()
-  }, [load])
+  }, [load, nodeSilent])
 
   const apply = async () => {
     const mbit = parseInt(mbitText, 10)
@@ -69,19 +75,25 @@ export default function BandwidthLimitCard({ serverId, server }: Props) {
     }
   }
 
-  if (!readable || unsupported) {
+  if (!readable || unsupported || copyMissing) {
     return (
       <div className="card">
         <h3 className="font-semibold text-dark-100 mb-2 flex items-center gap-2">
           <Gauge className="w-4 h-4 text-accent-500" />
           {t('server_details.bandwidth_title')}
         </h3>
-        <p className="text-sm text-dark-500">
-          {unsupported ? t('server_details.bandwidth_unsupported') : t('node_caps.row_blocked')}
-        </p>
+        {copyMissing ? <NoSavedAnswerNote /> : (
+          <p className="text-sm text-dark-500">
+            {unsupported ? t('server_details.bandwidth_unsupported') : t('node_caps.row_blocked')}
+          </p>
+        )}
       </div>
     )
   }
+
+  // Копия ответа молчащей ноды — только посмотреть: применять лимит некому
+  const savedAt = state?.saved_at
+  const editable = writable && !savedAt
 
   const statusLine = () => {
     if (!state) return null
@@ -115,9 +127,11 @@ export default function BandwidthLimitCard({ serverId, server }: Props) {
         <div className="text-sm">{loading ? <Loader2 className="w-4 h-4 animate-spin text-dark-500" /> : statusLine()}</div>
       </div>
 
+      {savedAt && <SavedAnswerNote savedAt={savedAt} />}
+
       <div className="flex items-center gap-3 flex-wrap">
         <label className="inline-flex items-center gap-2 text-sm text-dark-300 cursor-pointer">
-          <Checkbox checked={enabled} disabled={!writable || loading} onChange={e => setEnabled(e.target.checked)} />
+          <Checkbox checked={enabled} disabled={!editable || loading} onChange={e => setEnabled(e.target.checked)} />
           {t('server_details.bandwidth_enable')}
         </label>
         <div className="flex items-center gap-2">
@@ -126,7 +140,7 @@ export default function BandwidthLimitCard({ serverId, server }: Props) {
             min={MIN_MBIT}
             max={MAX_MBIT}
             value={mbitText}
-            disabled={!writable || !enabled || loading}
+            disabled={!editable || !enabled || loading}
             onChange={e => setMbitText(e.target.value)}
             placeholder="950"
             className="w-28 px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-700 text-dark-100 text-sm placeholder-dark-600 focus:outline-none focus:border-accent-500/50 transition-colors disabled:opacity-50"
@@ -135,7 +149,7 @@ export default function BandwidthLimitCard({ serverId, server }: Props) {
         </div>
         <button
           onClick={apply}
-          disabled={!writable || saving || loading}
+          disabled={!editable || saving || loading}
           className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600 hover:bg-accent-500 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
         >
           {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}

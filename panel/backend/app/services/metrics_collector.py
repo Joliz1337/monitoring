@@ -1164,6 +1164,10 @@ class MetricsCollector:
             chunk = (
                 select(model.id)
                 .where(*conditions)
+                # Условие может ссылаться на вторую таблицу: без запрета корреляции
+                # SQLAlchemy убрал бы model из FROM подзапроса, и LIMIT считался бы
+                # на каждую строку внешнего DELETE — порции исчезли бы
+                .correlate(None)
                 .limit(self.CLEANUP_CHUNK_ROWS)
                 .scalar_subquery()
             )
@@ -1183,6 +1187,26 @@ class MetricsCollector:
         )
         return deleted
 
+    @staticmethod
+    def _outlived(
+        model: type[Base], keep: timedelta, now_utc: datetime
+    ) -> tuple[ColumnElement[bool], ...]:
+        """Строки истории метрик старше срока хранения, считая от последнего ответа сервера.
+
+        У отвечающего сервера это то же, что «от сейчас». У замолчавшего часы
+        стоят: сутки снапшотов и агрегаты перед его последним ответом лежат,
+        пока он не вернётся или его не удалят, — иначе через сутки простоя на
+        странице сервера не осталось бы ни одного подробного графика.
+
+        Первое условие — прежняя граница «от сейчас»: last_seen позже «сейчас»
+        не бывает, а по одной колонке timestamp планировщик идёт индексом.
+        """
+        return (
+            model.timestamp < now_utc - keep,
+            model.server_id == Server.id,
+            model.timestamp < Server.last_seen - keep,
+        )
+
     async def _cleanup_old_data(self, db: AsyncSession):
         """Remove data older than retention periods.
 
@@ -1190,27 +1214,19 @@ class MetricsCollector:
         """
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        # Cleanup raw data (24 hours)
-        raw_cutoff = now_utc - timedelta(hours=self._raw_retention_hours)
-        await self._delete_in_chunks(
-            db, MetricsSnapshot, MetricsSnapshot.timestamp < raw_cutoff
-        )
-
-        # Cleanup hourly aggregated data (30 days)
-        hourly_cutoff = now_utc - timedelta(days=self._hourly_retention_days)
-        await self._delete_in_chunks(
-            db, AggregatedMetrics,
-            AggregatedMetrics.period_type == 'hour',
-            AggregatedMetrics.timestamp < hourly_cutoff,
-        )
-
-        # Cleanup daily aggregated data (365 days)
-        daily_cutoff = now_utc - timedelta(days=self._daily_retention_days)
-        await self._delete_in_chunks(
-            db, AggregatedMetrics,
-            AggregatedMetrics.period_type == 'day',
-            AggregatedMetrics.timestamp < daily_cutoff,
-        )
+        # Снапшоты — 24 часа, часовые агрегаты — 30 дней, суточные — 365
+        for model, scope, keep in (
+            (MetricsSnapshot, (), timedelta(hours=self._raw_retention_hours)),
+            (
+                AggregatedMetrics, (AggregatedMetrics.period_type == 'hour',),
+                timedelta(days=self._hourly_retention_days),
+            ),
+            (
+                AggregatedMetrics, (AggregatedMetrics.period_type == 'day',),
+                timedelta(days=self._daily_retention_days),
+            ),
+        ):
+            await self._delete_in_chunks(db, model, *scope, *self._outlived(model, keep, now_utc))
 
         # История трафика. Часовые бакеты нужны только графикам за сутки и неделю,
         # поэтому живут две недели; суточные держим дольше годового окна графиков,

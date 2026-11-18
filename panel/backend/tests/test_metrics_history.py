@@ -10,9 +10,11 @@ import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app.services import metrics_history  # noqa: E402
 from app.services.metrics_history import (  # noqa: E402
     GAP_MIN_SEC,
     MANY_CORES,
@@ -234,6 +236,136 @@ class PointSchemaTests(unittest.TestCase):
 
         self.assertEqual(point["data_points"], 0)
         self.assertTrue(all(point[key] is None for key in POINT_METRIC_KEYS))
+
+
+class SilentServerHistoryTests(unittest.IsolatedAsyncioTestCase):
+    """Окно периода у сервера, который перестал отвечать.
+
+    Окно «последний час от сейчас» у ноды, лежащей третий день, пустое, хотя
+    её история в базе есть: страница сервера показывала «Нет данных».
+    """
+
+    NOW = datetime(2026, 8, 26, 15, 0, 0)
+    DIED = datetime(2026, 8, 23, 9, 30, 0)
+
+    async def asyncSetUp(self) -> None:
+        self.points_by_source: dict[DataSource, list[dict]] = {}
+        self.windows: list[tuple[DataSource, datetime, datetime]] = []
+        self.per_cpu = mock.AsyncMock(return_value={"cores": []})
+        for name, replacement in (
+            ("_utcnow", mock.Mock(return_value=self.NOW)),
+            ("_load_points", self.fake_points),
+            ("load_downtime", mock.AsyncMock(return_value=[])),
+            ("load_collect_interval", mock.AsyncMock(return_value=10)),
+            ("_load_per_cpu_block", self.per_cpu),
+        ):
+            patcher = mock.patch.object(metrics_history, name, replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    async def fake_points(self, _db, _server_id, spec, start, end):
+        self.windows.append((spec.source, start, end))
+        return self.points_by_source.get(spec.source, [])
+
+    def has_data(self, *sources: DataSource) -> None:
+        for source in sources:
+            self.points_by_source[source] = [empty_point(self.DIED - timedelta(hours=1))]
+
+    async def history(self, period: str, frozen_at: datetime | None, per_cpu: bool = False) -> dict:
+        return await metrics_history.load_history(None, 1, period, per_cpu, frozen_at)
+
+    async def test_live_server_window_ends_now(self):
+        response = await self.history("1h", None)
+
+        self.assertEqual(self.windows, [(DataSource.RAW, self.NOW - timedelta(hours=1), self.NOW)])
+        self.assertIsNone(response["frozen_at"])
+        self.assertFalse(response["coarser_than_period"])
+
+    async def test_live_server_with_empty_window_is_not_replaced_by_older_data(self):
+        self.has_data(DataSource.HOUR)
+
+        response = await self.history("1h", None)
+
+        self.assertEqual(len(self.windows), 1)
+        self.assertEqual(response["data_source"], "raw")
+        self.assertEqual(response["data"], [])
+
+    async def test_silent_server_window_ends_at_its_last_answer(self):
+        self.has_data(DataSource.RAW)
+
+        response = await self.history("1h", self.DIED)
+
+        end = self.DIED + metrics_history.FROZEN_TAIL
+        self.assertEqual(self.windows, [(DataSource.RAW, end - timedelta(hours=1), end)])
+        self.assertEqual(response["frozen_at"], iso(self.DIED))
+        self.assertEqual(response["to_time"], iso(end))
+        self.assertEqual(response["count"], 1)
+        self.assertFalse(response["coarser_than_period"])
+
+    async def test_frozen_window_never_reaches_past_now(self):
+        self.has_data(DataSource.RAW)
+
+        await self.history("1h", self.NOW - timedelta(seconds=30))
+
+        self.assertEqual(self.windows[0][2], self.NOW)
+
+    async def test_last_answer_with_timezone_is_read_as_utc(self):
+        self.has_data(DataSource.RAW)
+
+        await self.history("1h", self.DIED.replace(tzinfo=timezone.utc))
+
+        self.assertEqual(self.windows[0][2], self.DIED + metrics_history.FROZEN_TAIL)
+
+    async def test_purged_snapshots_are_replaced_by_hourly_averages_of_the_last_day(self):
+        self.has_data(DataSource.HOUR)
+
+        response = await self.history("1h", self.DIED)
+
+        end = self.DIED + metrics_history.FROZEN_TAIL
+        self.assertEqual(
+            [(source, end - start) for source, start, _ in self.windows],
+            [(DataSource.RAW, timedelta(hours=1)), (DataSource.HOUR, timedelta(hours=24))],
+        )
+        self.assertEqual(response["data_source"], "hour")
+        self.assertEqual(response["bucket_sec"], 3600)
+        self.assertEqual(response["from_time"], iso(end - timedelta(hours=24)))
+        self.assertTrue(response["coarser_than_period"])
+
+    async def test_purged_hourly_averages_are_replaced_by_daily_ones(self):
+        self.has_data(DataSource.DAY)
+
+        for period in ("24h", "7d"):
+            with self.subTest(period=period):
+                response = await self.history(period, self.DIED)
+
+                self.assertEqual(response["data_source"], "day")
+                self.assertEqual(response["bucket_sec"], 86400)
+                self.assertTrue(response["coarser_than_period"])
+
+    async def test_server_without_any_history_keeps_the_requested_period(self):
+        response = await self.history("24h", self.DIED)
+
+        self.assertEqual(response["data_source"], "raw")
+        self.assertEqual(response["bucket_sec"], 300)
+        self.assertEqual(response["data"], [])
+        self.assertFalse(response["coarser_than_period"])
+
+    async def test_per_cpu_follows_the_frozen_window(self):
+        self.has_data(DataSource.RAW)
+
+        response = await self.history("1h", self.DIED, per_cpu=True)
+
+        end = self.DIED + metrics_history.FROZEN_TAIL
+        self.per_cpu.assert_awaited_once_with(None, 1, "1h", end - timedelta(hours=1), end)
+        self.assertEqual(response["per_cpu"], {"cores": []})
+
+    async def test_coarser_data_has_no_per_cpu(self):
+        self.has_data(DataSource.HOUR)
+
+        response = await self.history("1h", self.DIED, per_cpu=True)
+
+        self.per_cpu.assert_not_awaited()
+        self.assertIsNone(response["per_cpu"])
 
 
 if __name__ == "__main__":

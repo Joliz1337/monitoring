@@ -1,5 +1,6 @@
 """Определение online/offline статуса сервера по данным метрик-коллектора."""
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,3 +35,15 @@ async def get_offline_threshold(db: AsyncSession) -> int:
     interval_val = interval_row.scalar_one_or_none()
     collect_interval = int(interval_val) if interval_val else 10
     return max(DEFAULT_OFFLINE_THRESHOLD, collect_interval * 3 + 30)
+
+
+async def last_answer_if_offline(server: Server, db: AsyncSession) -> Optional[datetime]:
+    """Последний ответ сервера, если мониторинг считает его офлайн; иначе None.
+
+    Сервер, не ответивший ни разу, сюда не попадает: показать вместо живого
+    ответа за него нечего.
+    """
+    if server.last_seen is None:
+        return None
+    threshold = await get_offline_threshold(db)
+    return server.last_seen if resolve_status(server, threshold) == "offline" else None

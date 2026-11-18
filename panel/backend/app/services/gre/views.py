@@ -36,6 +36,10 @@ def install_status(row: Optional[GreNode], has_tunnels: bool, node_state: dict) 
 
 def node_view(server: Server, row: Optional[GreNode], online: bool, now: Optional[datetime] = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
+    # У молчащей ноды активность туннелей судим на момент её последнего состояния:
+    # от «сейчас» каждый туннель через пять минут простоя сам стал бы «без
+    # пакетов», хотя это панель перестала о нём узнавать
+    judged_at = now if online or row is None or row.last_state_at is None else row.last_state_at
     tunnels = load_tunnels(row)
     node_state = load_json(row.node_state, {}) if row is not None else {}
     activity = load_json(row.activity, {}) if row is not None else {}
@@ -54,7 +58,7 @@ def node_view(server: Server, row: Optional[GreNode], online: bool, now: Optiona
         state = live.get(tunnel.slot) or {}
         # Нода ещё не получила этот вариант туннеля — её цифры относятся к прежнему
         applied = state.get("ce") == tunnel.ce and state.get("local") == tunnel.local
-        activity_state, last_rx_at = activity_status(activity.get(name) if applied else None, now)
+        activity_state, last_rx_at = activity_status(activity.get(name) if applied else None, judged_at)
         views.append({
             **tunnel.model_dump(),
             "name": name,

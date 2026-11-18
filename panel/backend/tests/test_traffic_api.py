@@ -67,8 +67,9 @@ class SummaryWindowTests(unittest.TestCase):
     def test_window_covers_exactly_requested_days_including_today(self):
         for days in (1, 7, 30, 365):
             with self.subTest(days=days):
-                since = _summary_since(days)
-                today = floor_day(datetime.now(timezone.utc).replace(tzinfo=None))
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                since = _summary_since(days, now)
+                today = floor_day(now)
                 self.assertEqual((today - since).days, days - 1)
 
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -14,10 +14,13 @@ import { nodeAllows } from '../../utils/nodeCapabilities'
 import { Tooltip } from '../ui/Tooltip'
 import { Checkbox } from '../ui/Checkbox'
 import { FAQIcon } from '../FAQ'
+import { NoSavedAnswerNote, SavedAnswerNote, isAnswerCopyMissing } from './SavedAnswerNote'
 
 interface Props {
   serverId: number
   server?: Server | null
+  /** Нода не отвечает: смена значения — повод перечитать данные, ответ панели станет копией или снова живым */
+  nodeSilent?: boolean
 }
 
 const SEVERITY_ORDER: Record<string, number> = { danger: 0, warning: 1, info: 2 }
@@ -29,13 +32,15 @@ const severityDot = (severity: string) => {
 }
 
 /** Разведка и вырезание средств доступа хостера (агенты, cloud-init, чужие ключи, репозитории). */
-export default function HosterAccessCard({ serverId, server }: Props) {
+export default function HosterAccessCard({ serverId, server, nodeSilent }: Props) {
   const { t } = useTranslation()
   const readable = nodeAllows(server, 'system', 'read')
   const writable = nodeAllows(server, 'system', 'write')
 
   const [state, setState] = useState<HosterScanState | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [copyMissing, setCopyMissing] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [purging, setPurging] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -46,6 +51,8 @@ export default function HosterAccessCard({ serverId, server }: Props) {
   const applyScan = useCallback((data: HosterScanState) => {
     setState(data)
     setResults(null)
+    setLoadFailed(false)
+    setCopyMissing(false)
     setSelected(new Set(data.findings.filter(f => f.default_selected).map(f => f.id)))
   }, [])
 
@@ -57,16 +64,24 @@ export default function HosterAccessCard({ serverId, server }: Props) {
     try {
       const res = await proxyApi.scanHosterAccess(serverId)
       applyScan(res.data)
-    } catch {
+    } catch (err) {
+      // Пустой результат карточка читает как «на сервере чисто» — сбой так выглядеть не должен
       setState(null)
+      setLoadFailed(true)
+      setCopyMissing(isAnswerCopyMissing(err))
     } finally {
       setLoading(false)
     }
   }, [serverId, readable, applyScan])
 
+  // Вырезание само пересканирует сервер в конце: перечитывание посреди него
+  // стёрло бы и выбор, и результаты по находкам
+  const purgingRef = useRef(false)
+  purgingRef.current = purging
   useEffect(() => {
+    if (purgingRef.current) return
     load()
-  }, [load])
+  }, [load, nodeSilent])
 
   const rescan = async () => {
     setScanning(true)
@@ -100,6 +115,9 @@ export default function HosterAccessCard({ serverId, server }: Props) {
 
   const selectedList = findings.filter(f => selected.has(f.id))
   const anyCritical = selectedList.some(f => f.access_critical)
+  // Копия ответа молчащей ноды — только посмотреть: вырезать находки некому
+  const savedAt = state?.saved_at
+  const editable = writable && !savedAt
 
   const runPurge = async () => {
     setConfirmOpen(false)
@@ -152,6 +170,67 @@ export default function HosterAccessCard({ serverId, server }: Props) {
     )
   }
 
+  const scanResult = () => {
+    if (loading) {
+      return (
+        <div className="flex items-center gap-2 text-sm text-dark-500 py-4">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          {t('server_details.hoster_scanning')}
+        </div>
+      )
+    }
+    if (copyMissing) return <div className="py-3"><NoSavedAnswerNote /></div>
+    if (loadFailed) {
+      return (
+        <p className="text-sm text-warning inline-flex items-center gap-1.5 py-3">
+          <AlertTriangle className="w-4 h-4" />
+          {t('server_details.hoster_load_error')}
+        </p>
+      )
+    }
+    if (findings.length === 0) {
+      return (
+        <p className="text-sm text-success inline-flex items-center gap-1.5 py-3">
+          <CheckCircle2 className="w-4 h-4" />
+          {t('server_details.hoster_clean')}
+        </p>
+      )
+    }
+    return (
+      <>
+        <div className="space-y-2 mt-2">
+          {findings.map(f => (
+            <FindingRow
+              key={f.id}
+              finding={f}
+              checked={selected.has(f.id)}
+              result={results?.find(r => r.id === f.id)}
+              disabled={!editable || purging}
+              onToggle={() => toggle(f.id)}
+            />
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 mt-4 flex-wrap">
+          <span className="text-xs text-dark-500">
+            {t('server_details.hoster_found', { count: findings.length })}
+          </span>
+          <button
+            onClick={() => {
+              setConfirmAck(false)
+              setConfirmOpen(true)
+            }}
+            disabled={!editable || purging || selected.size === 0}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-danger/90 hover:bg-danger text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
+          >
+            {purging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
+            {t('server_details.hoster_purge_btn', { count: selected.size })}
+          </button>
+        </div>
+      </>
+    )
+  }
+
   return (
     <div className="card">
       <div className="flex items-center justify-between gap-3 mb-1 flex-wrap">
@@ -173,49 +252,8 @@ export default function HosterAccessCard({ serverId, server }: Props) {
         </div>
       </div>
 
-      {loading ? (
-        <div className="flex items-center gap-2 text-sm text-dark-500 py-4">
-          <Loader2 className="w-4 h-4 animate-spin" />
-          {t('server_details.hoster_scanning')}
-        </div>
-      ) : findings.length === 0 ? (
-        <p className="text-sm text-success inline-flex items-center gap-1.5 py-3">
-          <CheckCircle2 className="w-4 h-4" />
-          {t('server_details.hoster_clean')}
-        </p>
-      ) : (
-        <>
-          <div className="space-y-2 mt-2">
-            {findings.map(f => (
-              <FindingRow
-                key={f.id}
-                finding={f}
-                checked={selected.has(f.id)}
-                result={results?.find(r => r.id === f.id)}
-                disabled={!writable || purging}
-                onToggle={() => toggle(f.id)}
-              />
-            ))}
-          </div>
-
-          <div className="flex items-center justify-between gap-3 mt-4 flex-wrap">
-            <span className="text-xs text-dark-500">
-              {t('server_details.hoster_found', { count: findings.length })}
-            </span>
-            <button
-              onClick={() => {
-                setConfirmAck(false)
-                setConfirmOpen(true)
-              }}
-              disabled={!writable || purging || selected.size === 0}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-danger/90 hover:bg-danger text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
-            >
-              {purging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
-              {t('server_details.hoster_purge_btn', { count: selected.size })}
-            </button>
-          </div>
-        </>
-      )}
+      {savedAt && !loading && <SavedAnswerNote savedAt={savedAt} />}
+      {scanResult()}
 
       <AnimatePresence>
         {confirmOpen && (

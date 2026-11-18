@@ -49,6 +49,17 @@ SERIES_PERIODS: dict[str, PeriodSpec] = {
     "365d": PeriodSpec(DataSource.DAY, timedelta(days=365), DAY_SEC),
 }
 
+# Чем заменить источник, в котором у замолчавшего сервера уже ничего не осталось:
+# часовые средние за его последние сутки, за ними — суточные за последний месяц
+COARSER_SPEC: dict[DataSource, PeriodSpec] = {
+    DataSource.RAW: PeriodSpec(DataSource.HOUR, timedelta(hours=24), HOUR_SEC),
+    DataSource.HOUR: PeriodSpec(DataSource.DAY, timedelta(days=30), DAY_SEC),
+}
+
+# Снапшот последнего удачного цикла пишется в базу чуть позже, чем сервер
+# получает last_seen: без хвоста он остался бы за правой границей окна
+FROZEN_TAIL = timedelta(minutes=2)
+
 # Столбцы тепловой карты: 120 на часе, 144 на сутках — ячейка с зазором
 # остаётся различимой на ширине карточки.
 PER_CPU_BUCKET: dict[str, int] = {"1h": 30, "24h": 600}
@@ -452,19 +463,60 @@ async def _load_per_cpu_block(
     }
 
 
-async def load_history(
-    db: AsyncSession, server_id: int, period: HistoryPeriod, include_per_cpu: bool
-) -> dict[str, Any]:
-    spec = SERIES_PERIODS[period]
-    end = _utcnow()
+def window_start(spec: PeriodSpec, end: datetime) -> datetime:
     start = end - spec.span
     if spec.source is DataSource.RAW and spec.bucket_sec is not None:
         # Начало окна — на границе бакета: иначе первый бакет считался бы по
         # усыхающему хвосту снапшотов и менялся при каждом обновлении страницы
-        start = align_down(start, spec.bucket_sec)
+        return align_down(start, spec.bucket_sec)
+    return start
+
+
+async def _first_source_with_points(
+    db: AsyncSession, server_id: int, requested: PeriodSpec, end: datetime
+) -> tuple[PeriodSpec, list[dict[str, Any]]]:
+    """Источник периода, а если в нём пусто — ближайший более грубый с точками.
+
+    Нужен серверу, который замолчал давно: его снапшоты и часовые агрегаты
+    могли уйти под ретеншн раньше, чем тот научился считать срок от последнего
+    ответа. Нигде ничего нет — остаётся запрошенный источник с пустым рядом.
+    """
+    spec = requested
+    while True:
+        points = await _load_points(db, server_id, spec, window_start(spec, end), end)
+        coarser = COARSER_SPEC.get(spec.source)
+        if points:
+            return spec, points
+        if coarser is None:
+            return requested, []
+        spec = coarser
+
+
+async def load_history(
+    db: AsyncSession,
+    server_id: int,
+    period: HistoryPeriod,
+    include_per_cpu: bool,
+    frozen_at: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """frozen_at — последний ответ сервера, который сейчас молчит.
+
+    Окно периода у такого сервера кончается на этом моменте, а не на «сейчас»:
+    иначе у ноды, лежащей дольше периода, график пуст, хотя история в базе есть.
+    """
+    requested = SERIES_PERIODS[period]
+    now = _utcnow()
+    if frozen_at is None:
+        end = now
+        spec = requested
+        points = await _load_points(db, server_id, spec, window_start(spec, end), end)
+    else:
+        end = min(now, _as_naive(frozen_at) + FROZEN_TAIL)
+        spec, points = await _first_source_with_points(db, server_id, requested, end)
+    start = window_start(spec, end)
+    coarser_than_period = spec is not requested
 
     interval = await load_collect_interval(db)
-    points = await _load_points(db, server_id, spec, start, end)
     gaps = merge_downtime(await load_downtime(db, server_id, start, end), start, end)
     min_gap_sec = max(GAP_MIN_SEC, 2 * interval, spec.bucket_sec or 0)
 
@@ -478,7 +530,13 @@ async def load_history(
         "count": len(data),
         "data": data,
         "gaps": [{"from": _iso_utc(gap_start), "to": _iso_utc(gap_end)} for gap_start, gap_end in gaps],
+        "frozen_at": None if frozen_at is None else _iso_utc(frozen_at),
+        "coarser_than_period": coarser_than_period,
     }
     if include_per_cpu:
-        response["per_cpu"] = await _load_per_cpu_block(db, server_id, period, start, end)
+        # Матрица ядер строится только из снапшотов: в агрегатах её нет
+        response["per_cpu"] = (
+            None if coarser_than_period
+            else await _load_per_cpu_block(db, server_id, period, start, end)
+        )
     return response

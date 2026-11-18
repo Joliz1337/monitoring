@@ -17,6 +17,7 @@ from app.auth import verify_auth
 from app.database import get_db
 from app.models import Server, ServerDowntime, ServerTraffic, TrafficImportState
 from app.routers.proxy import to_iso_utc
+from app.services.server_status import last_answer_if_offline
 from app.services.traffic_breakdown import ServerNotFoundError, build_breakdown
 from app.services.traffic_import import (
     MIN_NODE_VERSION_FOR_IP_TRAFFIC,
@@ -29,6 +30,7 @@ from app.services.traffic_ingest import (
     Period,
     Scope,
     TOTAL_SCOPE_KEY,
+    as_naive_utc,
     floor_day,
     floor_hour,
     get_traffic_ingest,
@@ -47,6 +49,10 @@ SERIES_PERIODS: dict[str, tuple[Period, timedelta, int]] = {
     "365d": (Period.DAY, timedelta(days=1), 365),
 }
 
+# Часовые бакеты живут две недели: у сервера, который молчит дольше, вместо
+# пустого графика за сутки или неделю показываются суточные за его последний месяц
+COARSER_PERIOD = "30d"
+
 MAX_SUMMARY_DAYS = 400   # горизонт хранения суточных бакетов у коллектора
 MAX_PORT_NUMBER = 65535
 
@@ -55,9 +61,39 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _summary_since(days: int) -> datetime:
+def _summary_since(days: int, now: datetime) -> datetime:
     """Левая граница сводки: ровно `days` суточных бакетов, включая текущие сутки."""
-    return floor_day(_utcnow()) - timedelta(days=days - 1)
+    return floor_day(now) - timedelta(days=days - 1)
+
+
+async def _clock_of(server: Server, db: AsyncSession) -> tuple[datetime, Optional[datetime]]:
+    """Момент, от которого считаются окна сервера, и его последний ответ, если он молчит.
+
+    У сервера, который офлайн или отключён, новых бакетов не появляется: окна
+    «от сейчас» с каждым днём пустеют, хотя история в базе есть. Его окна
+    считаются от последнего ответа — страница показывает последние дни его работы.
+    """
+    now = _utcnow()
+    frozen_at = await last_answer_if_offline(server, db)
+    if frozen_at is None:
+        return now, None
+    return min(now, as_naive_utc(frozen_at)), frozen_at
+
+
+async def _measured_window(
+    db: AsyncSession,
+    server_id: int,
+    period: str,
+    scope: str,
+    scope_key: str,
+    now: datetime,
+) -> tuple[datetime, dict[datetime, tuple[int, int]]]:
+    """Первый бакет окна периода, кончающегося на `now`, и наблюдения в этом окне."""
+    period_type, step, point_count = SERIES_PERIODS[period]
+    last_bucket = floor_hour(now) if period_type is Period.HOUR else floor_day(now)
+    first_bucket = last_bucket - step * (point_count - 1)
+    measured = await _load_buckets(db, server_id, period_type, scope, scope_key, first_bucket, last_bucket)
+    return first_bucket, measured
 
 
 def _tracked_ports(raw: Optional[str]) -> list[int]:
@@ -147,6 +183,7 @@ async def get_server_traffic_summary(
     # себе — плитка трафика на карточке сервера считает их из той же таблицы. От версии
     # зависит только разбивка по портам, и об этом говорит поле supported в /status.
     server = await _load_server(server_id, db)
+    now, frozen_at = await _clock_of(server, db)
     result = await db.execute(
         select(
             ServerTraffic.scope,
@@ -157,7 +194,7 @@ async def get_server_traffic_summary(
         .where(
             ServerTraffic.server_id == server_id,
             ServerTraffic.period_type == Period.DAY.value,
-            ServerTraffic.bucket >= _summary_since(days),
+            ServerTraffic.bucket >= _summary_since(days, now),
         )
         .group_by(ServerTraffic.scope, ServerTraffic.scope_key)
     )
@@ -193,6 +230,7 @@ async def get_server_traffic_summary(
         "by_ip": by_ip,
         # Список портов — из колонки servers, а не с ноды: сводка обязана открываться офлайн
         "tracked_ports": _tracked_ports(server.tracked_ports),
+        "frozen_at": to_iso_utc(frozen_at),
     }
 
 
@@ -205,18 +243,22 @@ async def get_traffic_series(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth),
 ):
-    await _load_server(server_id, db)
-    period_type, step, point_count = SERIES_PERIODS[period]
+    server = await _load_server(server_id, db)
 
     scope_key = TOTAL_SCOPE_KEY if scope == Scope.TOTAL.value else key.strip()
     if scope != Scope.TOTAL.value and not scope_key:
         raise HTTPException(status_code=400, detail=f"key is required for scope={scope}")
 
-    now = _utcnow()
-    last_bucket = floor_hour(now) if period_type is Period.HOUR else floor_day(now)
-    first_bucket = last_bucket - step * (point_count - 1)
+    now, frozen_at = await _clock_of(server, db)
+    shown_period = period
+    first_bucket, measured = await _measured_window(db, server_id, period, scope, scope_key, now)
+    hourly_is_gone = frozen_at is not None and not measured and SERIES_PERIODS[period][0] is Period.HOUR
+    if hourly_is_gone:
+        daily_first_bucket, daily = await _measured_window(db, server_id, COARSER_PERIOD, scope, scope_key, now)
+        if daily:
+            shown_period, first_bucket, measured = COARSER_PERIOD, daily_first_bucket, daily
 
-    measured = await _load_buckets(db, server_id, period_type, scope, scope_key, first_bucket, last_bucket)
+    _, step, point_count = SERIES_PERIODS[shown_period]
     gaps = await _load_gaps(db, server_id, first_bucket, now)
 
     return {
@@ -225,6 +267,9 @@ async def get_traffic_series(
         "key": scope_key,
         "points": _dense_points(first_bucket, step, point_count, measured),
         "gaps": gaps,
+        "frozen_at": to_iso_utc(frozen_at),
+        # Часовых бакетов уже нет: точки — суточные за последний месяц работы сервера
+        "coarser_than_period": shown_period != period,
     }
 
 

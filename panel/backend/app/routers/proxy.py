@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional, Any, AsyncGenerator
-from datetime import datetime
+from typing import Optional, Any, AsyncGenerator, Awaitable, Callable
+from datetime import datetime, timezone
 import asyncio
 import copy
 import httpx
@@ -16,7 +16,8 @@ from app.services.http_client import get_node_client, get_node_apply_client, nod
 from app.database import get_db
 from app.models import Server, ServerCache, MetricsSnapshot
 from app.auth import verify_auth
-from app.services import node_update_watcher, update_channel, upstream_commit
+from app.services import node_answer_copy, node_update_watcher, server_status, update_channel, upstream_commit
+from app.services.node_answer_copy import AnswerCopy, AnswerKind
 from app.services.latest_metrics import get_latest_metrics
 from app.services.metrics_history import HistoryPeriod, load_history
 from app.services.metrics_rates import enrich_metrics_with_speeds
@@ -209,6 +210,82 @@ async def proxy_request(
         raise HTTPException(status_code=502)
 
 
+# По этому заголовку страница сервера отличает «нода молчит, копии её ответа нет»
+# от прочих отказов с тем же кодом
+NO_ANSWER_COPY_HEADER = "X-Node-Answer-Copy-Missing"
+
+
+async def _silent_since(server: Server, db: AsyncSession) -> Optional[datetime]:
+    """Последний ответ ноды, которую панель опрашивает и не может дозваться; иначе None.
+
+    Отключённый сервер сюда не попадает: его мониторинг не опрашивает, так что
+    давний last_seen о ноде ничего не говорит — она может быть жива.
+    """
+    since = await server_status.last_answer_if_offline(server, db) if server.is_active else None
+    # Порог офлайна читался из базы: отпускаем коннект пула до запроса к ноде
+    await db.commit()
+    return since
+
+
+def _no_answer_copy() -> HTTPException:
+    # 409, как у прочих «нода не в том состоянии»: 502–504 фронт сам повторяет трижды
+    return HTTPException(
+        status_code=409,
+        detail="Node is offline and the panel has no saved copy of this answer",
+        headers={NO_ANSWER_COPY_HEADER: "1"},
+    )
+
+
+def _as_saved(answer_copy: AnswerCopy) -> dict:
+    return {**answer_copy.data, "saved_at": to_iso_utc(answer_copy.saved_at)}
+
+
+async def _node_answer_or_copy(
+    server: Server,
+    db: AsyncSession,
+    kind: AnswerKind,
+    ask_node: Callable[[], Awaitable[dict]],
+    keep_every_sec: float = 0.0,
+) -> dict:
+    """Ответ ноды, а когда она молчит — его последняя копия с пометкой `saved_at`.
+
+    Ноду, которую мониторинг уже считает офлайн, не спрашиваем вовсе: запрос
+    упёрся бы в таймаут, а карточка страницы сервера всё это время крутила бы
+    загрузку. Сбой ноды, которую мониторинг ещё считает живой, копией не
+    подменяется: карточка осталась бы на копии с подписью «не отвечает», хотя
+    нода на месте.
+    """
+    if await _silent_since(server, db) is None:
+        answer = await ask_node()
+        await node_answer_copy.keep_copy(db, server.id, kind, answer, min_interval_sec=keep_every_sec)
+        return answer
+    answer_copy = await node_answer_copy.load_copy(db, server.id, kind)
+    if answer_copy is None:
+        raise _no_answer_copy()
+    return _as_saved(answer_copy)
+
+
+async def _memory_metrics(server_id: int, db: AsyncSession) -> Optional[dict]:
+    """Последний ответ ноды из памяти панели; старому агенту — со скоростями из снапшота."""
+    metrics = get_latest_metrics().get(server_id)
+    if not metrics:
+        return None
+    # Скорости из снапшота нужны только старому агенту: остальные присылают свои
+    snapshot = None if metrics.get("live_rates") else await get_latest_snapshot(server_id, db)
+    if not snapshot:
+        return metrics
+    # Скорости дописываются прямо в словарь, а он общий для всех читателей хранилища
+    return enrich_metrics_with_speeds(copy.deepcopy(metrics), snapshot)
+
+
+def _marked_silent(metrics: dict, since: Optional[datetime]) -> dict:
+    """Пометка странице сервера: это не свежий ответ, нода молчит с такого-то момента.
+    Словарь метрик общий для всех читателей хранилища — пометка кладётся в копию."""
+    if since is None:
+        return metrics
+    return {**metrics, "node_silent_since": to_iso_utc(since)}
+
+
 @router.get("/{server_id}/metrics")
 async def get_metrics(
     server_id: int,
@@ -219,18 +296,13 @@ async def get_metrics(
     This avoids additional load on nodes when viewing dashboard.
     Enriches metrics with calculated network/disk speeds from latest snapshot.
     """
-    await get_server_by_id(server_id, db)
+    server = await get_server_by_id(server_id, db)
 
-    metrics = get_latest_metrics().get(server_id)
-    if not metrics:
+    metrics = await _memory_metrics(server_id, db)
+    if metrics is None:
         # No cached data
         raise HTTPException(status_code=503)
-    # Скорости из снапшота нужны только старому агенту: остальные присылают свои
-    snapshot = None if metrics.get("live_rates") else await get_latest_snapshot(server_id, db)
-    if not snapshot:
-        return metrics
-    # Скорости дописываются прямо в словарь, а он общий для всех читателей хранилища
-    return enrich_metrics_with_speeds(copy.deepcopy(metrics), snapshot)
+    return _marked_silent(metrics, await _silent_since(server, db))
 
 
 @router.get("/{server_id}/metrics/live")
@@ -243,6 +315,13 @@ async def get_live_metrics(
     Enriches metrics with calculated network/disk speeds from latest snapshot.
     """
     server = await get_server_by_id(server_id, db)
+    since = await _silent_since(server, db)
+    if since is not None:
+        # Страница сервера обновляется каждые несколько секунд: спрашивать ноду,
+        # которую мониторинг считает офлайн, — каждый раз ждать её таймаута
+        remembered = await _memory_metrics(server_id, db)
+        if remembered is not None:
+            return _marked_silent(remembered, since)
     metrics, snapshot = await asyncio.gather(
         proxy_request(server, "/api/metrics"),
         get_latest_snapshot(server_id, db),
@@ -258,8 +337,10 @@ async def get_metrics_history(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(verify_auth)
 ):
-    await get_server_by_id(server_id, db)
-    return await load_history(db, server_id, period, include_per_cpu)
+    server = await get_server_by_id(server_id, db)
+    # Отключённый сервер тоже «заморожен»: мониторинг его не опрашивает, новых точек не будет
+    frozen_at = await server_status.last_answer_if_offline(server, db)
+    return await load_history(db, server_id, period, include_per_cpu, frozen_at)
 
 
 @router.get("/{server_id}/haproxy/cached")
@@ -269,18 +350,24 @@ async def get_haproxy_cached(
     _: dict = Depends(verify_auth)
 ):
     """Get cached HAProxy data from server_cache table."""
-    await get_server_by_id(server_id, db)
+    server = await get_server_by_id(server_id, db)
     
     result = await db.execute(
         select(ServerCache).where(ServerCache.server_id == server_id)
     )
     cache = result.scalar_one_or_none()
+    # Копию пишет коллектор и молчащую ноду пропускает: у неё здесь последнее,
+    # что она успела ответить. Страница должна знать об этом, а не показывать
+    # старое как живое и не стучаться в ноду за свежим
+    since = await _silent_since(server, db)
     if cache and cache.last_haproxy_data:
         try:
-            return json.loads(cache.last_haproxy_data)
+            return _marked_silent(json.loads(cache.last_haproxy_data), since)
         except json.JSONDecodeError:
             pass
-    
+
+    if since is not None:
+        raise _no_answer_copy()
     raise HTTPException(status_code=503)
 
 
@@ -361,7 +448,10 @@ async def get_haproxy_config(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/haproxy/config")
+    return await _node_answer_or_copy(
+        server, db, AnswerKind.HAPROXY_CONFIG,
+        lambda: proxy_request(server, "/api/haproxy/config"),
+    )
 
 
 @router.get("/{server_id}/haproxy/certs")
@@ -486,6 +576,10 @@ async def disable_firewall(
 
 # ==================== DNAT (проброс портов) ====================
 
+# Страница DNAT опрашивает состояние каждые пять секунд: копию хватит обновлять раз в минуту
+DNAT_STATE_COPY_EVERY_SEC = 60.0
+
+
 @router.get("/{server_id}/dnat/state")
 async def get_dnat_state(
     server_id: int,
@@ -493,7 +587,11 @@ async def get_dnat_state(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/dnat/state", timeout=20.0)
+    return await _node_answer_or_copy(
+        server, db, AnswerKind.DNAT_STATE,
+        lambda: proxy_request(server, "/api/dnat/state", timeout=20.0),
+        keep_every_sec=DNAT_STATE_COPY_EVERY_SEC,
+    )
 
 
 @router.post("/{server_id}/dnat/reapply")
@@ -503,7 +601,9 @@ async def reapply_dnat(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/dnat/reapply", method="POST", timeout=60.0)
+    result = await proxy_request(server, "/api/dnat/reapply", method="POST", timeout=60.0)
+    node_answer_copy.expect_change(server.id, AnswerKind.DNAT_STATE)
+    return result
 
 
 @router.post("/{server_id}/dnat/clear")
@@ -514,6 +614,7 @@ async def clear_dnat(
 ):
     server = await get_server_by_id(server_id, db)
     result = await proxy_request(server, "/api/dnat/clear", method="POST", timeout=60.0)
+    node_answer_copy.expect_change(server.id, AnswerKind.DNAT_STATE)
     if result.get("success"):
         # Нода больше ничего не пробрасывает: контрольная сумма профиля на ней
         # недействительна, привязанный профиль снова ждёт раскатки
@@ -534,7 +635,10 @@ async def get_bandwidth_limit(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/system/bandwidth-limit", timeout=20.0)
+    return await _node_answer_or_copy(
+        server, db, AnswerKind.BANDWIDTH_LIMIT,
+        lambda: proxy_request(server, "/api/system/bandwidth-limit", timeout=20.0),
+    )
 
 
 @router.post("/{server_id}/system/bandwidth-limit")
@@ -545,7 +649,11 @@ async def set_bandwidth_limit(
     _: dict = Depends(verify_auth)
 ):
     server = await get_server_by_id(server_id, db)
-    return await proxy_request(server, "/api/system/bandwidth-limit", method="POST", json_data=data, timeout=40.0)
+    result = await proxy_request(server, "/api/system/bandwidth-limit", method="POST", json_data=data, timeout=40.0)
+    # Ответ на установку — то же состояние лимита плюс разовое сообщение ноды
+    state = {key: value for key, value in result.items() if key != "message"}
+    await node_answer_copy.keep_copy(db, server.id, AnswerKind.BANDWIDTH_LIMIT, state)
+    return result
 
 
 # ==================== Download proxy (прокси для загрузок ноды) ====================
@@ -650,7 +758,10 @@ async def hoster_access_scan(
             "generated_at": None,
             "findings": [],
         }
-    return await proxy_request(server, "/api/system/hoster-access/scan", timeout=60.0)
+    return await _node_answer_or_copy(
+        server, db, AnswerKind.HOSTER_SCAN,
+        lambda: proxy_request(server, "/api/system/hoster-access/scan", timeout=60.0),
+    )
 
 
 @router.post("/{server_id}/hoster-access/purge")
@@ -753,6 +864,35 @@ async def _raise_for_node_error(server: Server, exc: Exception) -> None:
     raise exc
 
 
+def _metrics_moment(metrics: dict, server: Server) -> Optional[datetime]:
+    collected_at = metrics.get("collected_at")
+    if isinstance(collected_at, (int, float)):
+        return datetime.fromtimestamp(collected_at, timezone.utc)
+    return server.last_seen
+
+
+async def _remembered_network_state(server: Server, db: AsyncSession) -> dict:
+    """Состояние сети молчащей ноды: сохранённая копия, а без неё — интерфейсы
+    и адреса из её последнего ответа с метриками."""
+    answer_copy = await node_answer_copy.load_copy(db, server.id, AnswerKind.NETWORK_STATE)
+    if answer_copy is not None:
+        state = _as_saved(answer_copy)
+    else:
+        metrics = get_latest_metrics().get(server.id)
+        state = network_transactions.state_from_metrics(metrics)
+        moment = _metrics_moment(metrics, server) if state else None
+        if moment is None:
+            raise _no_answer_copy()
+        state["saved_at"] = to_iso_utc(moment)
+        state["min_node_version"] = network_transactions.MIN_NODE_VERSION_NETWORK
+        state["node_version"] = server.node_version
+    # Транзакцию из копии нода давно решила сама; задача панели, если идёт, — живая,
+    # и карточка должна видеть её, чтобы не бросить опрос на полпути
+    state["transaction"] = None
+    state["job"] = network_transactions.job_snapshot(server.id)
+    return state
+
+
 @router.get("/{server_id}/network/state")
 async def get_network_state(
     server_id: int,
@@ -763,6 +903,8 @@ async def get_network_state(
     require_capability(server, Capability.SYSTEM, write=False)
     if not network_transactions.node_supports_network(server.node_version):
         return _network_unsupported(server)
+    if await _silent_since(server, db) is not None:
+        return await _remembered_network_state(server, db)
     try:
         state = await network_transactions.fetch_state(server)
     except network_transactions.NodeNetworkError as exc:
@@ -779,6 +921,8 @@ async def get_network_state(
     state["min_node_version_nic_routing"] = network_transactions.MIN_NODE_VERSION_NETWORK_NIC_ROUTING
     state["access_address"] = await network_transactions.access_address(server)
     state["node_version"] = server.node_version
+    # Задача панели в копию не идёт: она живёт в памяти и к моменту показа копии уже другая
+    await node_answer_copy.keep_copy(db, server.id, AnswerKind.NETWORK_STATE, state)
     state["job"] = network_transactions.job_snapshot(server.id)
     return state
 

@@ -23,6 +23,8 @@ import {
 } from '../api/client'
 import { useServersStore } from '../stores/serversStore'
 import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
+import SilentNodeBanner from '../components/servers/SilentNodeBanner'
+import { formatMoment } from '../components/servers/SavedAnswerNote'
 import MarkLayoutCard from '../components/sourcepool/MarkLayoutCard'
 import SourcePoolSnippetBlock from '../components/sourcepool/SourcePoolSnippetBlock'
 import { nodeAllows } from '../utils/nodeCapabilities'
@@ -53,7 +55,7 @@ interface StatusCard {
 export default function SourcePool() {
   const { uid, serverId } = useParams()
   const navigate = useNavigate()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const { servers, fetchServers } = useServersStore()
   const server = servers.find(s => s.id === Number(serverId))
   const systemWritable = nodeAllows(server, 'system', 'write')
@@ -177,6 +179,9 @@ export default function SourcePool() {
     }
   })()
 
+  // Запись молчащей ноде не закрыта: правки ложатся в панель и доезжают, когда нода вернётся.
+  // Закрыт только ручной опрос — отвечать на него некому
+  const nodeSilent = view?.online === false
   const canConfigure = systemWritable && !!view && view.supported_by_node
   const canToggle = canConfigure && !saving
   const marks = poolMarks(view)
@@ -223,7 +228,7 @@ export default function SourcePool() {
         <Tooltip label={t('common.refresh_data')}>
           <motion.button
             onClick={handleRefresh}
-            disabled={isRefreshing}
+            disabled={isRefreshing || nodeSilent}
             className="p-2.5 hover:bg-dark-800 rounded-xl text-dark-400 hover:text-dark-200 transition-all disabled:opacity-50"
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
@@ -246,6 +251,12 @@ export default function SourcePool() {
         </div>
       ) : view && (
         <div className="space-y-4">
+          {nodeSilent && (
+            <SilentNodeBanner>
+              {view.last_state_at && t('node_silent.saved_queued', { time: formatMoment(view.last_state_at, i18n.language) })}
+            </SilentNodeBanner>
+          )}
+
           {!view.supported_by_node && (
             <motion.div
               initial={{ opacity: 0, y: -10 }}

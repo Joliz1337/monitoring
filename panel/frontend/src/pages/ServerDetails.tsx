@@ -50,6 +50,9 @@ import NodeRestrictedNotice from '../components/servers/NodeRestrictedNotice'
 import BandwidthLimitCard from '../components/servers/BandwidthLimitCard'
 import NetworkAddressesCard from '../components/servers/NetworkAddressesCard'
 import HosterAccessCard from '../components/servers/HosterAccessCard'
+import { formatMoment } from '../components/servers/SavedAnswerNote'
+import SilentNodeBanner from '../components/servers/SilentNodeBanner'
+import FrozenHistoryNote, { chartPeriodOf } from '../components/Charts/FrozenHistoryNote'
 import NumaMemoryWarning from '../components/servers/NumaMemoryWarning'
 import { nodeAllows } from '../utils/nodeCapabilities'
 import { formatBytes, formatUptime, formatPercent, createBitsFormatter, formatTimeAgo } from '../utils/format'
@@ -112,7 +115,7 @@ export default function ServerDetails() {
   const { uid, serverId } = useParams()
   const navigate = useNavigate()
   const { servers, fetchServers } = useServersStore()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null)
   const [history, setHistory] = useState<HistoryResponse | null>(null)
@@ -145,6 +148,12 @@ export default function ServerDetails() {
   
   const server = servers.find(s => s.id === Number(serverId))
   const execAllowed = nodeAllows(server, 'exec', 'write')
+  const nodeSilent = Boolean(metrics?.node_silent_since)
+  // Свежий ответ опрашиваемой ноды говорит о статусе точнее, чем список серверов:
+  // тот читается один раз при открытии и к возвращению ноды уже устарел.
+  // Отключённый сервер панель не опрашивает — за него отвечает только список
+  const answersNow = Boolean(metrics) && !isCached && server?.is_active !== false
+  const nodeStatus = error || nodeSilent ? 'offline' : answersNow ? 'online' : (server?.status || 'online')
   
   const handleFetchError = useCallback((err: unknown) => {
     const cached = loadFromCache()
@@ -270,6 +279,17 @@ export default function ServerDetails() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period])
   
+  // Окно истории зависит от того, молчит ли нода: на длинных периодах история
+  // перечитывается раз в минуты, и без этого графики отставали бы от плашки
+  const historySilentRef = useRef<boolean | null>(null)
+  useEffect(() => {
+    if (!metrics) return
+    const linkChanged = historySilentRef.current !== null && historySilentRef.current !== nodeSilent
+    historySilentRef.current = nodeSilent
+    if (linkChanged) fetchLiveData(true)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeSilent, metrics === null])
+
   // Smart refresh: live metrics when page visible, cached when hidden
   const { isPageVisible } = useSmartRefresh(
     async () => {
@@ -311,6 +331,7 @@ export default function ServerDetails() {
   // Memoized chart data - must be before any conditional returns to follow React hooks rules.
   // null остаётся null: простой ноды на графике — разрыв, а не нулевая линия
   const points = history?.data ?? EMPTY_POINTS
+  const chartPeriod = chartPeriodOf(history, period)
   const historyGaps = history?.gaps ?? NO_GAPS
 
   // Steal — отдельной линией, только когда нода его считает: иначе в легенде
@@ -424,7 +445,7 @@ export default function ServerDetails() {
             >
               {server?.name || t('common.server')}
             </motion.h1>
-            <StatusBadge status={error ? 'offline' : (server?.status || 'online')} />
+            <StatusBadge status={nodeStatus} />
             <FAQIcon screen="PAGE_SERVER_DETAILS" />
           </div>
           {metrics && (
@@ -597,6 +618,12 @@ export default function ServerDetails() {
               )}
             </AnimatePresence>
 
+            {metrics.node_silent_since && (
+              <SilentNodeBanner>
+                {t('node_silent.last_data', { time: formatMoment(metrics.node_silent_since, i18n.language) })}
+              </SilentNodeBanner>
+            )}
+
             <NumaMemoryWarning nodes={metrics.memory.numa_nodes} />
 
             {/* Metric cards */}
@@ -682,7 +709,9 @@ export default function ServerDetails() {
               </h2>
               <PeriodSelector value={period} onChange={setPeriod} />
             </motion.div>
-            
+
+            {history?.frozen_at && <FrozenHistoryNote history={history} className="-mt-3 mb-4" />}
+
             <motion.div 
               className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6"
               initial={{ opacity: 0, y: 20 }}
@@ -701,7 +730,7 @@ export default function ServerDetails() {
                     unit="%"
                     yMin={0}
                     yMax={100}
-                    period={period}
+                    period={chartPeriod}
                     gaps={historyGaps}
                     display={cpuDisplay}
                   />
@@ -736,7 +765,7 @@ export default function ServerDetails() {
                   unit="%"
                   min={0}
                   max={100}
-                  period={period}
+                  period={chartPeriod}
                   gaps={historyGaps}
                   display={memoryDisplay}
                 />
@@ -758,7 +787,7 @@ export default function ServerDetails() {
                   series={networkHistory}
                   formatValue={bitsFormatter}
                   height={250}
-                  period={period}
+                  period={chartPeriod}
                   gaps={historyGaps}
                   display={networkDisplay}
                 />
@@ -773,7 +802,7 @@ export default function ServerDetails() {
                   data={loadAvgHistory}
                   color={METRIC_COLORS.load}
                   min={0}
-                  period={period}
+                  period={chartPeriod}
                   gaps={historyGaps}
                   display={loadDisplay}
                 />
@@ -862,17 +891,17 @@ export default function ServerDetails() {
             
             {/* Лимит полосы (tc на ноде) */}
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
-              <BandwidthLimitCard serverId={Number(serverId)} server={server} />
+              <BandwidthLimitCard serverId={Number(serverId)} server={server} nodeSilent={nodeSilent} />
             </motion.div>
 
             {/* Дополнительные IP-адреса интерфейсов (транзакция с авто-откатом на ноде) */}
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
-              <NetworkAddressesCard serverId={Number(serverId)} server={server} />
+              <NetworkAddressesCard serverId={Number(serverId)} server={server} nodeSilent={nodeSilent} />
             </motion.div>
 
             {/* Доступы хостера: разведка и вырезание (агенты, cloud-init, чужие ключи, репо) */}
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mt-6">
-              <HosterAccessCard serverId={Number(serverId)} server={server} />
+              <HosterAccessCard serverId={Number(serverId)} server={server} nodeSilent={nodeSilent} />
             </motion.div>
 
             {/* Terminal section */}

@@ -209,6 +209,9 @@ export interface NumaNode {
 export interface ServerMetrics {
   timestamp: string
   server_name: string
+  // Есть, только когда нода не отвечает: это её последний ответ из памяти панели,
+  // а значение — момент этого ответа
+  node_silent_since?: string
   timezone?: TimezoneInfo
   window?: NodeWindow | null
   cpu: {
@@ -496,6 +499,8 @@ export interface TrafficSummary {
     tx_bytes: number
   }>
   tracked_ports: number[]
+  // Сервер молчит: дни сводки отсчитаны от его последнего ответа (это он), а не от «сегодня»
+  frozen_at?: string | null
 }
 
 export type TrafficImportStatus =
@@ -570,6 +575,10 @@ export interface TrafficSeries {
   key: string
   points: TrafficSeriesPoint[]
   gaps: TrafficGap[]
+  // Сервер молчит: окно периода кончается на его последнем ответе
+  frozen_at?: string | null
+  // Часовых бакетов у молчащего сервера уже нет: точки — суточные за последний месяц
+  coarser_than_period?: boolean
 }
 
 export const authApi = {
@@ -1194,6 +1203,11 @@ export interface HistoryResponse {
   count: number
   data: HistoryPoint[]
   gaps: ChartGap[]
+  // Нода молчит: окно периода кончается на её последнем ответе (это он), а не на «сейчас».
+  // Оба поля необязательны — в кэше браузера лежат ответы, сохранённые до их появления
+  frozen_at?: string | null
+  // Источника периода у молчащей ноды уже нет: data_source — ближайший более грубый
+  coarser_than_period?: boolean
   // undefined — блок не запрашивали, null — запрашивали, но истории по ядрам нет
   per_cpu?: PerCpuHistory | null
 }
@@ -1208,9 +1222,10 @@ export const proxyApi = {
   getHistory: (serverId: number, params: { period: string; include_per_cpu?: boolean }) =>
     api.get<HistoryResponse>(`/proxy/${serverId}/metrics/history`, { params }),
   
-  // Cached HAProxy data (status, stats, rules, certs, firewall) - updated every 30s
+  // Cached HAProxy data (status, stats, rules, certs, firewall) - updated every 30s.
+  // node_silent_since — нода молчит с этого момента, а cached_at — когда снята сама копия
   getHAProxyCached: (serverId: number) =>
-    api.get<{ status?: HAProxyStatus; stats?: HAProxyLiveStats; rules?: { count: number; rules: HAProxyRule[] }; certs?: { certificates: Certificate[]; count: number }; firewall?: { rules: FirewallRule[]; count: number; active: boolean }; cached_at?: string }>(`/proxy/${serverId}/haproxy/cached`),
+    api.get<{ status?: HAProxyStatus; stats?: HAProxyLiveStats; rules?: { count: number; rules: HAProxyRule[] }; certs?: { certificates: Certificate[]; count: number }; firewall?: { rules: FirewallRule[]; count: number; active: boolean }; cached_at?: string; node_silent_since?: string }>(`/proxy/${serverId}/haproxy/cached`),
 
   getHAProxyStatus: (serverId: number) => api.get<HAProxyStatus>(`/proxy/${serverId}/haproxy/status`),
   getHAProxyStats: (serverId: number) => api.get<HAProxyLiveStats>(`/proxy/${serverId}/haproxy/stats`),
@@ -1221,7 +1236,7 @@ export const proxyApi = {
   startHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/start`),
   stopHAProxy: (serverId: number) => api.post(`/proxy/${serverId}/haproxy/stop`),
   getHAProxyConfig: (serverId: number) =>
-    api.get<{ content: string; path: string }>(`/proxy/${serverId}/haproxy/config`),
+    api.get<{ content: string; path: string; saved_at?: string }>(`/proxy/${serverId}/haproxy/config`),
   
   getHAProxyCerts: (serverId: number) => 
     api.get<{ certificates: string[] }>(`/proxy/${serverId}/haproxy/certs`),
@@ -3896,6 +3911,10 @@ export interface NetworkState {
   job: NetworkJobSnapshot | null
   /** Ответы через свою карту; нет у нод старше min_node_version_nic_routing */
   nic_routing?: NicRoutingState | null
+  /** Нода не отвечает: это копия её ответа, снятая панелью в этот момент */
+  saved_at?: string
+  /** Копии не было — интерфейсы и адреса взяты из последних метрик ноды, без шлюзов и пометок «добавлен панелью» */
+  from_metrics?: boolean
 }
 
 export interface NetworkPreview {
@@ -3913,6 +3932,8 @@ export interface BandwidthLimitState {
   applied_mbit: number | null
   qdisc: 'cake' | 'tbf' | null
   in_sync: boolean
+  /** Нода не отвечает: это копия её ответа, снятая панелью в этот момент */
+  saved_at?: string
 }
 
 export interface HosterFinding {
@@ -3933,6 +3954,8 @@ export interface HosterScanState {
   hoster_hint?: string | null
   generated_at?: string | null
   findings: HosterFinding[]
+  /** Нода не отвечает: это копия её ответа, снятая панелью в этот момент */
+  saved_at?: string
 }
 
 export interface HosterPurgeResultItem {
@@ -3958,6 +3981,8 @@ export interface DnatRuleCounters {
 }
 
 export interface DnatNodeState {
+  /** Нода не отвечает: это копия её ответа, снятая панелью в этот момент */
+  saved_at?: string
   available: boolean
   ip_forward: boolean
   rules: DnatRuleData[]

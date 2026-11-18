@@ -23,5 +23,5 @@ Diagnostics for a single node: charts, processes, terminal and power control. Th
 
 - Kill a process from the terminal: `kill <PID>` politely or `kill -9 <PID>` forcibly; the PID is in the process table.
 - **Reboot** brings the server back in a minute or two. **Shutdown** on a VPS without access to the provider console means it won't come back on its own.
-- Empty metrics mean the agent isn't answering: check connectivity with "Test" on the Servers page.
+- When the server stops answering, the page does not go empty: a yellow banner above the cards shows when the last data arrived, and the charts cover the last period it was running (an hour, a day and so on up to that moment). The bandwidth limit, IP addresses and hoster access are shown as the panel remembered them the last time the page was opened, and cannot be changed until the server is back. Once it is back, the page refreshes on its own. Check connectivity with "Test" on the Servers page.
 - Metric history is stored in the panel database and thinned over time: recent points are detailed, older ones are aggregated hourly and daily.

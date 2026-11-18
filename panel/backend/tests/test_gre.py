@@ -232,6 +232,21 @@ class ViewsTest(unittest.TestCase):
         self.assertEqual(tunnel["activity"], Activity.ALIVE.value)
         self.assertEqual(view["default_remote"], DEFAULT_REMOTE)
 
+    def test_silent_node_keeps_the_activity_it_had_when_it_last_answered(self):
+        # Нода лежит третий день: панель перестала узнавать о туннеле, и это не
+        # то же самое, что «пакетов нет уже N минут» — так карточка писала раньше
+        last_state_at = NOW - timedelta(days=3)
+        state = {"supported": True, "in_sync": True, "tunnels": [node_tunnel()]}
+        activity = {"gre-ddg1": {"rx_packets": 12, "changed_at": (last_state_at - timedelta(minutes=1)).isoformat(),
+                                 "first_seen_at": (last_state_at - timedelta(hours=1)).isoformat(), "silent": False}}
+        stored = dict(node_state=json.dumps(state), activity=json.dumps(activity), last_state_at=last_state_at)
+
+        silent_node = node_view(server(), row(**stored), False, NOW)["tunnels"][0]
+        answering_node = node_view(server(), row(**stored), True, NOW)["tunnels"][0]
+
+        self.assertEqual(silent_node["activity"], Activity.ALIVE.value)
+        self.assertEqual(answering_node["activity"], Activity.SILENT.value)
+
     def test_state_of_a_previous_variant_is_not_shown(self):
         state = {"supported": True, "in_sync": True, "tunnels": [node_tunnel(ce="91.215.40.178", pe="91.215.40.177")]}
         tunnel = node_view(server(), row(node_state=json.dumps(state)), True, NOW)["tunnels"][0]
