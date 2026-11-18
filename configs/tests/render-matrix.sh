@@ -42,6 +42,14 @@ declare -A SEEN_MIN SEEN_MAX
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 ok()   { PASS=$((PASS + 1)); }
 
+# Два факта хоста рендерер иначе прочёл бы с машины, где идёт матрица: fs.nr_open
+# и наибольший LimitNOFILE среди юнитов. На Ubuntu 26 nr_open с загрузки поднят до
+# 2147483584 — нижняя граница FD_MAX «не достигалась», и матрица падала на раннере
+# CI, хотя рендерер не менялся. Значения — дефолты Ubuntu 24; проходы, которым
+# нужны свои, задают их у самого вызова, и там они перекрывают эти.
+export MON_FACT_NROPEN=1048576
+export MON_FACT_UNITNOFILE=524288
+
 # pow2 check used for the rps_flow_cnt assertion
 is_pow2() { [ "$1" -ge 1 ] && [ $(( $1 & ($1 - 1) )) -eq 0 ]; }
 
