@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormE
 import { motion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { ChevronDown, ChevronRight, EyeOff, ListChecks, Loader2, Radar, Search, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight, EyeOff, ListChecks, Loader2, Radar, Search, Trash2 } from 'lucide-react'
 import {
   lossApi,
   type BackendEditJob,
@@ -23,20 +23,20 @@ import LossSettings from '../components/loss/LossSettings'
 import QuarantineBlock from '../components/loss/QuarantineBlock'
 import { RelayWaysCard } from '../components/loss/RelayWays'
 import type { BackendAddress, ExemptAddress } from '../components/loss/quarantineGroups'
-import TargetFilterBar from '../components/loss/TargetFilterBar'
 import {
-  NO_FILTERS,
-  applyFilters,
   describeTargets,
-  facetOptions,
   isLossy,
-  toggleFilter,
-  type FilterSelection,
-} from '../components/loss/targetFilters'
+  nextSort,
+  sortTargets,
+  type SortKey,
+  type TargetSort,
+} from '../components/loss/targetSort'
 import TraceModal from '../components/loss/TraceModal'
 import { readStorage, writeStorage } from '../utils/storage'
 
 // Нода обновляет окно каждые 2 с, панель собирает метрики раз в ~10 с
+// Столбцы, по которым таблицу адресов упорядочивает нажатие на заголовок
+const SORT_COLUMNS: SortKey[] = ['address', 'worst', 'relays', 'episode']
 const REFRESH_INTERVAL_MS = 10_000
 // Пока задание идёт — полоска обновляется часто, иначе только подхватывает новые
 const JOBS_ACTIVE_INTERVAL_MS = 2_000
@@ -75,7 +75,7 @@ export default function Loss() {
   const [quarantine, setQuarantine] = useState<QuarantineOverview | null>(null)
   const [showAll, setShowAll] = useState(false)
   // Только в памяти вкладки: сохранённый фильтр при следующем заходе молча спрятал бы новую проблему
-  const [filters, setFilters] = useState<FilterSelection>(NO_FILTERS)
+  const [sort, setSort] = useState<TargetSort | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const [checkTarget, setCheckTarget] = useState('')
@@ -234,15 +234,14 @@ export default function Loss() {
     () => describeTargets((targets ?? []).filter(target => showAll || isLossy(target.worst_loss))),
     [targets, showAll],
   )
-  const filterOptions = useMemo(() => facetOptions(rows, filters), [rows, filters])
-  const visible = useMemo(() => applyFilters(rows, filters), [rows, filters])
+  const visible = useMemo(() => sortTargets(rows, sort), [rows, sort])
   // Правка профилей — только IPv4: DNAT других адресов не держит
   const editable = useMemo(
     () => visible.map(row => row.target).filter(target => target.ip.includes('.')),
     [visible],
   )
-  // В правку уходит только отмеченное на экране. Адрес, скрытый фильтром, галочку не теряет,
-  // но в счёт и в окно правки не попадает, пока снова не появится в таблице
+  // В правку уходит только отмеченное на экране. Адрес, ушедший из таблицы (потери прошли, а
+  // «показать все» выключено), галочку не теряет, но в счёт и в окно правки не попадает
   const pickedTargets = useMemo(() => editable.filter(target => picked.has(target.target)), [editable, picked])
   const allPicked = editable.length > 0 && pickedTargets.length === editable.length
 
@@ -343,14 +342,6 @@ export default function Loss() {
           </div>
         </div>
 
-        <TargetFilterBar
-          options={filterOptions}
-          shown={visible.length}
-          total={rows.length}
-          onToggle={(facet, value) => setFilters(prev => toggleFilter(prev, facet, value))}
-          onReset={() => setFilters(NO_FILTERS)}
-        />
-
         {targets === null ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="w-6 h-6 text-accent-400 animate-spin" />
@@ -359,8 +350,6 @@ export default function Loss() {
           <p className="text-center text-sm text-dark-500 py-10 px-4">{t('loss.no_data')}</p>
         ) : rows.length === 0 ? (
           <p className="text-center text-sm text-dark-500 py-10 px-4">{t('loss.all_clean', { count: targets.length })}</p>
-        ) : visible.length === 0 ? (
-          <p className="text-center text-sm text-dark-500 py-10 px-4">{t('loss.filter_empty')}</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -375,10 +364,27 @@ export default function Loss() {
                       />
                     )}
                   </th>
-                  <th className="px-4 py-2 font-medium">{t('loss.col_address')}</th>
-                  <th className="px-4 py-2 font-medium">{t('loss.col_worst')}</th>
-                  <th className="px-4 py-2 font-medium">{t('loss.col_relays')}</th>
-                  <th className="px-4 py-2 font-medium">{t('loss.col_episode')}</th>
+                  {SORT_COLUMNS.map(key => {
+                    const active = sort?.key === key
+                    const SortIcon = !active ? ArrowUpDown : sort.descending ? ArrowDown : ArrowUp
+                    return (
+                      <th
+                        key={key}
+                        className="px-4 py-2 font-medium"
+                        aria-sort={!active ? 'none' : sort.descending ? 'descending' : 'ascending'}
+                      >
+                        <button
+                          type="button"
+                          title={t('loss.sort_hint')}
+                          onClick={() => setSort(prev => nextSort(prev, key))}
+                          className={`inline-flex items-center gap-1 transition-colors hover:text-dark-200 ${active ? 'text-accent-300' : ''}`}
+                        >
+                          {t(`loss.col_${key}`)}
+                          <SortIcon className={`w-3 h-3 ${active ? '' : 'text-dark-600'}`} />
+                        </button>
+                      </th>
+                    )
+                  })}
                   <th className="px-4 py-2" />
                 </tr>
               </thead>

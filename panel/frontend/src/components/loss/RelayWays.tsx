@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { lossApi, type LossWay, type LossWaysResult } from '../../api/client'
 import { HoverCard } from '../ui/HoverCard'
 import { LOSS_BAD_PCT, LOSS_WARN_PCT } from '../ui/LossProbeBadge'
+import { verdictText, waysVerdict } from './waysVerdict'
 
 const WAYS_REFRESH_MS = 10_000
 const SECONDS_IN_MINUTE = 60
@@ -44,11 +45,13 @@ function Body({ result }: { result: LossWaysResult | null }) {
   if (result === null) return <p className="text-dark-500">{t('loss.ways_loading')}</p>
   if (result.status !== 'ok') return <p className="text-warning">{t(`loss.ways_${result.status}`)}</p>
   if (result.ways.length === 0) return <p className="text-dark-500">{t('loss.ways_empty')}</p>
+  const verdict = waysVerdict(result.ways)
   return (
     <>
       <ul className="space-y-1.5">
         {result.ways.map(way => <WayRow key={`${way.used}:${way.local_ip}`} way={way} />)}
       </ul>
+      {verdict && <p className="text-warning mt-2">{verdictText(verdict, t)}</p>}
       <p className="text-dark-500 mt-2">{t('loss.ways_hint')}</p>
     </>
   )

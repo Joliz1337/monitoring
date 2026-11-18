@@ -51,6 +51,11 @@ class WaysResponse(BaseModel):
     ways: list[WayStats]
 
 
+class AllWaysResponse(BaseModel):
+    """Разбивка по адресам релея для всех его адресов назначения разом — странице HAProxy панели."""
+    targets: list[WaysResponse]
+
+
 class TargetRequest(BaseModel):
     """Адрес:порт, к которому нода подключается по запросу панели."""
     ip: str

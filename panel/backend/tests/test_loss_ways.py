@@ -20,7 +20,13 @@ from fastapi import HTTPException  # noqa: E402
 
 from app.routers import loss as loss_router  # noqa: E402
 from app.services import loss_overview  # noqa: E402
-from app.services.loss_overview import WAYS_PATH, CheckStatus, ways_from_server  # noqa: E402
+from app.services.loss_overview import (  # noqa: E402
+    ALL_WAYS_PATH,
+    WAYS_PATH,
+    CheckStatus,
+    all_ways_from_server,
+    ways_from_server,
+)
 
 IP, PORT = "176.97.210.52", 8443
 USED = {"local_ip": "146.185.243.157", "used": True, "loss_pct": 0.0, "rtt_ms": 41.5, "samples": 60,
@@ -104,6 +110,55 @@ class WaysFromServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_rows_that_are_not_objects_are_dropped(self):
         result = await self.ask(httpx.Response(200, json={"ways": [USED, "junk", None, 5]}))
         self.assertEqual(result["ways"], [USED])
+
+
+class AllWaysFromServerTests(unittest.IsolatedAsyncioTestCase):
+    """Все бэкенды релея одним запросом — страница HAProxy отмечает по ним строки таблицы."""
+
+    async def ask(self, response: httpx.Response | None = None, error: Exception | None = None,
+                  capabilities: str | None = None) -> dict:
+        self.client = FakeClient(response, error)
+        with mock.patch.object(loss_overview, "get_node_client", return_value=self.client),                 mock.patch.object(loss_overview, "node_auth_headers", return_value={}),                 mock.patch.object(loss_overview, "learn_from_denial", mock.AsyncMock()):
+            return await all_ways_from_server(relay(capabilities))
+
+    async def test_targets_are_keyed_the_way_haproxy_prints_them(self):
+        body = {"targets": [
+            {"ip": IP, "port": PORT, "ways": [{**USED, "debug": 1}, SPARE]},
+            {"ip": "2001:db8::5", "port": 443, "ways": [USED]},
+            "junk", {"ip": IP}, {"ip": IP, "port": 1, "ways": "many"},
+        ]}
+
+        result = await self.ask(httpx.Response(200, json=body))
+
+        self.assertEqual(result, {"status": CheckStatus.OK, "targets": [
+            {"target": f"{IP}:{PORT}", "ways": [USED, SPARE]},
+            {"target": "[2001:db8::5]:443", "ways": [USED]},
+        ]})
+        self.assertEqual(self.client.calls, [(f"https://relay{ALL_WAYS_PATH}", None)])
+
+    async def test_node_without_the_request_is_unsupported(self):
+        # Нода вчерашней сборки знает запрос по одному адресу, а общего у неё ещё нет
+        result = await self.ask(httpx.Response(404, json={"detail": "Not Found"}))
+        self.assertEqual(result, {"status": CheckStatus.UNSUPPORTED, "targets": []})
+
+    async def test_refusal_unreachable_and_garbage(self):
+        for response, error, capabilities, status in (
+            (httpx.Response(403, json={}), None, None, CheckStatus.DENIED),
+            (None, None, '{"system": "no"}', CheckStatus.DENIED),
+            (None, httpx.ConnectError("down"), None, CheckStatus.UNREACHABLE),
+            (httpx.Response(200, json={"targets": "many"}), None, None, CheckStatus.UNREACHABLE),
+            (httpx.Response(200, text="<html>"), None, None, CheckStatus.UNREACHABLE),
+        ):
+            with self.subTest(status=status, capabilities=capabilities):
+                self.assertEqual(await self.ask(response, error, capabilities), {"status": status, "targets": []})
+
+    async def test_route_asks_the_server(self):
+        server = relay()
+        answer = {"status": CheckStatus.OK, "targets": []}
+        with mock.patch.object(loss_router, "_active_server", mock.AsyncMock(return_value=server)) as find,                 mock.patch.object(loss_router, "all_ways_from_server", mock.AsyncMock(return_value=answer)) as fetch:
+            self.assertEqual(await loss_router.get_all_ways(server_id=7, db="db"), answer)
+        find.assert_awaited_once_with(7, "db")
+        fetch.assert_awaited_once_with(server)
 
 
 class WaysRouteTests(unittest.IsolatedAsyncioTestCase):

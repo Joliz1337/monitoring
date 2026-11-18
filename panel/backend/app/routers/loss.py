@@ -46,6 +46,7 @@ from app.services.loss_overview import (
     check_from_servers,
     parse_endpoint,
     parse_target,
+    all_ways_from_server,
     ways_from_server,
 )
 from app.services.loss_registry import ExcludedTarget, get_loss_registry
@@ -264,6 +265,12 @@ async def get_ways(server_id: int, target: str = Query(..., min_length=1, max_le
     except TargetParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return await ways_from_server(await _active_server(server_id, db), ip, port)
+
+
+@router.get("/ways/all")
+async def get_all_ways(server_id: int, db: AsyncSession = Depends(get_db)):
+    """Потери с каждого IP релея по всем его адресам назначения — для страницы HAProxy сервера."""
+    return await all_ways_from_server(await _active_server(server_id, db))
 
 
 @router.post("/backends/preview")

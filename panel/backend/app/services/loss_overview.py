@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 CHECK_PATH = "/api/loss-probe/check"
 WAYS_PATH = "/api/loss-probe/ways"
+ALL_WAYS_PATH = "/api/loss-probe/ways/all"
 # Подсказка открывается по наведению: дольше ждать ноду незачем
 WAYS_TIMEOUT_SEC = 5.0
 WAY_FIELDS = ("local_ip", "used", "loss_pct", "rtt_ms", "samples", "answers", "span_sec")
@@ -163,37 +164,60 @@ async def _check_one(server: Server, ip: str, port: int, client_probe: bool) -> 
     }
 
 
-def _no_ways(status: CheckStatus) -> dict:
-    return {"status": status, "ways": []}
-
-
-async def ways_from_server(server: Server, ip: str, port: int) -> dict:
-    """Потери и ответ сервера с каждого своего адреса релея — как их видит сама нода.
-    Читаются уже набранные окна: нода по этому запросу никуда не подключается."""
-    allowed, _, _ = server_allows_path(server, WAYS_PATH, "GET")
+async def _read_ways(server: Server, path: str, params: Optional[dict]) -> tuple[CheckStatus, Optional[dict]]:
+    """Ответ ноды на запрос разбивки по её адресам: статус и тело, если оно пришло словарём.
+    Нода читает уже набранные окна и по этому запросу никуда не подключается."""
+    allowed, _, _ = server_allows_path(server, path, "GET")
     if not allowed:
-        return _no_ways(CheckStatus.DENIED)
+        return CheckStatus.DENIED, None
     try:
         response = await get_node_client(server).get(
-            f"{server.url}{WAYS_PATH}", headers=node_auth_headers(server),
-            params={"ip": ip, "port": port}, timeout=WAYS_TIMEOUT_SEC,
+            f"{server.url}{path}", headers=node_auth_headers(server), params=params, timeout=WAYS_TIMEOUT_SEC,
         )
     except httpx.HTTPError as exc:
         logger.info("loss_ways_unreachable server_id=%s error=%s", server.id, exc)
-        return _no_ways(CheckStatus.UNREACHABLE)
+        return CheckStatus.UNREACHABLE, None
     if response.status_code == 404:
-        return _no_ways(CheckStatus.UNSUPPORTED)
+        return CheckStatus.UNSUPPORTED, None
     if response.status_code == 403:
         await learn_from_denial(server.id, response.status_code, _json_or_none(response))
-        return _no_ways(CheckStatus.DENIED)
+        return CheckStatus.DENIED, None
     body = _json_or_none(response)
-    ways = body.get("ways") if response.status_code == 200 and isinstance(body, dict) else None
+    if response.status_code != 200 or not isinstance(body, dict):
+        return CheckStatus.UNREACHABLE, None
+    return CheckStatus.OK, body
+
+
+def _way_rows(ways: object) -> Optional[list[dict]]:
+    """Строки путей из ответа ноды, только известные поля; None — на месте списка что-то другое."""
     if not isinstance(ways, list):
-        return _no_ways(CheckStatus.UNREACHABLE)
-    return {
-        "status": CheckStatus.OK,
-        "ways": [{field: way.get(field) for field in WAY_FIELDS} for way in ways if isinstance(way, dict)],
-    }
+        return None
+    return [{field: way.get(field) for field in WAY_FIELDS} for way in ways if isinstance(way, dict)]
+
+
+async def ways_from_server(server: Server, ip: str, port: int) -> dict:
+    """Потери и ответ сервера с каждого своего адреса релея — как их видит сама нода."""
+    status, body = await _read_ways(server, WAYS_PATH, {"ip": ip, "port": port})
+    ways = _way_rows(body.get("ways")) if body is not None else None
+    if status is CheckStatus.OK and ways is None:
+        status = CheckStatus.UNREACHABLE
+    return {"status": status, "ways": ways or []}
+
+
+async def all_ways_from_server(server: Server) -> dict:
+    """То же по всем адресам назначения релея одним запросом — странице HAProxy, которая отмечает
+    по ним строки бэкендов. Ключ — адрес, как его печатает статистика HAProxy (IPv6 в скобках)."""
+    status, body = await _read_ways(server, ALL_WAYS_PATH, None)
+    entries = body.get("targets") if body is not None else None
+    if status is CheckStatus.OK and not isinstance(entries, list):
+        status = CheckStatus.UNREACHABLE
+    targets = []
+    for entry in entries if isinstance(entries, list) else []:
+        ways = _way_rows(entry.get("ways")) if isinstance(entry, dict) else None
+        if ways is None or not isinstance(entry.get("ip"), str) or not isinstance(entry.get("port"), int):
+            continue
+        targets.append({"target": format_endpoint(entry["ip"], entry["port"]), "ways": ways})
+    return {"status": status, "targets": targets}
 
 
 def _json_or_none(response: httpx.Response) -> Optional[object]:

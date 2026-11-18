@@ -41,7 +41,7 @@ import { useOpenIds } from '../hooks/useOpenIds'
 import { useCachedData, createServerCacheKey } from '../hooks/useCachedData'
 import CachedDataBanner from '../components/ui/CachedDataBanner'
 import { Tooltip } from '../components/ui/Tooltip'
-import LossProbeBadge from '../components/ui/LossProbeBadge'
+import BackendLoss, { useAllWays } from '../components/loss/BackendLoss'
 import { FAQIcon } from '../components/FAQ'
 import { formatPortRanges, rangesCover } from '../utils/portConflicts'
 
@@ -66,6 +66,7 @@ export default function HAProxy() {
   const [certs, setCerts] = useState<string[]>([])
   const [certDetails, setCertDetails] = useState<Record<string, Certificate>>({})
   const [stats, setStats] = useState<HAProxyLiveStats | null>(null)
+  const waysByAddr = useAllWays(Number(serverId), stats !== null)
   // false после 404 от ноды — агент старой версии без эндпоинта /haproxy/stats
   const [statsSupported, setStatsSupported] = useState(true)
   
@@ -1250,7 +1251,15 @@ export default function HAProxy() {
                                   </td>
                                   <td className="px-4 py-2 text-xs text-dark-400">{row.check_status || '—'}</td>
                                   <td className="px-4 py-2">
-                                    {row.kind === 'server' && <LossProbeBadge probe={row.probe} />}
+                                    {row.kind === 'server' && (
+                                      <BackendLoss
+                                        serverId={Number(serverId)}
+                                        serverName={server?.name ?? ''}
+                                        addr={row.addr}
+                                        probe={row.probe}
+                                        ways={row.addr ? waysByAddr.get(row.addr) : undefined}
+                                      />
+                                    )}
                                   </td>
                                   <td className="px-4 py-2 text-dark-200">
                                     {row.scur}<span className="text-dark-500"> / {row.smax}</span>

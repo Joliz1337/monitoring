@@ -2458,6 +2458,12 @@ export interface LossWaysResult {
   ways: LossWay[]
 }
 
+export interface LossAllWaysResult {
+  status: LossCheckStatus
+  // target — адрес бэкенда, как его печатает статистика HAProxy
+  targets: { target: string; ways: LossWay[] }[]
+}
+
 export interface LossCheckResult {
   server_id: number
   name: string
@@ -2576,6 +2582,7 @@ export const lossApi = {
   quarantine: () => api.get<QuarantineOverview>('/loss/quarantine'),
   releaseQuarantine: (serverId: number, target: string) =>
     api.post<{ released: boolean }>('/loss/quarantine/release', { server_id: serverId, target }),
+  allWays: (serverId: number) => api.get<LossAllWaysResult>('/loss/ways/all', { params: { server_id: serverId } }),
   ways: (serverId: number, target: string) =>
     api.get<LossWaysResult>('/loss/ways', { params: { server_id: serverId, target } }),
   check: (target: string, serverIds: number[]) =>

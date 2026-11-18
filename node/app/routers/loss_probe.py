@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException, Query
 
 from app.capabilities import get_policy
-from app.models.loss_probe import LossCheckRequest, ProbeStats, TargetRequest, WaysResponse
+from app.models.loss_probe import AllWaysResponse, LossCheckRequest, ProbeStats, TargetRequest, WaysResponse
 from app.services.loss_probe import check_target, get_loss_probe, readable_sources
 from app.services.path_trace import TraceBusyError, get_path_trace_manager
 
@@ -33,6 +33,12 @@ async def ways(ip: str, port: int = Query(443, ge=1, le=65535)) -> WaysResponse:
     # Адрес из раздела, который панели читать нельзя, в метрики не попадает — не раскрывается и здесь
     visible = probe.sources_of(key) & readable_sources(get_policy())
     return WaysResponse(ip=target.ip, port=target.port, ways=probe.ways(key) if visible else [])
+
+
+@router.get("/ways/all", response_model=AllWaysResponse)
+async def all_ways() -> AllWaysResponse:
+    """То же по всем адресам назначения релея одним ответом — для страницы HAProxy панели."""
+    return AllWaysResponse(targets=get_loss_probe().all_ways(readable_sources(get_policy())))
 
 
 @router.post("/trace")

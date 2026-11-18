@@ -1300,6 +1300,25 @@ class WaysRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(way.local_ip, way.used, way.loss_pct, way.samples, way.span_sec) for way in response.ways],
                          [("192.0.2.10", True, 0.0, 1, 2), ("192.0.2.11", False, 0.0, 1, 2)])
 
+    async def all_call(self, capabilities: str = ""):
+        with mock.patch.object(loss_probe_router, "get_loss_probe", return_value=await self.probe()),                 mock.patch.object(loss_probe_router, "get_policy", return_value=parse_capabilities(capabilities)):
+            return await loss_probe_router.all_ways()
+
+    async def test_all_ways_list_every_target_at_once(self):
+        # Странице HAProxy нужны все бэкенды релея сразу: по запросу на каждый их было бы десятки
+        response = await self.all_call()
+        self.assertEqual([(entry.ip, entry.port, [way.local_ip for way in entry.ways]) for entry in response.targets],
+                         [("10.0.0.5", 443, ["192.0.2.10", "192.0.2.11"])])
+
+    async def test_all_ways_skip_targets_of_unreadable_sections(self):
+        self.assertEqual((await self.all_call(capabilities="system")).targets, [])
+
+    async def test_all_ways_skip_targets_without_attempts(self):
+        targets = {self.TARGET: {Source.HAPROXY}}
+        probe = LossProbe(discover=lambda: Discovery(targets), attempt_fn=RoutedAttempts())
+        probe.refresh_targets(targets)
+        self.assertEqual(probe.all_ways({Source.HAPROXY}), [])
+
     async def test_ways_of_unknown_target_are_empty(self):
         self.assertEqual((await self.call(ip="10.9.9.9")).ways, [])
 

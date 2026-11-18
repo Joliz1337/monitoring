@@ -719,6 +719,16 @@ class LossProbe:
         ]
         return [row for row in used + unused if row is not None]
 
+    def all_ways(self, readable: set[Source]) -> list[dict]:
+        """Разбивка по своим адресам для всех адресов назначения разом: панель отмечает на
+        странице HAProxy бэкенды, до которых с другого адреса дорога лучше, и запрос на
+        каждый бэкенд обошёлся бы в десятки обращений. Адреса закрытых разделов не входят."""
+        return [
+            {"ip": ip, "port": port, "ways": rows}
+            for (ip, port), sources in self._sources.items()
+            if sources & readable and (rows := self.ways((ip, port)))
+        ]
+
     def _way_row(self, window: Optional[AttemptWindow], seen: Optional[tuple[bool, float]],
                  local_ip: Optional[str], used: bool, queue: int, silence_counts: bool) -> Optional[dict]:
         stats = window.stats() if window else None
