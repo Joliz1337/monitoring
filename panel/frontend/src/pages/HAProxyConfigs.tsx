@@ -40,7 +40,7 @@ import { DYNAMIC_ALGORITHMS, capacityWeights, groupBackendsByServer, isCapacityI
 import { formatPortRanges, formatServerPorts, portsInterceptedOnServers, rangesCover, ServerRanges } from '../utils/portConflicts'
 import { Tooltip } from '../components/ui/Tooltip'
 import { FAQIcon } from '../components/FAQ'
-import FolderedServerPicker from '../components/servers/FolderedServerPicker'
+import LinkServerPicker from '../components/haproxy/LinkServerPicker'
 import ServerAddressesEditor from '../components/haproxy/ServerAddressesEditor'
 import ServersPasteBox, { type ServersMergeMode } from '../components/haproxy/ServersPasteBox'
 import ServersFromNodesBox from '../components/haproxy/ServersFromNodesBox'
@@ -1251,7 +1251,12 @@ const LinkedServerRow = memo(function LinkedServerRow({
 
 // ==================== Profile Detail Panel (with rules GUI) ====================
 
-function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId: number; portUsage: PortUsageMap; onRefreshList: () => void }) {
+function ProfileDetailPanel({ profileId, profileNames, portUsage, onRefreshList }: {
+  profileId: number
+  profileNames: ReadonlyMap<number, string>
+  portUsage: PortUsageMap
+  onRefreshList: () => void
+}) {
   const { t } = useTranslation()
   const [detail, setDetail] = useState<HAProxyProfileDetail | null>(null)
   const [rules, setRules] = useState<HAProxyProfileRule[]>([])
@@ -1577,7 +1582,6 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
   const unlinkFromRow = useStableHandler(handleUnlinkServer)
   const addressesSavedFromRow = useStableHandler(handleAddressesSaved)
 
-  const unlinkedServers = availableServers.filter(s => s.active_profile_id !== profileId)
   const rulePorts = useMemo(() => rules.map(r => r.listen_port), [rules])
   const dnatServers = useMemo<ServerRanges[]>(
     () => serversStatus
@@ -1586,16 +1590,8 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
     [serversStatus, portUsage],
   )
   const interceptedByDnat = portsInterceptedOnServers(dnatServers, rulePorts)
-  const dnatChip = (serverId: number) => (
-    <DnatChip ranges={portUsage[serverId]?.dnat_ranges ?? []} rulePorts={rulePorts} />
-  )
-
-  const renderCandidate = (s: HAProxyAvailableServer) => (
-    <button key={s.id} onClick={() => handleLinkServer(s.id)}
-      className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm text-dark-200 hover:bg-dark-700/50 transition-colors">
-      <span className="flex items-center gap-2"><Server className="w-3.5 h-3.5 text-dark-400" />{s.name}{dnatChip(s.id)}</span>
-      {s.active_profile_id && <span className="text-xs text-dark-500">{t('haproxy_configs.has_other_profile')}</span>}
-    </button>
+  const dnatChip = (server: HAProxyAvailableServer) => (
+    <DnatChip ranges={portUsage[server.id]?.dnat_ranges ?? []} rulePorts={rulePorts} />
   )
 
   if (loading) return <div className="flex items-center justify-center py-12"><Loader2 className="w-6 h-6 text-accent-400 animate-spin" /></div>
@@ -1885,19 +1881,13 @@ function ProfileDetailPanel({ profileId, portUsage, onRefreshList }: { profileId
           <AnimatePresence>
             {showAddServer && (
               <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="mb-3 overflow-hidden">
-                <div className="rounded-lg border border-dark-700/50 bg-dark-900/50 p-3">
-                  <div className="text-xs text-dark-400 mb-2">{t('haproxy_configs.select_server')}</div>
-                  <FolderedServerPicker
-                    servers={unlinkedServers}
-                    renderServer={renderCandidate}
-                    storageKey="haproxy_add_expanded_folders"
-                    labels={{
-                      searchPlaceholder: t('haproxy_configs.search_server'),
-                      empty: t('haproxy_configs.no_available_servers'),
-                      noFolder: t('bulk_actions.no_folder'),
-                    }}
-                  />
-                </div>
+                <LinkServerPicker
+                  servers={availableServers}
+                  profileId={profileId}
+                  profileNames={profileNames}
+                  renderBadge={dnatChip}
+                  onLink={handleLinkServer}
+                />
               </motion.div>
             )}
           </AnimatePresence>
@@ -2085,6 +2075,8 @@ export default function HAProxyConfigs() {
     await fetchProfiles()
   }
 
+  const profileNames = useMemo(() => new Map(profiles.map(profile => [profile.id, profile.name])), [profiles])
+
   const handleDelete = async (id: number) => {
     try {
       await haproxyProfilesApi.deleteProfile(id)
@@ -2138,7 +2130,7 @@ export default function HAProxyConfigs() {
                       <>
                         <ProfileCard profile={p} expanded={openIds.includes(p.id)} dragHandle={dragHandle} onExpand={toggleProfile} onEdit={setModalProfile} onDelete={handleDelete} />
                         <AnimatePresence>
-                          {openIds.includes(p.id) && <ProfileDetailPanel profileId={p.id} portUsage={portUsage} onRefreshList={fetchProfiles} />}
+                          {openIds.includes(p.id) && <ProfileDetailPanel profileId={p.id} profileNames={profileNames} portUsage={portUsage} onRefreshList={fetchProfiles} />}
                         </AnimatePresence>
                       </>
                     )}
