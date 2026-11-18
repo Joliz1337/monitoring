@@ -10,21 +10,28 @@ Runnable with plain stdlib:  python -m unittest discover -s panel/backend/tests
 import os
 import sys
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from pydantic import ValidationError  # noqa: E402
+
+from app.models import AlertSettings  # noqa: E402
+from app.routers import alerts  # noqa: E402
 from app.services import server_alerter  # noqa: E402
 from app.services.loss_alerts import (  # noqa: E402
     MIN_SAMPLES,
     RELAY_JOIN_WINDOW_SEC,
     TOTAL_LEVEL,
+    WIDE_SHARE_PCT,
     Episode,
     NO_DATA_CLOSE_SEC,
     EventKind,
     LossEvent,
     LossPolicy,
+    LossScope,
     LossTracker,
     RelayEvent,
     RelayEventKind,
@@ -410,6 +417,15 @@ class RelayProblemTests(unittest.TestCase):
         for now in range(360, 2000, 60):
             self.assertEqual(restored.evaluate(fleet(losses), POLICY, now), [])
 
+    def test_last_address_of_a_relay_without_incident_reports_recovery(self):
+        # Один-два адреса релея идут обычными блоками — и «снизились» по ним должно дойти
+        tracker = LossTracker()
+        tracker.evaluate(fleet({"62.50.144.32": 100.0}), POLICY, 0)
+        tracker.evaluate(fleet({"62.50.144.32": 100.0}), POLICY, 300)
+        tracker.evaluate(fleet({"62.50.144.32": 0.0}), POLICY, 360)
+        events = tracker.evaluate(fleet({"62.50.144.32": 0.0}), POLICY, 1260)
+        self.assertEqual(kinds(events), [(EventKind.RECOVERED, "62.50.144.32:8443")])
+
     def test_reminder_is_about_relay_not_each_address(self):
         policy = LossPolicy(threshold=20.0, sustained_sec=300, calm_sec=900, reminder_sec=3600)
         tracker = LossTracker()
@@ -451,6 +467,208 @@ class RelayProblemTests(unittest.TestCase):
         self.assertIn("<b>вк 90 1</b> — снова доходит до 21 адреса", text)
         self.assertEqual(history_text(recovered, OWNERS, "en"),
                          "Relay problem resolved: вк 90 1 — reaches 21 addresses again")
+
+
+WIDE = replace(POLICY, scope=LossScope.WIDE)
+DEAD = replace(POLICY, scope=LossScope.DEAD)
+
+
+def crowd(lossy: int, total: int, loss: float = 40.0) -> dict[str, list[RelayReading]]:
+    """Адрес проверяют total релеев, первые lossy из них его теряют."""
+    return observe(*(
+        relay(loss if relay_id <= lossy else 0.0, relay_id=relay_id, name=f"relay-{relay_id}")
+        for relay_id in range(1, total + 1)
+    ))
+
+
+def relay_losing(lost: int, watched: int) -> dict[str, list[RelayReading]]:
+    """Релей VK проверяет watched адресов и один теряет первые lost из них."""
+    return fleet({f"10.0.0.{n}": (100.0 if n <= lost else 0.0) for n in range(1, watched + 1)})
+
+
+def told(events) -> list[tuple]:
+    return [(e.kind, e.quiet) for e in events]
+
+
+def relay_told(events) -> list[tuple]:
+    return [(e.kind, e.count, e.quiet) for e in events]
+
+
+class ScopeTests(unittest.TestCase):
+    """Уровень сообщений: одиночный сбой — только в историю алертов, в Telegram —
+    то, что задело не меньше заданной доли релеев. О конце пишется, если писали о начале."""
+
+    def open_episode(self, tracker: LossTracker, observations: dict, policy: LossPolicy) -> list:
+        tracker.evaluate(observations, policy, 0)
+        return tracker.evaluate(observations, policy, 300)
+
+    def test_every_event_is_told_by_default(self):
+        self.assertEqual((POLICY.scope, POLICY.wide_share_pct), (LossScope.ALL, WIDE_SHARE_PCT))
+        self.assertEqual(told(self.open_episode(LossTracker(), crowd(1, 18), POLICY)), [(EventKind.NEW, False)])
+
+    def test_address_lost_by_a_few_relays_goes_to_history_only(self):
+        # Сообщения 2026-11-18: «селектел 1 — 45%, ещё 17 без потерь» и «…ещё 16 без потерь»
+        for lossy in (1, 2):
+            events = self.open_episode(LossTracker(), crowd(lossy, 18), WIDE)
+            self.assertEqual(told(events), [(EventKind.NEW, True)], msg=f"{lossy} of 18")
+            self.assertEqual(format_digest(events, {}, WIDE, "ru"), [])
+            [record] = history_records(events, {}, "ru")
+            self.assertTrue(record.quiet)
+
+    def test_address_lost_by_half_of_its_relays_is_told(self):
+        events = self.open_episode(LossTracker(), crowd(9, 18), WIDE)
+        self.assertEqual(told(events), [(EventKind.NEW, False)])
+        self.assertEqual(len(format_digest(events, {}, WIDE, "ru")), 1)
+        self.assertFalse(history_records(events, {}, "ru")[0].quiet)
+
+    def test_share_of_relays_is_a_setting(self):
+        events = self.open_episode(LossTracker(), crowd(2, 18), replace(WIDE, wide_share_pct=10))
+        self.assertEqual(told(events), [(EventKind.NEW, False)])
+
+    def test_told_once_the_loss_spreads(self):
+        tracker = LossTracker()
+        self.open_episode(tracker, crowd(2, 18), WIDE)
+        self.assertEqual(tracker.evaluate(crowd(9, 18), WIDE, 360), [])
+        self.assertEqual(tracker.evaluate(crowd(9, 18), WIDE, 659), [])
+        self.assertEqual(told(tracker.evaluate(crowd(9, 18), WIDE, 660)), [(EventKind.NEW, False)])
+        for now in range(720, 2000, 60):
+            self.assertEqual(tracker.evaluate(crowd(9, 18), WIDE, now), [], msg=f"t={now}")
+        tracker.evaluate(crowd(0, 18), WIDE, 2000)
+        self.assertEqual(told(tracker.evaluate(crowd(0, 18), WIDE, 2900)), [(EventKind.RECOVERED, False)])
+
+    def test_untold_episode_worsens_and_ends_in_history_only(self):
+        tracker = LossTracker()
+        self.open_episode(tracker, crowd(2, 18), WIDE)
+        tracker.evaluate(crowd(2, 18, loss=60), WIDE, 360)
+        self.assertEqual(told(tracker.evaluate(crowd(2, 18, loss=60), WIDE, 660)), [(EventKind.WORSE, True)])
+        tracker.evaluate(crowd(0, 18), WIDE, 700)
+        ended = tracker.evaluate(crowd(0, 18), WIDE, 1600)
+        self.assertEqual(told(ended), [(EventKind.RECOVERED, True)])
+        self.assertEqual(format_digest(ended, {}, WIDE, "ru"), [])
+
+    def test_untold_episode_gets_no_reminder(self):
+        policy = replace(WIDE, reminder_sec=3600)
+        tracker = LossTracker()
+        self.open_episode(tracker, crowd(2, 18), policy)
+        for now in range(360, 9000, 60):
+            self.assertEqual(tracker.evaluate(crowd(2, 18), policy, now), [], msg=f"t={now}")
+
+    def test_short_burst_on_every_relay_does_not_make_the_episode_wide(self):
+        # Сервер минуту не отвечал всем: у адреса с давним одиночным сбоем это не «потери везде»
+        tracker = LossTracker()
+        self.open_episode(tracker, crowd(2, 18), WIDE)
+        for now in (360, 420):
+            self.assertEqual(tracker.evaluate(crowd(18, 18, loss=100), WIDE, now), [], msg=f"t={now}")
+        self.assertEqual(tracker.evaluate(crowd(2, 18), WIDE, 480), [])
+        self.assertFalse(tracker.episodes[TARGET].announced)
+
+    def test_dead_scope_waits_until_the_address_barely_answers(self):
+        tracker = LossTracker()
+        self.assertEqual(told(self.open_episode(tracker, crowd(18, 18), DEAD)), [(EventKind.NEW, True)])
+        self.assertEqual(tracker.evaluate(crowd(18, 18, loss=100), DEAD, 360), [])
+        died = tracker.evaluate(crowd(18, 18, loss=100), DEAD, 660)
+        self.assertEqual([(e.kind, e.level, e.quiet) for e in died], [(EventKind.NEW, TOTAL_LEVEL, False)])
+        for now in range(720, 1500, 60):
+            self.assertEqual(tracker.evaluate(crowd(18, 18, loss=100), DEAD, now), [], msg=f"t={now}")
+
+    def test_dead_scope_counts_relays_that_lost_the_address_completely(self):
+        self.assertEqual(told(self.open_episode(LossTracker(), crowd(8, 18, loss=100), DEAD)),
+                         [(EventKind.NEW, True)])
+        self.assertEqual(told(self.open_episode(LossTracker(), crowd(9, 18, loss=100), DEAD)),
+                         [(EventKind.NEW, False)])
+
+    def test_dead_scope_follows_the_top_level_of_a_high_threshold(self):
+        # Порог 60 %: уровней два, верхний — те же 90 %
+        policy = LossPolicy(60.0, 300, 900, scope=LossScope.DEAD)
+        self.assertEqual(told(self.open_episode(LossTracker(), crowd(18, 18, loss=70), policy)),
+                         [(EventKind.NEW, True)])
+        self.assertEqual(told(self.open_episode(LossTracker(), crowd(18, 18, loss=95), policy)),
+                         [(EventKind.NEW, False)])
+
+    def test_relay_losing_a_few_of_its_addresses_goes_to_history_only(self):
+        events = self.open_episode(LossTracker(), relay_losing(3, 10), WIDE)
+        self.assertEqual(relay_told(events), [(RelayEventKind.OPEN, 3, True)])
+        self.assertEqual(format_digest(events, {}, WIDE, "ru"), [])
+        self.assertTrue(history_records(events, {}, "ru")[0].quiet)
+
+    def test_relay_losing_half_of_its_addresses_is_told(self):
+        events = self.open_episode(LossTracker(), relay_losing(5, 10), WIDE)
+        self.assertEqual(relay_told(events), [(RelayEventKind.OPEN, 5, False)])
+
+    def test_relay_problem_is_told_once_it_grows(self):
+        tracker = LossTracker()
+        self.open_episode(tracker, relay_losing(3, 10), WIDE)
+        tracker.evaluate(relay_losing(5, 10), WIDE, 360)
+        self.assertEqual(relay_told(tracker.evaluate(relay_losing(5, 10), WIDE, 660)),
+                         [(RelayEventKind.OPEN, 5, False)])
+        self.assertEqual(tracker.evaluate(relay_losing(5, 10), WIDE, 720), [])
+        tracker.evaluate(relay_losing(0, 10), WIDE, 780)
+        self.assertEqual(relay_told(tracker.evaluate(relay_losing(0, 10), WIDE, 1680)),
+                         [(RelayEventKind.RECOVERED, 5, False)])
+
+    def test_untold_relay_problem_ends_in_history_only(self):
+        policy = replace(WIDE, reminder_sec=3600)
+        tracker = LossTracker()
+        self.open_episode(tracker, relay_losing(3, 10), policy)
+        for now in range(360, 9000, 60):
+            self.assertEqual(tracker.evaluate(relay_losing(3, 10), policy, now), [], msg=f"t={now}")
+        tracker.evaluate(relay_losing(0, 10), policy, 9000)
+        self.assertEqual(relay_told(tracker.evaluate(relay_losing(0, 10), policy, 9900)),
+                         [(RelayEventKind.RECOVERED, 3, True)])
+
+    def test_dead_scope_keeps_relay_problems_in_history(self):
+        events = self.open_episode(LossTracker(), relay_losing(10, 10), DEAD)
+        self.assertEqual(relay_told(events), [(RelayEventKind.OPEN, 10, True)])
+
+    def test_relay_problem_is_told_when_its_addresses_are_wide_themselves(self):
+        # Адрес проверяют всего два релея: потерян одним — уже половиной. Таких у релея три из двадцати:
+        # для релея это мелочь, но сообщения этих адресов ушли внутрь его проблемы — молчать о ней нельзя
+        lost = fleet({f"10.0.0.{n}": 100.0 for n in range(1, 4)}, clean_relays=1)
+        healthy = fleet({f"10.0.1.{n}": 0.0 for n in range(1, 18)})
+        for policy in (WIDE, DEAD):
+            events = self.open_episode(LossTracker(), {**lost, **healthy}, policy)
+            self.assertEqual(relay_told(events), [(RelayEventKind.OPEN, 3, False)], msg=policy.scope)
+
+    def test_quiet_relay_problem_is_told_once_its_addresses_become_wide(self):
+        tracker = LossTracker()
+        self.open_episode(tracker, relay_losing(3, 10), WIDE)
+        # Остальные релеи перестали проверять эти три адреса: остался один, и тот до них доходит
+        few_watchers = {
+            **fleet({f"10.0.0.{n}": 100.0 for n in range(1, 4)}, clean_relays=1),
+            **fleet({f"10.0.0.{n}": 0.0 for n in range(4, 11)}),
+        }
+        self.assertEqual(relay_told(tracker.evaluate(few_watchers, WIDE, 360)), [(RelayEventKind.OPEN, 3, False)])
+        self.assertEqual(tracker.evaluate(few_watchers, WIDE, 420), [])
+
+    def test_raising_the_level_tells_about_open_untold_episodes(self):
+        tracker = LossTracker()
+        self.open_episode(tracker, crowd(2, 18), WIDE)
+        self.assertEqual(told(tracker.evaluate(crowd(2, 18), POLICY, 360)), [(EventKind.NEW, False)])
+        self.assertEqual(tracker.evaluate(crowd(2, 18), POLICY, 420), [])
+
+    def test_episode_that_is_already_calm_is_not_told_late(self):
+        tracker = LossTracker()
+        self.open_episode(tracker, crowd(2, 18), WIDE)
+        self.assertEqual(tracker.evaluate(crowd(0, 18), POLICY, 360), [])
+        self.assertEqual(told(tracker.evaluate(crowd(0, 18), POLICY, 1260)), [(EventKind.RECOVERED, True)])
+
+    def test_restored_untold_episode_stays_untold(self):
+        first = LossTracker()
+        self.open_episode(first, crowd(2, 18), WIDE)
+        restored = LossTracker(episodes=dict(first.episodes))
+        for now in range(360, 2000, 60):
+            self.assertEqual(restored.evaluate(crowd(2, 18), WIDE, now), [], msg=f"t={now}")
+        self.assertFalse(restored.episodes[TARGET].announced)
+
+    def test_digest_leaves_out_what_goes_to_history_only(self):
+        everywhere = observe(*(
+            relay(40, relay_id=relay_id, name=f"relay-{relay_id}", ip="45.145.56.96") for relay_id in range(1, 4)
+        ))
+        events = self.open_episode(LossTracker(), {**crowd(2, 18), **everywhere}, WIDE)
+        [text] = format_digest(events, {}, WIDE, "ru")
+        self.assertIn("45.145.56.96:8443", text)
+        self.assertNotIn(TARGET, text)
+        self.assertEqual(sorted(record.quiet for record in history_records(events, {}, "ru")), [False, True])
 
 
 class TotalOnlyEpisodeTests(unittest.TestCase):
@@ -676,6 +894,7 @@ class AlerterWiringTests(unittest.IsolatedAsyncioTestCase):
         self.settings = SimpleNamespace(
             packet_loss_enabled=True, packet_loss_threshold=20.0, packet_loss_sustained_seconds=300,
             packet_loss_calm_seconds=900, packet_loss_reminder_hours=0,
+            packet_loss_scope="all", packet_loss_wide_share=50,
         )
 
     def feed(self, now: float, *relays: tuple[int, str, float]):
@@ -712,6 +931,24 @@ class AlerterWiringTests(unittest.IsolatedAsyncioTestCase):
         events = self.alerter._send_loss_digest.await_args.args[1]
         self.assertEqual([(e.kind, e.level) for e in events], [(EventKind.NEW, TOTAL_LEVEL)])
 
+    async def test_message_level_and_share_come_from_settings(self):
+        self.settings.packet_loss_scope, self.settings.packet_loss_wide_share = "wide", 30
+        policy = self.alerter._loss_policy(self.settings)
+        self.assertEqual((policy.scope, policy.wide_share_pct), (LossScope.WIDE, 30))
+
+    async def test_settings_row_from_before_the_update_means_all_events(self):
+        self.settings.packet_loss_scope, self.settings.packet_loss_wide_share = None, None
+        policy = self.alerter._loss_policy(self.settings)
+        self.assertEqual((policy.scope, policy.wide_share_pct), (LossScope.ALL, WIDE_SHARE_PCT))
+
+    async def test_single_relay_loss_reaches_the_digest_marked_for_history_only(self):
+        self.settings.packet_loss_scope = "wide"
+        for now in (0, 300):
+            self.feed(now, (1, "VK", 40.0), (2, "Timeweb", 0.0), (3, "Selectel", 0.0))
+            await self.alerter._check_packet_loss(self.settings, set(), now)
+        events = self.alerter._send_loss_digest.await_args.args[1]
+        self.assertEqual(told(events), [(EventKind.NEW, True)])
+
     async def test_disabling_drops_open_episodes(self):
         for now in (0, 300):
             self.feed(now, (1, "VK", 40.0))
@@ -719,6 +956,48 @@ class AlerterWiringTests(unittest.IsolatedAsyncioTestCase):
         self.settings.packet_loss_enabled = False
         await self.alerter._check_packet_loss(self.settings, set(), 360)
         self.assertEqual(self.alerter.loss_episodes(), {})
+
+
+class SettingsDb:
+    """alert_settings из одной строки."""
+
+    def __init__(self):
+        self.settings = AlertSettings()
+        self.refresh = mock.AsyncMock()
+        self.commit = mock.AsyncMock()
+
+    async def execute(self, statement) -> SimpleNamespace:
+        return SimpleNamespace(scalar_one_or_none=lambda: self.settings)
+
+
+class MessageLevelSettingsTests(unittest.IsolatedAsyncioTestCase):
+    """Уровень сообщений алерта «Потери с релеев» в настройках алертов."""
+
+    async def test_row_from_before_the_update_reads_as_all_events(self):
+        response = await alerts.get_alert_settings(SettingsDb())
+        self.assertEqual(
+            (response["packet_loss_scope"], response["packet_loss_wide_share"]), ("all", WIDE_SHARE_PCT),
+        )
+
+    async def test_level_and_share_are_saved_as_plain_values(self):
+        db = SettingsDb()
+        response = await alerts.update_alert_settings(
+            alerts.AlertSettingsUpdate(packet_loss_scope="wide", packet_loss_wide_share=30), db,
+        )
+        self.assertEqual((response["packet_loss_scope"], response["packet_loss_wide_share"]), ("wide", 30))
+        # В колонку уходит строка, а не член перечисления
+        self.assertIs(type(db.settings.packet_loss_scope), str)
+
+    async def test_saving_other_settings_keeps_the_level(self):
+        db = SettingsDb()
+        await alerts.update_alert_settings(alerts.AlertSettingsUpdate(packet_loss_scope="dead"), db)
+        response = await alerts.update_alert_settings(alerts.AlertSettingsUpdate(packet_loss_threshold=30), db)
+        self.assertEqual(response["packet_loss_scope"], "dead")
+
+    def test_unknown_level_and_share_out_of_range_are_rejected(self):
+        for bad in ({"packet_loss_scope": "loud"}, {"packet_loss_wide_share": 5}, {"packet_loss_wide_share": 101}):
+            with self.assertRaises(ValidationError, msg=str(bad)):
+                alerts.AlertSettingsUpdate(**bad)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from typing import Optional
 from app.database import get_db
 from app.models import AlertSettings, AlertHistory
 from app.auth import verify_auth
+from app.services.loss_alerts import WIDE_SHARE_BOUNDS, WIDE_SHARE_PCT, LossScope, parse_scope
 from app.services.server_alerter import get_server_alerter
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
@@ -94,6 +95,8 @@ class AlertSettingsUpdate(BaseModel):
     packet_loss_sustained_seconds: Optional[int] = Field(None, ge=60, le=3600)
     packet_loss_calm_seconds: Optional[int] = Field(None, ge=60, le=7200)
     packet_loss_reminder_hours: Optional[int] = Field(None, ge=0, le=168)
+    packet_loss_scope: Optional[LossScope] = None
+    packet_loss_wide_share: Optional[int] = Field(None, ge=WIDE_SHARE_BOUNDS[0], le=WIDE_SHARE_BOUNDS[1])
 
     panel_host_enabled: Optional[bool] = None
     panel_cpu_threshold: Optional[float] = Field(None, ge=50, le=100)
@@ -180,6 +183,8 @@ def _settings_to_dict(s: AlertSettings) -> dict:
         "packet_loss_sustained_seconds": s.packet_loss_sustained_seconds,
         "packet_loss_calm_seconds": s.packet_loss_calm_seconds,
         "packet_loss_reminder_hours": s.packet_loss_reminder_hours,
+        "packet_loss_scope": parse_scope(s.packet_loss_scope).value,
+        "packet_loss_wide_share": s.packet_loss_wide_share or WIDE_SHARE_PCT,
         "panel_host_enabled": s.panel_host_enabled,
         "panel_cpu_threshold": s.panel_cpu_threshold,
         "panel_ram_threshold": s.panel_ram_threshold,
@@ -229,7 +234,8 @@ async def update_alert_settings(
         "load_avg_excluded_server_ids", "conntrack_excluded_server_ids",
         "packet_loss_excluded_server_ids", "steal_excluded_server_ids",
     }
-    update_data = data.model_dump(exclude_unset=True)
+    # mode="json": уровень сообщений о потерях уходит в колонку строкой, а не членом перечисления
+    update_data = data.model_dump(exclude_unset=True, mode="json")
     if update_data.get("telegram_bot_token") == SECRET_MASK:
         del update_data["telegram_bot_token"]
     for key, value in update_data.items():

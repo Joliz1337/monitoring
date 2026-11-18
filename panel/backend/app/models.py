@@ -906,6 +906,10 @@ class AlertSettings(Base):
     packet_loss_calm_seconds = Column(Integer, default=900)
     # Напоминание об открытых эпизодах; 0 — выключено
     packet_loss_reminder_hours = Column(Integer, default=0)
+    # О чём писать в Telegram (loss_alerts.LossScope): all / wide / dead
+    packet_loss_scope = Column(String(8), default="all")
+    # Доля релеев адреса, с которой проблема считается общей, %
+    packet_loss_wide_share = Column(Integer, default=50)
 
     # Хост самой панели (см. panel_host_alerts): CPU и память — среднее
     # за интервал проверки, диск — заполнение раздела с базой
@@ -944,6 +948,7 @@ class PacketLossEpisode(Base):
     notified_at = Column(Float, nullable=False)
     calm_since = Column(Float, nullable=True)
     blamed_relay_id = Column(Integer, nullable=True)  # адрес теряет только этот релей
+    announced = Column(Boolean, default=True)  # о начале писали в Telegram
 
 
 class PacketLossRelayIncident(Base):
@@ -955,6 +960,7 @@ class PacketLossRelayIncident(Base):
     opened_at = Column(Float, nullable=False)
     notified_at = Column(Float, nullable=False)
     reported = Column(Integer, nullable=False)
+    announced = Column(Boolean, default=True)
 
 
 class BackendQuarantine(Base):

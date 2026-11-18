@@ -855,6 +855,26 @@ class LossDigestDeliveryTest(AlerterTickTestCase):
         await self.telegram_recovers(db)
         self.assertEqual([row.notified for row in db.history], [True, True])
 
+    async def test_history_only_event_is_saved_as_not_sent(self):
+        # Уровень сообщений оставил событие только в истории: в Telegram о нём ничего не уходит
+        records = [
+            HistoryRecord(1, "relay-1", False, "New loss: 203.0.113.5:443", {"kind": "new"}, quiet=True),
+            HistoryRecord(2, "relay-2", False, "New loss: 203.0.113.9:443", {"kind": "new"}),
+        ]
+        db = FakeDatabase([])
+        with (
+            mock.patch.object(server_alerter, "async_session", db),
+            mock.patch.object(server_alerter, "format_digest", return_value=["digest about 203.0.113.9"]),
+            mock.patch.object(server_alerter, "history_records", return_value=records),
+        ):
+            await self.alerter._send_loss_digest(settings(), [], {}, None)
+
+        self.assertEqual(self.telegram.texts, ["digest about 203.0.113.9"])
+        self.assertEqual(
+            [(row.server_name, row.notified) for row in db.history], [("relay-1", False), ("relay-2", True)],
+        )
+        self.assertEqual(self.telegram.queued, [])
+
 
 if __name__ == "__main__":
     unittest.main()

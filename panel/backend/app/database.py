@@ -289,6 +289,20 @@ async def run_migrations(conn):
         except Exception:
             pass
 
+    # О начале эпизодов, открытых до появления уровня сообщений, писали всегда — отсюда TRUE
+    for loss_table in ("packet_loss_episodes", "packet_loss_relay_incidents"):
+        result = await conn.execute(
+            text("SELECT column_name FROM information_schema.columns WHERE table_name = :name"),
+            {"name": loss_table},
+        )
+        loss_columns = {row[0] for row in result.fetchall()}
+        if loss_columns and "announced" not in loss_columns:
+            try:
+                await conn.execute(text(f'ALTER TABLE {loss_table} ADD COLUMN "announced" BOOLEAN DEFAULT TRUE'))
+                logger.info(f"Added column: {loss_table}.announced")
+            except Exception:
+                pass
+
     # Check remnawave_settings columns
     result = await conn.execute(text("""
         SELECT column_name FROM information_schema.columns 
@@ -464,6 +478,8 @@ async def run_migrations(conn):
             ("packet_loss_calm_seconds", "INTEGER DEFAULT 900"),
             ("packet_loss_reminder_hours", "INTEGER DEFAULT 0"),
             ("packet_loss_excluded_server_ids", "TEXT"),
+            ("packet_loss_scope", "VARCHAR(8) DEFAULT 'all'"),
+            ("packet_loss_wide_share", "INTEGER DEFAULT 50"),
         ]
         for col_name, col_type in packet_loss_columns:
             if col_name not in alert_columns:

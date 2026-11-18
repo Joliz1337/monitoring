@@ -17,6 +17,7 @@ from app.models import Server, AlertSettings, AlertHistory, PacketLossEpisode, P
 from app.services.http_client import get_node_client, node_auth_headers, sanitize_proxy
 from app.services.latest_metrics import get_latest_metrics
 from app.services.loss_alerts import (
+    WIDE_SHARE_PCT,
     AlertEvent,
     Episode,
     LossPolicy,
@@ -25,6 +26,7 @@ from app.services.loss_alerts import (
     collect_observations,
     format_digest,
     history_records,
+    parse_scope,
     total_only_targets,
 )
 from app.services.loss_registry import get_loss_registry
@@ -1094,6 +1096,8 @@ class ServerAlerter:
             sustained_sec=settings.packet_loss_sustained_seconds or 300,
             calm_sec=settings.packet_loss_calm_seconds or 900,
             reminder_sec=(settings.packet_loss_reminder_hours or 0) * 3600,
+            scope=parse_scope(settings.packet_loss_scope),
+            wide_share_pct=settings.packet_loss_wide_share or WIDE_SHARE_PCT,
         )
 
     async def _check_packet_loss(self, settings: AlertSettings, excluded_ids: set[int], now: float):
@@ -1114,6 +1118,7 @@ class ServerAlerter:
 
     async def _send_loss_digest(self, settings: AlertSettings, events: list[AlertEvent],
                                 owners: dict[str, str], policy: LossPolicy):
+        """В историю идёт всё; в Telegram — что положено уровню сообщений (`format_digest`)."""
         lang = self._lang(settings)
         delivery = await self._send_telegram(settings, format_digest(events, owners, policy, lang))
         for record in history_records(events, owners, lang):
@@ -1121,7 +1126,7 @@ class ServerAlerter:
                 record.server_id, record.server_name,
                 "packet_loss_recovery" if record.recovered else "packet_loss",
                 "info" if record.recovered else "warning",
-                record.message, record.details, delivery,
+                record.message, record.details, None if record.quiet else delivery,
             )
 
     async def _restore_loss_episodes(self):
@@ -1132,17 +1137,19 @@ class ServerAlerter:
         except Exception as e:
             logger.warning(f"Packet loss episodes restore failed: {e}")
             return
+        # Строка, записанная до появления уровня сообщений, — о начале тогда писали всегда
         self._loss.episodes = {
             row.target: Episode(
                 level=row.level, opened_at=row.opened_at, last_data_at=row.last_data_at,
                 notified_at=row.notified_at, calm_since=row.calm_since, blamed_relay_id=row.blamed_relay_id,
+                announced=row.announced is not False,
             )
             for row in rows
         }
         self._loss.incidents = {
             row.relay_id: RelayIncident(
                 relay_name=row.relay_name, opened_at=row.opened_at,
-                notified_at=row.notified_at, reported=row.reported,
+                notified_at=row.notified_at, reported=row.reported, announced=row.announced is not False,
             )
             for row in incident_rows
         }

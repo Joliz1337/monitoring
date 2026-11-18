@@ -2236,6 +2236,9 @@ export const remnawaveApi = {
 }
 
 // Server Alerts
+// О чём алерт «Потери с релеев» пишет в Telegram: обо всём, без одиночных сбоев, только об умерших адресах
+export type PacketLossScope = 'all' | 'wide' | 'dead'
+
 export interface AlertSettingsData {
   enabled: boolean
   // В ответе — маска '***', если токен сохранён, иначе ''. В PUT: новый токен, '' стирает
@@ -2298,6 +2301,9 @@ export interface AlertSettingsData {
   packet_loss_sustained_seconds: number
   packet_loss_calm_seconds: number
   packet_loss_reminder_hours: number
+  packet_loss_scope: PacketLossScope
+  // С какой доли релеев адреса проблема считается общей, %
+  packet_loss_wide_share: number
   panel_host_enabled: boolean
   panel_cpu_threshold: number
   panel_ram_threshold: number

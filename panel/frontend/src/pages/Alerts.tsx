@@ -13,6 +13,7 @@ import { formatBitsPerSec } from '../utils/format'
 import { Tooltip } from '../components/ui/Tooltip'
 import { SecretInput } from '../components/ui/SecretInput'
 import { FAQIcon, type FAQScreen } from '../components/FAQ'
+import LossScopeChoice from '../components/loss/LossScopeChoice'
 
 type TriggerSection = 'panel_host' | 'offline' | 'cpu' | 'steal' | 'ram' | 'network' | 'load_avg' | 'conntrack' | 'packet_loss' | 'tcp'
 
@@ -526,6 +527,13 @@ export default function Alerts() {
           <SliderRow label={t('alerts.sustained')} value={settings.packet_loss_sustained_seconds} min={60} max={1800} step={60} format={v => `${v / 60} ${t('alerts.minutes_short')}`} onSave={v => save({ packet_loss_sustained_seconds: v })} />
           <SliderRow label={t('alerts.packet_loss_calm')} value={settings.packet_loss_calm_seconds} min={300} max={3600} step={300} format={v => `${v / 60} ${t('alerts.minutes_short')}`} onSave={v => save({ packet_loss_calm_seconds: v })} />
           <SliderRow label={t('alerts.packet_loss_reminder')} value={settings.packet_loss_reminder_hours} min={0} max={24} step={6} format={v => v ? `${v} ${t('alerts.hours_short')}` : t('alerts.reminder_off')} onSave={v => save({ packet_loss_reminder_hours: v })} />
+          <LossScopeChoice
+            scope={settings.packet_loss_scope}
+            share={settings.packet_loss_wide_share}
+            onChange={scope => save({ packet_loss_scope: scope })}
+          >
+            <SliderRow label={t('alerts.packet_loss_wide_share')} value={settings.packet_loss_wide_share} min={10} max={100} step={10} format={v => `${v}%`} onSave={v => save({ packet_loss_wide_share: v })} />
+          </LossScopeChoice>
           <TriggerIgnoreList
             ids={settings.packet_loss_excluded_server_ids}
             allServers={allServers}

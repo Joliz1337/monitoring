@@ -27,6 +27,13 @@
 когда закрылся последний его адрес. Начинают терять адрес и другие релеи —
 адрес выходит из группы и приходит обычными «новыми потерями».
 
+Уровень сообщений (LossScope). Эпизоды ведутся одинаково при любом уровне, он
+решает только, что уйдёт в Telegram: всё; только общее — адрес теряют не меньше
+заданной доли его релеев либо релей один теряет не меньше той же доли своих
+адресов; только адрес, который почти не отвечает этой доле релеев. Остальные
+события выходят с пометкой quiet — их получает история алертов. О конце пишется,
+только если писали о начале; узкий сбой, ставший общим, объявляется в этот момент.
+
 Эпизоды и проблемы релеев хранятся в базе, поэтому перезапуск панели уже
 известные потери повторно не присылает.
 """
@@ -56,6 +63,27 @@ RELAY_MIN_TARGETS = 3
 # нельзя: пара давно висящих адресов глушила бы все новые беды релея
 RELAY_JOIN_WINDOW_SEC = 900
 RELAY_OWNERS_SHOWN = 12
+# С какой доли проблема считается общей: адрес теряет половина его релеев,
+# релей один теряет половину своих адресов
+WIDE_SHARE_PCT = 50
+WIDE_SHARE_BOUNDS = (10, 100)
+
+
+class LossScope(str, Enum):
+    """О чём писать в Telegram. В историю алертов идёт всё при любом уровне."""
+    ALL = "all"
+    # Только общее: одиночный сбой на паре релеев — обычная работа парка
+    WIDE = "wide"
+    # Только адрес, который почти не отвечает большинству своих релеев
+    DEAD = "dead"
+
+
+def parse_scope(value: object) -> LossScope:
+    """Запись настроек, сделанная до появления уровня, значит «все события»."""
+    try:
+        return LossScope(value)
+    except ValueError:
+        return LossScope.ALL
 
 
 @dataclass(frozen=True)
@@ -73,9 +101,14 @@ class LossPolicy:
     reminder_sec: float = 0
     first_level: int = 1
     recovery_ratio: float = RECOVERY_RATIO
+    scope: LossScope = LossScope.ALL
+    wide_share_pct: int = WIDE_SHARE_PCT
 
     def level_bounds(self) -> list[float]:
         return [self.threshold] + [bound for bound in SEVERITY_BOUNDS if bound > self.threshold]
+
+    def top_level(self) -> int:
+        return self.first_level + len(self.level_bounds()) - 1
 
     def recovery_bound(self) -> float:
         return self.threshold * self.recovery_ratio
@@ -94,6 +127,8 @@ class Episode:
     notified_at: float
     calm_since: Optional[float] = None
     blamed_relay_id: Optional[int] = None
+    # Писали ли о начале в Telegram: о том, о чём молчали, не пишется и дальше
+    announced: bool = True
 
 
 @dataclass
@@ -103,6 +138,7 @@ class RelayIncident:
     notified_at: float
     # Сколько адресов релея получатель уже знает: рост сверх этого — «+N»
     reported: int
+    announced: bool = True
 
 
 class EventKind(str, Enum):
@@ -126,6 +162,8 @@ class LossEvent:
     level: int
     relays: tuple[RelayReading, ...]
     blamed_relay_id: Optional[int] = None
+    # Только в историю алертов: выбранному уровню сообщений событие не положено
+    quiet: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +175,7 @@ class RelayEvent:
     readings: tuple[LossReading, ...] = ()
     other_relays: int = 0
     added: int = 0
+    quiet: bool = False
 
 
 AlertEvent = LossEvent | RelayEvent
@@ -226,6 +265,26 @@ class LossTracker:
             default=0,
         )
 
+    def _reach(self, target: str, watchers: int, policy: LossPolicy, now: float) -> int:
+        """Наивысший уровень, который держит не меньше заданной доли релеев адреса.
+        Считается релей, продержавший уровень всё удержание — как при открытии
+        эпизода: минута без ответа всем релеям узкий сбой общим не делает."""
+        timers = self._above.get(target, {})
+        for level in range(policy.top_level(), policy.first_level - 1, -1):
+            lossy = sum(
+                1 for (_, held_level), since in timers.items()
+                if held_level == level and now - since >= policy.sustained_sec
+            )
+            if lossy and lossy * 100 >= policy.wide_share_pct * watchers:
+                return level
+        return 0
+
+    def _worth_telling(self, target: str, watchers: int, policy: LossPolicy, now: float) -> bool:
+        if policy.scope is LossScope.ALL:
+            return True
+        needed = policy.top_level() if policy.scope is LossScope.DEAD else policy.first_level
+        return self._reach(target, watchers, policy, now) >= needed
+
     def _step(self, target: str, relays: tuple[RelayReading, ...], policy: LossPolicy,
               now: float) -> Optional[LossEvent]:
         level = self._level(target, now, policy.sustained_sec)
@@ -238,9 +297,10 @@ class LossTracker:
             # через минуту пришло бы «почти не отвечает»
             level = self._level(target, now, 0)
             blamed = blamed_relay(relays, policy)
+            told = self._worth_telling(target, len(relays), policy, now)
             self.episodes[target] = Episode(level=level, opened_at=now, last_data_at=now,
-                                            notified_at=now, blamed_relay_id=blamed)
-            return LossEvent(EventKind.NEW, target, level, relays, blamed)
+                                            notified_at=now, blamed_relay_id=blamed, announced=told)
+            return LossEvent(EventKind.NEW, target, level, relays, blamed, quiet=not told)
 
         blamed = episode.blamed_relay_id
         if blamed is not None:
@@ -248,12 +308,14 @@ class LossTracker:
                 # Без виноватого релея остальные выглядели бы затишьем — ждём его
                 relays = ()
             elif self._level(target, now, policy.sustained_sec, skip_relay=blamed):
+                told = self._worth_telling(target, len(relays), policy, now)
                 episode.blamed_relay_id = None
                 episode.level = self._level(target, now, 0)
                 episode.last_data_at = now
                 episode.notified_at = now
                 episode.calm_since = None
-                return LossEvent(EventKind.NEW, target, episode.level, relays)
+                episode.announced = episode.announced or told
+                return LossEvent(EventKind.NEW, target, episode.level, relays, quiet=not told)
 
         if not relays:
             episode.calm_since = None
@@ -262,22 +324,31 @@ class LossTracker:
             return None
         episode.last_data_at = now
 
+        calm = all(r.reading.loss_pct < policy.recovery_bound() for r in relays)
+        if not episode.announced and not calm and self._worth_telling(target, len(relays), policy, now):
+            # Узкий сбой стал общим либо уровень сообщений подняли: о начале ещё не писали
+            episode.announced = True
+            episode.level = max(episode.level, self._level(target, now, 0))
+            episode.calm_since = None
+            episode.notified_at = now
+            return LossEvent(EventKind.NEW, target, episode.level, relays, blamed)
+
         if level > episode.level:
             episode.level = level
             episode.calm_since = None
             episode.notified_at = now
-            return LossEvent(EventKind.WORSE, target, level, relays, blamed)
+            return LossEvent(EventKind.WORSE, target, level, relays, blamed, quiet=not episode.announced)
 
-        if all(r.reading.loss_pct < policy.recovery_bound() for r in relays):
+        if calm:
             if episode.calm_since is None:
                 episode.calm_since = now
             if now - episode.calm_since >= policy.calm_sec:
                 del self.episodes[target]
-                return LossEvent(EventKind.RECOVERED, target, 0, relays, blamed)
+                return LossEvent(EventKind.RECOVERED, target, 0, relays, blamed, quiet=not episode.announced)
             return None
         episode.calm_since = None
 
-        if policy.reminder_sec and now - episode.notified_at >= policy.reminder_sec:
+        if episode.announced and policy.reminder_sec and now - episode.notified_at >= policy.reminder_sec:
             episode.notified_at = now
             return LossEvent(EventKind.STILL, target, episode.level, relays, blamed)
         return None
@@ -293,19 +364,31 @@ class LossTracker:
         for event in events:
             if event.blamed_relay_id is not None:
                 events_by_relay.setdefault(event.blamed_relay_id, []).append(event)
-        names = {r.relay_id: r.relay_name for relays in observations.values() for r in relays}
+        names: dict[int, str] = {}
+        # Релей → сколько адресов он проверяет: от этого считается доля потерянных
+        watched: Counter[int] = Counter()
+        for relays in observations.values():
+            for relay in relays:
+                names[relay.relay_id] = relay.relay_name
+                watched[relay.relay_id] += 1
 
         result: list[AlertEvent] = [e for e in events if e.blamed_relay_id is None]
-        for relay_id in sorted(set(blamed_targets) | set(self.incidents)):
+        # Релей из одних событий — закрылся его последний адрес: «снизились» по нему тоже событие
+        for relay_id in sorted(set(blamed_targets) | set(self.incidents) | set(events_by_relay)):
             targets = blamed_targets.get(relay_id, [])
             own_events = events_by_relay.get(relay_id, [])
             incident = self.incidents.get(relay_id)
+            # События адресов проблемы наружу не выходят — их заменяет событие релея. Поэтому
+            # о проблеме пишется и тогда, когда писать положено хотя бы об одном её адресе
+            told = self._relay_worth_telling(len(targets), watched[relay_id], policy) or any(
+                self.episodes[target].announced for target in targets
+            )
 
             if incident is None:
                 if len(targets) < RELAY_MIN_TARGETS:
                     result.extend(own_events)
                     continue
-                incident = RelayIncident(names.get(relay_id, f"#{relay_id}"), now, now, len(targets))
+                incident = RelayIncident(names.get(relay_id, f"#{relay_id}"), now, now, len(targets), told)
                 self.incidents[relay_id] = incident
                 result.append(self._relay_event(RelayEventKind.OPEN, relay_id, incident, targets, observations))
                 continue
@@ -315,7 +398,15 @@ class LossTracker:
                 # Адреса закрылись без данных (релей пропал) — проблема закрывается так же молча
                 if any(e.kind is EventKind.RECOVERED for e in own_events):
                     result.append(RelayEvent(RelayEventKind.RECOVERED, relay_id, incident.relay_name,
-                                             incident.reported))
+                                             incident.reported, quiet=not incident.announced))
+                continue
+
+            if not incident.announced and told:
+                # Проблема релея доросла до общей либо уровень сообщений подняли: о начале ещё не писали
+                incident.announced = True
+                incident.reported = len(targets)
+                incident.notified_at = now
+                result.append(self._relay_event(RelayEventKind.OPEN, relay_id, incident, targets, observations))
                 continue
 
             if len(targets) > incident.reported:
@@ -327,10 +418,19 @@ class LossTracker:
                                                     observations, added))
                 continue
 
-            if policy.reminder_sec and now - incident.notified_at >= policy.reminder_sec:
+            if incident.announced and policy.reminder_sec and now - incident.notified_at >= policy.reminder_sec:
                 incident.notified_at = now
                 result.append(self._relay_event(RelayEventKind.STILL, relay_id, incident, targets, observations))
         return result
+
+    @staticmethod
+    def _relay_worth_telling(lost: int, watched: int, policy: LossPolicy) -> bool:
+        """Проблема релея общая, когда он один теряет не меньше заданной доли своих адресов."""
+        if policy.scope is LossScope.ALL:
+            return True
+        if policy.scope is LossScope.DEAD:
+            return False
+        return watched > 0 and lost * 100 >= policy.wide_share_pct * watched
 
     @staticmethod
     def _relay_event(kind: RelayEventKind, relay_id: int, incident: RelayIncident, targets: list[str],
@@ -345,7 +445,7 @@ class LossTracker:
                     other_relays.add(relay.relay_id)
         readings.sort(key=lambda reading: -reading.loss_pct)
         return RelayEvent(kind, relay_id, incident.relay_name, len(targets), tuple(readings),
-                          len(other_relays), added)
+                          len(other_relays), added, quiet=not incident.announced)
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +621,9 @@ def _pack(sections: list[tuple[str, list[str]]], limit: int) -> list[str]:
 
 def format_digest(events: list[AlertEvent], owners: dict[str, str], policy: LossPolicy,
                   lang: str, limit: int = MESSAGE_LIMIT) -> list[str]:
-    """Все изменения проверки — одним сообщением, при нехватке места — частями."""
+    """Все изменения проверки — одним сообщением, при нехватке места — частями.
+    События, оставленные уровнем сообщений только истории, сюда не идут."""
+    events = [event for event in events if not event.quiet]
     if not events:
         return []
     lang = _lang(lang)
@@ -567,6 +669,8 @@ class HistoryRecord:
     recovered: bool
     message: str
     details: dict
+    # В Telegram событие не уходило
+    quiet: bool = False
 
 
 def history_records(events: list[AlertEvent], owners: dict[str, str], lang: str) -> list[HistoryRecord]:
@@ -589,7 +693,7 @@ def history_records(events: list[AlertEvent], owners: dict[str, str], lang: str)
                 ],
             }
             records.append(HistoryRecord(event.relay_id, event.relay_name, recovered,
-                                         history_text(event, owners, lang), details))
+                                         history_text(event, owners, lang), details, event.quiet))
             continue
         if not event.relays:
             continue
@@ -606,5 +710,5 @@ def history_records(events: list[AlertEvent], owners: dict[str, str], lang: str)
         }
         worst = event.relays[0]
         records.append(HistoryRecord(worst.relay_id, worst.relay_name, recovered,
-                                     history_text(event, owners, lang), details))
+                                     history_text(event, owners, lang), details, event.quiet))
     return records
