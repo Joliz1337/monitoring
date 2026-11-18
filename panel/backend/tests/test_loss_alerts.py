@@ -11,6 +11,7 @@ import os
 import sys
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -21,10 +22,14 @@ from pydantic import ValidationError  # noqa: E402
 from app.models import AlertSettings  # noqa: E402
 from app.routers import alerts  # noqa: E402
 from app.services import server_alerter  # noqa: E402
+from app.services.latest_metrics import LatestMetrics  # noqa: E402
 from app.services.loss_alerts import (  # noqa: E402
     MIN_SAMPLES,
+    OUTAGE_SETTLE_SEC,
     RELAY_JOIN_WINDOW_SEC,
     TOTAL_LEVEL,
+    VERDICT_WAIT_FROM_SEC,
+    VERDICT_WAIT_UNTIL_SEC,
     WIDE_SHARE_PCT,
     Episode,
     NO_DATA_CLOSE_SEC,
@@ -33,11 +38,13 @@ from app.services.loss_alerts import (  # noqa: E402
     LossPolicy,
     LossScope,
     LossTracker,
+    OutageWatch,
     RelayEvent,
     RelayEventKind,
     RelayReading,
     collect_observations,
     format_digest,
+    held_targets,
     history_records,
     history_text,
     total_only_targets,
@@ -82,6 +89,10 @@ def kinds(events) -> list[tuple[EventKind, str]]:
     return [(e.kind, e.target) for e in events]
 
 
+def interfaces(*ips: str) -> dict:
+    return {"network": {"interfaces": [{"addresses": [{"type": "ipv4", "address": ip} for ip in ips]}]}}
+
+
 class RegistryTests(unittest.TestCase):
     def test_parses_probe_block_and_ipv4_addresses(self):
         metrics = {
@@ -101,6 +112,23 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(registry.owners(), {"1.2.3.4": "exit"})
         now[0] += 91
         self.assertEqual((registry.fresh(), registry.owners()), ([], {}))
+
+    def test_silence_is_counted_from_the_last_answer(self):
+        now = [1000.0]
+        registry = LossRegistry(clock=lambda: now[0])
+        self.assertIsNone(registry.silent_for(1))
+        registry.update(1, "exit", {})
+        now[0] += 45
+        self.assertEqual(registry.silent_for(1), 45)
+
+    def test_live_addresses_skip_listed_and_silent_nodes(self):
+        now = [1000.0]
+        registry = LossRegistry(clock=lambda: now[0])
+        registry.update(1, "gone", interfaces("1.2.3.4"))
+        now[0] += 91
+        registry.update(2, "standby", interfaces("5.6.7.8", "10.0.0.1"))
+        registry.update(3, "returned", interfaces("9.9.9.9"))
+        self.assertEqual(registry.live_addresses(except_ids={3}), frozenset({"5.6.7.8", "10.0.0.1"}))
 
     def test_excluded_servers_drop_out_as_relays_and_as_destinations(self):
         registry = LossRegistry(clock=lambda: 0.0)
@@ -299,6 +327,85 @@ class EpisodeTests(unittest.TestCase):
             self.assertEqual(tracker.evaluate(observe(relay(100)), POLICY, now), [], msg=f"t={now}")
 
 
+class HeldTargetTests(unittest.TestCase):
+    """Адрес сервера, о недоступности которого панель уже сообщила: про потери
+    до него ничего нового не пишется, замеры при этом идут своим чередом."""
+
+    HELD = frozenset({TARGET})
+
+    def test_no_new_loss_while_held(self):
+        tracker = LossTracker()
+        for now in range(0, 3600, 60):
+            self.assertEqual(tracker.evaluate(observe(relay(100)), POLICY, now, held=self.HELD), [], msg=f"t={now}")
+        self.assertEqual(tracker.episodes, {})
+
+    def test_loss_that_outlives_the_hold_is_reported_at_once(self):
+        # Сервер вернулся, а порт так и не отвечает: удержание давно пройдено
+        tracker = LossTracker()
+        for now in (0, 300, 600):
+            tracker.evaluate(observe(relay(100)), POLICY, now, held=self.HELD)
+        opened = tracker.evaluate(observe(relay(100)), POLICY, 660)
+        self.assertEqual([(e.kind, e.level) for e in opened], [(EventKind.NEW, 3)])
+
+    def test_open_episode_gets_neither_worse_nor_reminder_while_held(self):
+        policy = LossPolicy(threshold=20.0, sustained_sec=300, calm_sec=900, reminder_sec=3600)
+        tracker = LossTracker()
+        tracker.evaluate(observe(relay(40)), policy, 0)
+        tracker.evaluate(observe(relay(40)), policy, 300)
+        for now in range(360, 8000, 60):
+            self.assertEqual(tracker.evaluate(observe(relay(100)), policy, now, held=self.HELD), [], msg=f"t={now}")
+        self.assertEqual(tracker.episodes[TARGET].level, 1)
+
+    def test_open_episode_still_recovers_while_held(self):
+        # Лежит только агент ноды: релеи до адреса доходят, и объявленные потери закрываются
+        tracker = LossTracker()
+        tracker.evaluate(observe(relay(40)), POLICY, 0)
+        tracker.evaluate(observe(relay(40)), POLICY, 300)
+        self.assertEqual(tracker.evaluate(observe(relay(0)), POLICY, 400, held=self.HELD), [])
+        recovered = tracker.evaluate(observe(relay(0)), POLICY, 1300, held=self.HELD)
+        self.assertEqual(kinds(recovered), [(EventKind.RECOVERED, TARGET)])
+
+    def test_other_targets_are_not_held(self):
+        tracker = LossTracker()
+        both = observe(relay(100), relay(100, ip="45.145.56.96"))
+        tracker.evaluate(both, POLICY, 0, held=self.HELD)
+        self.assertEqual(
+            kinds(tracker.evaluate(both, POLICY, 300, held=self.HELD)), [(EventKind.NEW, "45.145.56.96:8443")],
+        )
+
+    def test_held_targets_are_picked_by_ip(self):
+        observations = observe(relay(100), relay(100, ip="45.145.56.96"))
+        self.assertEqual(held_targets(observations, frozenset({"62.50.146.225"})), frozenset({TARGET}))
+        self.assertEqual(held_targets(observations, frozenset()), frozenset())
+
+
+class OutageWatchTests(unittest.TestCase):
+    """Окно замеров ноды помнит простой ещё пару минут после него: вернувшийся
+    сервер не в счёт, пока простой не уйдёт из окон."""
+
+    def test_returned_server_stays_unsettled_for_the_settle_period(self):
+        watch = OutageWatch()
+        none, down = frozenset(), frozenset({7})
+        self.assertEqual(watch.update(none, down, 0), down)
+        self.assertEqual(watch.update(down, down, 600), down)
+        self.assertEqual(watch.update(down, none, 660), down)
+        self.assertEqual(watch.update(none, none, 660 + OUTAGE_SETTLE_SEC - 1), down)
+        self.assertEqual(watch.update(none, none, 660 + OUTAGE_SETTLE_SEC), none)
+
+    def test_settle_period_counts_from_the_last_return(self):
+        watch = OutageWatch()
+        none, down = frozenset(), frozenset({7})
+        watch.update(down, none, 0)
+        watch.update(none, down, 100)
+        self.assertEqual(watch.update(down, none, 200), down)
+        self.assertEqual(watch.update(none, none, OUTAGE_SETTLE_SEC + 100), down)
+        self.assertEqual(watch.update(none, none, OUTAGE_SETTLE_SEC + 200), none)
+
+    def test_only_servers_that_were_down_settle(self):
+        watch = OutageWatch()
+        self.assertEqual(watch.update(frozenset({1}), frozenset({2}), 0), frozenset({1, 2}))
+
+
 VK = (1, "вк 90 1")
 FIRST_WAVE = {  # не-Hetzner адреса — потерялись первыми
     "176.97.210.169": "тубо", "176.97.210.175": "тубо", "176.97.210.204": "тубо", "176.97.210.52": "тубо",
@@ -386,6 +493,21 @@ class RelayProblemTests(unittest.TestCase):
         self.assertEqual([(type(e), e.kind, e.target, e.blamed_relay_id) for e in events],
                          [(LossEvent, EventKind.NEW, f"{target}:8443", None)])
         self.assertIn(VK[0], tracker.incidents)
+
+    def test_held_address_does_not_leave_the_group(self):
+        # Сервер адреса упал: его перестали видеть все релеи, но это уже не новость
+        tracker = LossTracker()
+        losses = dict.fromkeys(list(FIRST_WAVE)[:4], 100.0)
+        self.open_incident(tracker, losses)
+        target = "176.97.210.169"
+        all_lose = fleet(losses)
+        all_lose[f"{target}:8443"] = [
+            relay(100, relay_id=r.relay_id, name=r.relay_name, ip=target) for r in all_lose[f"{target}:8443"]
+        ]
+        held = frozenset({f"{target}:8443"})
+        for now in range(360, 1200, 60):
+            self.assertEqual(tracker.evaluate(all_lose, POLICY, now, held=held), [], msg=f"t={now}")
+        self.assertEqual(tracker.episodes[f"{target}:8443"].blamed_relay_id, VK[0])
 
     def test_growth_after_join_window_is_one_line(self):
         tracker = LossTracker()
@@ -535,6 +657,18 @@ class ScopeTests(unittest.TestCase):
             self.assertEqual(tracker.evaluate(crowd(9, 18), WIDE, now), [], msg=f"t={now}")
         tracker.evaluate(crowd(0, 18), WIDE, 2000)
         self.assertEqual(told(tracker.evaluate(crowd(0, 18), WIDE, 2900)), [(EventKind.RECOVERED, False)])
+
+    def test_spread_of_an_untold_episode_stays_silent_while_its_server_is_held(self):
+        # Пара релеев теряла адрес — об этом не писали. Потом сервер упал, и его теряют
+        # все: «узкий сбой стал общим» здесь та же новость, что уже сказана алертом
+        # о недоступности. Придержку сняли, потери остались — тогда и пишем
+        tracker = LossTracker()
+        held = frozenset({TARGET})
+        self.open_episode(tracker, crowd(2, 18), WIDE)
+        for now in range(360, 1500, 60):
+            self.assertEqual(tracker.evaluate(crowd(18, 18, loss=100), WIDE, now, held=held), [], msg=f"t={now}")
+
+        self.assertEqual(told(tracker.evaluate(crowd(18, 18, loss=100), WIDE, 1500)), [(EventKind.NEW, False)])
 
     def test_untold_episode_worsens_and_ends_in_history_only(self):
         tracker = LossTracker()
@@ -893,7 +1027,7 @@ class AlerterWiringTests(unittest.IsolatedAsyncioTestCase):
         self.alerter._send_loss_digest = mock.AsyncMock()
         self.settings = SimpleNamespace(
             packet_loss_enabled=True, packet_loss_threshold=20.0, packet_loss_sustained_seconds=300,
-            packet_loss_calm_seconds=900, packet_loss_reminder_hours=0,
+            packet_loss_calm_seconds=900, packet_loss_reminder_hours=0, offline_enabled=True,
             packet_loss_scope="all", packet_loss_wide_share=50,
         )
 
@@ -998,6 +1132,308 @@ class MessageLevelSettingsTests(unittest.IsolatedAsyncioTestCase):
         for bad in ({"packet_loss_scope": "loud"}, {"packet_loss_wide_share": 5}, {"packet_loss_wide_share": 101}):
             with self.assertRaises(ValidationError, msg=str(bad)):
                 alerts.AlertSettingsUpdate(**bad)
+
+
+EXIT = 9
+EXIT_IP = "62.50.146.225"
+OTHER_IP = "45.145.56.96"
+
+
+def server(server_id: int, *, silent_for_seconds: float = 5, url: str | None = None) -> SimpleNamespace:
+    last_seen = datetime.now(timezone.utc) - timedelta(seconds=silent_for_seconds)
+    return SimpleNamespace(
+        id=server_id, name=f"node-{server_id}", url=url or f"https://node-{server_id}.example:9100",
+        last_seen=last_seen, proxy_url=None,
+    )
+
+
+def probe(ip: str, loss: float) -> dict:
+    return {"loss_probe": [{"ip": ip, "port": 8443, "loss_pct": loss, "rtt_ms": None, "samples": 60}]}
+
+
+class AlerterOutageTests(unittest.IsolatedAsyncioTestCase):
+    """Про упавший сервер уже сказал алерт о недоступности: потери до его адресов
+    и по его собственным замерам — та же новость второй раз."""
+
+    def setUp(self):
+        now = [0.0]
+        self.clock = now
+        self.registry = LossRegistry(clock=lambda: now[0])
+        self.latest = LatestMetrics()
+        for patcher in (
+            mock.patch.object(server_alerter, "get_loss_registry", return_value=self.registry),
+            mock.patch.object(server_alerter, "get_latest_metrics", return_value=self.latest),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.alerter = server_alerter.ServerAlerter()
+        self.alerter._trigger_excluded = {"packet_loss": set(), "offline": set()}
+        self.alerter._save_loss_episodes = mock.AsyncMock()
+        self.alerter._send_loss_digest = mock.AsyncMock()
+        self.settings = SimpleNamespace(
+            packet_loss_enabled=True, packet_loss_threshold=20.0, packet_loss_sustained_seconds=60,
+            packet_loss_calm_seconds=900, packet_loss_reminder_hours=0,
+            packet_loss_scope="all", packet_loss_wide_share=50,
+            offline_enabled=True, check_interval=60, offline_fail_threshold=3,
+        )
+        self.exit = server(EXIT, silent_for_seconds=3600)
+        self.latest.put(EXIT, interfaces(EXIT_IP))
+
+    def exit_is_down(self, down: bool = True) -> None:
+        state = self.alerter._states.setdefault(EXIT, server_alerter.ServerAlertState())
+        state.was_offline = down
+        if not down:
+            self.exit.last_seen = datetime.now(timezone.utc)
+
+    async def check(self, now: float, loss_to_exit: float, was_down: frozenset[int] = frozenset()) -> None:
+        """Релей прислал замер до адреса сервера EXIT, затем проверка потерь."""
+        self.clock[0] = now
+        self.registry.update(1, "relay-1", probe(EXIT_IP, loss_to_exit))
+        await self.alerter._check_packet_loss(self.settings, set(), now, [self.exit], was_down)
+
+    def reported(self) -> list[tuple[EventKind, str]]:
+        return [kind for call in self.alerter._send_loss_digest.await_args_list for kind in kinds(call.args[1])]
+
+    async def test_loss_to_a_down_server_is_not_reported(self):
+        self.exit_is_down()
+        for now in range(0, 900, 60):
+            await self.check(now, 100.0, was_down=frozenset({EXIT}))
+        self.assertEqual(self.reported(), [])
+
+    async def test_stale_down_flag_does_not_hold_once_the_server_is_out_of_the_offline_check(self):
+        # Сервер лежал, и проверку доступности для него выключили: пометку «лежит» больше некому снять
+        self.exit_is_down()
+        self.alerter._trigger_excluded["offline"] = {EXIT}
+        await self.check(0, 100.0)
+        await self.check(60, 100.0)
+        self.assertEqual(self.reported(), [(EventKind.NEW, TARGET)])
+
+    async def test_stale_down_flag_does_not_hold_once_offline_alerts_are_disabled(self):
+        self.exit_is_down()
+        self.settings.offline_enabled = False
+        await self.check(0, 100.0)
+        await self.check(60, 100.0)
+        self.assertEqual(self.reported(), [(EventKind.NEW, TARGET)])
+
+    async def test_address_from_the_server_url_is_enough(self):
+        # После перезапуска панели последнего ответа упавшей ноды в памяти может не быть
+        self.latest.forget(EXIT)
+        self.exit.url = f"https://{EXIT_IP}:9100"
+        self.exit_is_down()
+        for now in (0, 60, 120):
+            await self.check(now, 100.0, was_down=frozenset({EXIT}))
+        self.assertEqual(self.reported(), [])
+
+    async def test_returned_server_is_quiet_while_probe_windows_remember_the_outage(self):
+        self.exit_is_down()
+        await self.check(0, 100.0, was_down=frozenset({EXIT}))
+        self.exit_is_down(False)
+        await self.check(60, 100.0, was_down=frozenset({EXIT}))
+        await self.check(120, 50.0)
+        for now in range(180, 60 + OUTAGE_SETTLE_SEC + 300, 60):
+            await self.check(now, 0.0)
+        self.assertEqual(self.reported(), [])
+
+    async def test_loss_that_stays_after_the_return_is_reported(self):
+        # Сервер поднялся, а его порт — нет
+        self.exit_is_down()
+        await self.check(0, 100.0, was_down=frozenset({EXIT}))
+        self.exit_is_down(False)
+        await self.check(60, 100.0, was_down=frozenset({EXIT}))
+        for now in range(120, 60 + OUTAGE_SETTLE_SEC, 60):
+            await self.check(now, 100.0)
+        self.assertEqual(self.reported(), [])
+        await self.check(60 + OUTAGE_SETTLE_SEC, 100.0)
+        self.assertEqual(self.reported(), [(EventKind.NEW, TARGET)])
+
+    async def test_measurements_of_a_returned_server_do_not_count(self):
+        # Нода пережила обрыв сети: её собственное окно полно потерь до всех её адресов
+        self.exit_is_down(False)
+
+        async def check(now: float, was_down: frozenset[int] = frozenset()) -> None:
+            self.clock[0] = now
+            self.registry.update(EXIT, "exit", probe(OTHER_IP, 100.0))
+            self.registry.update(1, "relay-1", probe(OTHER_IP, 0.0))
+            await self.alerter._check_packet_loss(self.settings, set(), now, [self.exit], was_down)
+
+        await check(0, frozenset({EXIT}))
+        for now in range(60, OUTAGE_SETTLE_SEC, 60):
+            await check(now)
+        self.assertEqual(self.reported(), [])
+        # Простой ушёл из окна, а потери остались — теперь это замер, а не эхо простоя
+        await check(OUTAGE_SETTLE_SEC)
+        await check(OUTAGE_SETTLE_SEC + 60)
+        self.assertEqual(self.reported(), [(EventKind.NEW, f"{OTHER_IP}:8443")])
+
+    async def test_address_that_moved_to_a_live_server_is_reported(self):
+        self.exit_is_down()
+        for now in (0, 60):
+            self.clock[0] = now
+            self.registry.update(5, "standby", interfaces(EXIT_IP))
+            await self.check(now, 100.0, was_down=frozenset({EXIT}))
+        self.assertEqual(self.reported(), [(EventKind.NEW, TARGET)])
+
+    async def exit_went_silent(self) -> None:
+        """Нода ответила панели в последний раз в нулевую секунду; порог неответов ещё не пройден."""
+        self.exit = server(EXIT, silent_for_seconds=VERDICT_WAIT_FROM_SEC + 15)
+        self.registry.update(EXIT, "exit", interfaces(EXIT_IP))
+        await self.check(0, 100.0)
+
+    async def test_silent_server_waits_for_the_offline_verdict(self):
+        await self.exit_went_silent()
+        await self.check(60, 100.0)
+        await self.check(120, 100.0)
+        self.assertEqual(self.reported(), [])
+        # Проба ответила: сервер жив, а адрес не отвечает — это уже новость
+        self.exit.last_seen = datetime.now(timezone.utc) - timedelta(hours=1)
+        await self.check(180, 100.0)
+        self.assertEqual(self.reported(), [(EventKind.NEW, TARGET)])
+
+    async def test_slow_offline_check_does_not_hold_loss_for_long(self):
+        # Десять неответов до вердикта: столько алерт о потерях ждать не должен
+        self.settings.offline_fail_threshold = 10
+        await self.exit_went_silent()
+        for now in range(60, VERDICT_WAIT_UNTIL_SEC + 1, 60):
+            await self.check(now, 100.0)
+        self.assertEqual(self.reported(), [])
+        await self.check(VERDICT_WAIT_UNTIL_SEC + 60, 100.0)
+        self.assertEqual(self.reported(), [(EventKind.NEW, TARGET)])
+
+    async def test_silent_server_is_not_held_when_its_offline_check_is_off(self):
+        self.alerter._trigger_excluded["offline"] = {EXIT}
+        await self.exit_went_silent()
+        await self.check(60, 100.0)
+        self.assertEqual(self.reported(), [(EventKind.NEW, TARGET)])
+
+    async def test_silent_server_is_not_held_when_offline_alerts_are_disabled(self):
+        self.settings.offline_enabled = False
+        await self.exit_went_silent()
+        await self.check(60, 100.0)
+        self.assertEqual(self.reported(), [(EventKind.NEW, TARGET)])
+
+
+class FakeTelegram:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def send_message(self, bot_token: str, chat_id: str, text: str, **_delivery) -> bool:
+        self.texts.append(text)
+        return True
+
+
+class FakeSession:
+    """Подмена async_session: на запрос отдаёт серверы, записи принимает молча."""
+
+    def __init__(self, servers: list) -> None:
+        self.servers = servers
+
+    def __call__(self) -> "FakeSession":
+        return self
+
+    async def __aenter__(self) -> "FakeSession":
+        return self
+
+    async def __aexit__(self, *exc_info) -> bool:
+        return False
+
+    async def execute(self, statement) -> SimpleNamespace:
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(self.servers)), all=lambda: [])
+
+    def add(self, row) -> None:
+        pass
+
+    def add_all(self, rows) -> None:
+        pass
+
+    async def commit(self) -> None:
+        pass
+
+
+class OutageEndToEndTest(unittest.IsolatedAsyncioTestCase):
+    """Весь обход алертера: сервер упал и вернулся — два сообщения о нём самом
+    и ни одного о потерях до него."""
+
+    def setUp(self):
+        now = [1000.0]
+        self.clock = now
+        self.registry = LossRegistry(clock=lambda: now[0])
+        self.telegram = FakeTelegram()
+        self.exit = server(EXIT, silent_for_seconds=3600, url=f"https://{EXIT_IP}:9100")
+        self.relays = [server(1), server(2)]
+        for patcher in (
+            mock.patch.object(server_alerter, "get_loss_registry", return_value=self.registry),
+            mock.patch.object(server_alerter, "get_latest_metrics", return_value=LatestMetrics()),
+            mock.patch.object(server_alerter, "async_session", FakeSession([self.exit, *self.relays])),
+            mock.patch.object(server_alerter.time, "time", lambda: now[0]),
+            mock.patch("app.services.telegram_bot.get_telegram_bot_service", return_value=self.telegram),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.alerter = server_alerter.ServerAlerter()
+        # Пропавшая нода не отвечает ни по API, ни по ICMP
+        self.alerter._active_probe_sequence = mock.AsyncMock(return_value=(True, False))
+        self.settings = AlertSettings(
+            language="en", telegram_bot_token="123456:token", telegram_chat_id="-1001",
+            check_interval=60, alert_cooldown=1800,
+            offline_enabled=True, offline_fail_threshold=3, offline_recovery_notify=True,
+            packet_loss_enabled=True, packet_loss_threshold=20.0,
+            packet_loss_sustained_seconds=300, packet_loss_calm_seconds=900,
+        )
+
+    async def tick(self, now: float, loss_to_exit: float) -> None:
+        self.clock[0] = now
+        for relay_node in self.relays:
+            relay_node.last_seen = datetime.now(timezone.utc)
+            self.registry.update(relay_node.id, relay_node.name, probe(EXIT_IP, loss_to_exit))
+        await self.alerter._check_all(self.settings)
+
+    def exit_answered(self, now: float) -> None:
+        self.clock[0] = now
+        self.exit.last_seen = datetime.now(timezone.utc)
+        self.registry.update(EXIT, self.exit.name, interfaces(EXIT_IP))
+
+    def loss_messages(self) -> list[str]:
+        return [text for text in self.telegram.texts if "Packet loss" in text]
+
+    async def test_short_sustain_does_not_let_loss_overtake_the_offline_alert(self):
+        self.settings.packet_loss_sustained_seconds = 60
+        self.exit_answered(1000)
+        await self.tick(1000, 100.0)
+        # Нода молчит сто секунд: порог неответов ещё не пройден, а удержание потерь уже да
+        self.exit.last_seen = datetime.now(timezone.utc) - timedelta(seconds=100)
+        await self.tick(1100, 100.0)
+        self.assertEqual(self.telegram.texts, [])
+        self.exit.last_seen = datetime.now(timezone.utc) - timedelta(hours=1)
+        for now in (1220, 1280, 1340):
+            await self.tick(now, 100.0)
+        self.assertEqual(len(self.telegram.texts), 1, msg=self.telegram.texts)
+        self.assertIn(f"Server {self.exit.name} is offline", self.telegram.texts[0])
+
+    async def test_server_that_returned_while_the_panel_restarted_is_quiet_too(self):
+        # Пометку «лежит» панель подняла из истории алертов, окна релеев ещё полны простоя
+        self.settings.packet_loss_sustained_seconds = 60
+        self.alerter._states[EXIT] = server_alerter.ServerAlertState()
+        self.alerter._states[EXIT].was_offline = True
+        residual_loss = {1000: 100.0, 1060: 100.0, 1120: 50.0}
+        for now in range(1000, 2400, 60):
+            self.exit_answered(now)
+            await self.tick(now, residual_loss.get(now, 0.0))
+        self.assertEqual(len(self.telegram.texts), 1, msg=self.telegram.texts)
+        self.assertEqual(self.loss_messages(), [])
+
+    async def test_outage_is_two_messages_about_the_server_and_none_about_loss(self):
+        for now in range(1000, 2200, 60):
+            await self.tick(now, 100.0)
+        self.assertEqual(len(self.telegram.texts), 1)
+        self.assertIn(f"Server {self.exit.name} is offline", self.telegram.texts[0])
+
+        self.exit.last_seen = datetime.now(timezone.utc)
+        await self.tick(2200, 100.0)
+        await self.tick(2260, 50.0)
+        for now in range(2320, 4000, 60):
+            await self.tick(now, 0.0)
+        self.assertEqual(len(self.telegram.texts), 2, msg=self.telegram.texts)
+        self.assertFalse([text for text in self.telegram.texts if "Packet loss" in text])
 
 
 if __name__ == "__main__":

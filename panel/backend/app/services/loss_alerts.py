@@ -34,6 +34,13 @@
 события выходят с пометкой quiet — их получает история алертов. О конце пишется,
 только если писали о начале; узкий сбой, ставший общим, объявляется в этот момент.
 
+Упавший сервер. Про сервер, о недоступности которого панель сообщила, потери до
+его адресов — та же новость второй раз. Такой адрес придержан (`held`): эпизод
+не открывается, уровень не растёт, напоминаний нет; «снизились» по уже
+объявленному эпизоду приходит как обычно. Придержка живёт ещё OUTAGE_SETTLE_SEC
+после возвращения сервера (OutageWatch) — окна замеров релеев помнят простой;
+замеры самого вернувшегося сервера это время не учитываются.
+
 Эпизоды и проблемы релеев хранятся в базе, поэтому перезапуск панели уже
 известные потери повторно не присылает.
 """
@@ -84,6 +91,18 @@ def parse_scope(value: object) -> LossScope:
         return LossScope(value)
     except ValueError:
         return LossScope.ALL
+
+
+# Окно замеров ноды — 60 попыток раз в 2 с — помнит простой ещё две минуты после
+# него: и релеи до вернувшегося сервера, и он сам, если пережил обрыв сети.
+# Запас — на сервисы, которые поднимаются позже агента ноды
+OUTAGE_SETTLE_SEC = 300
+# Нода замолчала, а проверка доступности ещё не вынесла вердикт — о потерях до
+# неё ждём его. Начало короче минимального удержания (60 с): «новые потери» не
+# успеют обогнать алерт о недоступности. Конец — чтобы проверка доступности,
+# настроенная на редкий опрос, не задерживала алерт о потерях
+VERDICT_WAIT_FROM_SEC = 45
+VERDICT_WAIT_UNTIL_SEC = 300
 
 
 @dataclass(frozen=True)
@@ -205,6 +224,28 @@ def total_only_targets(observations: dict[str, list[RelayReading]], rules: Targe
     )
 
 
+def held_targets(observations: dict[str, list[RelayReading]], ips: frozenset[str]) -> frozenset[str]:
+    """Адреса назначения на перечисленных IP — все их порты."""
+    return frozenset(target for target, relays in observations.items() if relays[0].reading.ip in ips)
+
+
+@dataclass
+class OutageWatch:
+    """Серверы, о недоступности которых панель сообщила, и те, что вернулись
+    меньше OUTAGE_SETTLE_SEC назад: окна замеров ещё полны их простоя."""
+    _returned_at: dict[int, float] = field(default_factory=dict)
+
+    def update(self, was_down: frozenset[int], down: frozenset[int], now: float) -> frozenset[int]:
+        """was_down — недоступные до обхода парка, down — после него."""
+        for server_id in was_down - down:
+            self._returned_at[server_id] = now
+        self._returned_at = {
+            server_id: returned_at for server_id, returned_at in self._returned_at.items()
+            if server_id not in down and now - returned_at < OUTAGE_SETTLE_SEC
+        }
+        return down | frozenset(self._returned_at)
+
+
 def blamed_relay(relays: tuple[RelayReading, ...], policy: LossPolicy) -> Optional[int]:
     """Релей, который один теряет адрес, пока остальные до него доходят."""
     lossy = [r.relay_id for r in relays if r.reading.loss_pct >= policy.recovery_bound()]
@@ -226,8 +267,10 @@ class LossTracker:
         self._above.clear()
 
     def evaluate(self, observations: dict[str, list[RelayReading]], policy: LossPolicy,
-                 now: float, total_only: frozenset[str] = frozenset()) -> list[AlertEvent]:
-        """total_only — адреса с галочкой «только полные потери» (total_only_targets)."""
+                 now: float, total_only: frozenset[str] = frozenset(),
+                 held: frozenset[str] = frozenset()) -> list[AlertEvent]:
+        """total_only — адреса с галочкой «только полные потери» (total_only_targets),
+        held — адреса серверов, о недоступности которых уже сказано (held_targets)."""
         total_policy = policy.total_only()
 
         def policy_for(target: str) -> LossPolicy:
@@ -237,7 +280,7 @@ class LossTracker:
         events = []
         for target in sorted(set(observations) | set(self.episodes)):
             relays = tuple(sorted(observations.get(target, []), key=lambda r: -r.reading.loss_pct))
-            event = self._step(target, relays, policy_for(target), now)
+            event = self._step(target, relays, policy_for(target), now, target in held)
             if event is not None:
                 events.append(event)
         return self._group_by_relay(events, observations, policy, now)
@@ -286,8 +329,10 @@ class LossTracker:
         return self._reach(target, watchers, policy, now) >= needed
 
     def _step(self, target: str, relays: tuple[RelayReading, ...], policy: LossPolicy,
-              now: float) -> Optional[LossEvent]:
-        level = self._level(target, now, policy.sustained_sec)
+              now: float, held: bool = False) -> Optional[LossEvent]:
+        # Придержанный адрес не открывает эпизод, не повышает уровень и не шлёт
+        # напоминаний. Таймеры идут: потери, пережившие придержку, объявятся сразу
+        level = 0 if held else self._level(target, now, policy.sustained_sec)
         episode = self.episodes.get(target)
         if episode is None:
             if level == 0:
@@ -307,7 +352,7 @@ class LossTracker:
             if all(r.relay_id != blamed for r in relays):
                 # Без виноватого релея остальные выглядели бы затишьем — ждём его
                 relays = ()
-            elif self._level(target, now, policy.sustained_sec, skip_relay=blamed):
+            elif not held and self._level(target, now, policy.sustained_sec, skip_relay=blamed):
                 told = self._worth_telling(target, len(relays), policy, now)
                 episode.blamed_relay_id = None
                 episode.level = self._level(target, now, 0)
@@ -325,8 +370,9 @@ class LossTracker:
         episode.last_data_at = now
 
         calm = all(r.reading.loss_pct < policy.recovery_bound() for r in relays)
-        if not episode.announced and not calm and self._worth_telling(target, len(relays), policy, now):
-            # Узкий сбой стал общим либо уровень сообщений подняли: о начале ещё не писали
+        if not held and not episode.announced and not calm and self._worth_telling(target, len(relays), policy, now):
+            # Узкий сбой стал общим либо уровень сообщений подняли: о начале ещё не писали.
+            # У придержанного адреса «стал общим» — это упавший сервер, о котором уже сказано
             episode.announced = True
             episode.level = max(episode.level, self._level(target, now, 0))
             episode.calm_since = None
@@ -348,7 +394,7 @@ class LossTracker:
             return None
         episode.calm_since = None
 
-        if episode.announced and policy.reminder_sec and now - episode.notified_at >= policy.reminder_sec:
+        if not held and episode.announced and policy.reminder_sec and now - episode.notified_at >= policy.reminder_sec:
             episode.notified_at = now
             return LossEvent(EventKind.STILL, target, episode.level, relays, blamed)
         return None

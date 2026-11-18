@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from urllib.parse import urlparse
-from typing import Optional
+from typing import Optional, Sequence
 
 from sqlalchemy import select, delete, func, update
 
@@ -22,15 +22,20 @@ from app.services.loss_alerts import (
     Episode,
     LossPolicy,
     LossTracker,
+    OutageWatch,
     RelayIncident,
+    VERDICT_WAIT_FROM_SEC,
+    VERDICT_WAIT_UNTIL_SEC,
     collect_observations,
     format_digest,
+    held_targets,
     history_records,
     parse_scope,
     total_only_targets,
 )
 from app.services.loss_registry import get_loss_registry
 from app.services.metrics_rates import node_steal_percent
+from app.services.node_ips import public_interface_ipv4, url_host
 from app.services import panel_host_alerts
 from app.services.panel_host_alerts import PanelHostWatch, PanelReading, PanelResource
 from app.services.panel_host_metrics import load_recent_host_load, read_host_disk
@@ -256,6 +261,7 @@ class ServerAlerter:
         # хранится последний записанный набор, чтобы писать только изменения
         self._loss = LossTracker()
         self._loss_persisted: Optional[dict] = None
+        self._outages = OutageWatch()
         self._panel = PanelHostWatch()
         self._due: deque[DueAlert] = deque()
         # Ответы проверки прокси на один обход: за одним прокси стоят десятки нод
@@ -509,6 +515,7 @@ class ServerAlerter:
             )
             servers = result.scalars().all()
 
+        was_down = self._down_server_ids(settings)
         probes = await self._probe_offline_candidates(servers, excluded_ids, settings)
 
         failed_checks = 0
@@ -537,7 +544,7 @@ class ServerAlerter:
         for k in stale:
             del self._states[k]
 
-        await self._check_packet_loss(settings, excluded_ids, now)
+        await self._check_packet_loss(settings, excluded_ids, now, servers, was_down)
 
     async def _probe_offline_candidates(
         self, servers: list[Server], excluded_ids: set[int], settings: AlertSettings,
@@ -1089,6 +1096,58 @@ class ServerAlerter:
     def loss_episodes(self) -> dict[str, Episode]:
         return self._loss.episodes
 
+    def _down_server_ids(self, settings: AlertSettings) -> frozenset[int]:
+        """Серверы, о недоступности которых панель сообщила и за которыми следит.
+
+        Пометку was_offline снимает только проверка доступности: у сервера,
+        для которого её выключили, пометка осталась бы навсегда.
+        """
+        if not settings.offline_enabled:
+            return frozenset()
+        unchecked = self._trigger_excluded.get("offline", set())
+        return frozenset(
+            server_id for server_id, state in self._states.items()
+            if state.was_offline and server_id not in unchecked
+        )
+
+    def _loss_outage(
+        self, servers: Sequence[Server], settings: AlertSettings, excluded_ids: set[int],
+        was_down: frozenset[int], now: float,
+    ) -> tuple[frozenset[int], frozenset[str]]:
+        """Серверы, чьи замеры потерь сейчас не в счёт, и IP, о потерях до которых не пишем.
+
+        Про упавший сервер уже сказал алерт о недоступности: потери до него и по
+        его замерам — та же новость второй раз, а после возвращения окна замеров
+        ещё помнят простой. Адрес, переехавший на живую ноду, — уже её.
+        """
+        unsettled = self._outages.update(was_down, self._down_server_ids(settings), now)
+        quiet = unsettled | self._awaiting_offline_verdict(servers, settings, excluded_ids)
+        if not quiet:
+            return unsettled, frozenset()
+        latest = get_latest_metrics()
+        addresses = {
+            address
+            for srv in servers if srv.id in quiet
+            for address in (url_host(srv.url), *public_interface_ipv4(latest.get(srv.id)))
+            if address
+        }
+        return unsettled, frozenset(addresses - get_loss_registry().live_addresses(except_ids=quiet))
+
+    def _awaiting_offline_verdict(
+        self, servers: Sequence[Server], settings: AlertSettings, excluded_ids: set[int],
+    ) -> set[int]:
+        """Ноды, которые замолчали, но проверка доступности о них ещё не высказалась."""
+        if not settings.offline_enabled:
+            return set()
+        registry = get_loss_registry()
+        unchecked = excluded_ids | self._trigger_excluded.get("offline", set())
+        return {
+            srv.id for srv in servers
+            if srv.id not in unchecked
+            and VERDICT_WAIT_FROM_SEC < (registry.silent_for(srv.id) or 0) <= VERDICT_WAIT_UNTIL_SEC
+            and self._server_is_online(srv, settings)
+        }
+
     @staticmethod
     def _loss_policy(settings: AlertSettings) -> LossPolicy:
         return LossPolicy(
@@ -1100,18 +1159,25 @@ class ServerAlerter:
             wide_share_pct=settings.packet_loss_wide_share or WIDE_SHARE_PCT,
         )
 
-    async def _check_packet_loss(self, settings: AlertSettings, excluded_ids: set[int], now: float):
+    async def _check_packet_loss(
+        self, settings: AlertSettings, excluded_ids: set[int], now: float,
+        servers: Sequence[Server] = (), was_down: frozenset[int] = frozenset(),
+    ):
         if not settings.packet_loss_enabled:
             if self._loss.episodes:
                 self._loss.reset()
                 await self._save_loss_episodes()
             return
         registry = get_loss_registry()
-        excluded = excluded_ids | self._trigger_excluded.get("packet_loss", set())
+        unsettled, held_ips = self._loss_outage(servers, settings, excluded_ids, was_down, now)
+        excluded = excluded_ids | self._trigger_excluded.get("packet_loss", set()) | unsettled
         policy = self._loss_policy(settings)
         rules = registry.target_rules()
         observations = collect_observations(registry.fresh(), excluded, rules)
-        events = self._loss.evaluate(observations, policy, now, total_only_targets(observations, rules))
+        events = self._loss.evaluate(
+            observations, policy, now, total_only_targets(observations, rules),
+            held_targets(observations, held_ips),
+        )
         await self._save_loss_episodes()
         if events:
             await self._send_loss_digest(settings, events, registry.owners(), policy)

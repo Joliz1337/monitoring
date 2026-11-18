@@ -2283,7 +2283,7 @@
     "panel_disk_threshold": "Disk threshold",
     "panel_server": "Panel server",
     "trigger_packet_loss": "Relay packet loss",
-    "packet_loss_hint": "Relays probe their own HAProxy backends and DNAT targets. A message comes only when an address changes status: new loss, got worse (50%, 90%) or recovered — after the calm period on every relay. When three or more addresses are lost by a single relay while the others reach them, one message about that relay comes instead of the address list. A flapping address does not send on/off pairs, and a panel restart does not repeat what is already known. Requires node 10.31.0.",
+    "packet_loss_hint": "Relays probe their own HAProxy backends and DNAT targets. A message comes only when an address changes status: new loss, got worse (50%, 90%) or recovered — after the calm period on every relay. When three or more addresses are lost by a single relay while the others reach them, one message about that relay comes instead of the address list. A flapping address does not send on/off pairs, and a panel restart does not repeat what is already known. No loss messages come about a server the panel reports as offline — the offline alert has already said it. Requires node 10.31.0.",
     "packet_loss_calm": "Calm period before \"recovered\"",
     "packet_loss_reminder": "Reminder for open episodes",
     "packet_loss_scope": "Telegram message level",

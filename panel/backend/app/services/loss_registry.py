@@ -165,6 +165,18 @@ class LossRegistry:
         """IP → имя ноды, на которой он висит."""
         return {address: s.name for s in self._recent(max_age) for address in s.addresses}
 
+    def silent_for(self, server_id: int) -> Optional[float]:
+        """Сколько секунд нода не отвечает; None — с запуска панели ответа не было."""
+        snapshot = self._snapshots.get(server_id)
+        return None if snapshot is None else self._clock() - snapshot.updated_at
+
+    def live_addresses(self, except_ids: Iterable[int], max_age: float = STALE_AFTER_SEC) -> frozenset[str]:
+        """IP нод на связи, кроме перечисленных."""
+        skipped = frozenset(except_ids)
+        return frozenset(
+            address for s in self._recent(max_age) if s.server_id not in skipped for address in s.addresses
+        )
+
     def target_rules(self, max_age: float = STALE_AFTER_SEC) -> TargetRules:
         """Адреса вне учёта: заданные вручную и все IP исключённых серверов
         (ручное правило на тот же IP сильнее)."""
