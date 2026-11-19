@@ -63,6 +63,29 @@ server {
         proxy_busy_buffers_size 32k;
     }
 
+    # Команда панели на хосте: исполнитель держит её до 600 с (MAX_TIMEOUT),
+    # под общим location / панель получала 504 на 30-й секунде, а команда
+    # продолжала выполняться без получателя ответа
+    location = /api/system/execute {
+        proxy_pass http://api_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-SSL-Client-Verify $ssl_client_verify;
+        proxy_set_header X-SSL-Client-DN     $ssl_client_s_dn;
+        proxy_set_header Connection "";
+
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 620s;
+        proxy_read_timeout 620s;
+
+        proxy_buffer_size 8k;
+        proxy_buffers 16 16k;
+        proxy_busy_buffers_size 32k;
+    }
+
     # SSE streaming — без буферизации
     location = /api/system/execute-stream {
         proxy_pass http://api_backend;

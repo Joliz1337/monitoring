@@ -15,6 +15,7 @@ asyncio не возвращал и сам вызов.
 
 import asyncio
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -199,6 +200,25 @@ class RealProcessTests(unittest.TestCase):
 
         self.assertIsNone(result.error)
         self.assertEqual(result.stdout, f"{WHITELIST_SIZE} {whitelist.splitlines()[-1]}")
+
+
+class NginxTimeoutTests(unittest.TestCase):
+    """Nginx ноды не должен обрывать команду раньше исполнителя: под общим
+    location / (30 с) панель получала 504, а команда шла дальше без получателя."""
+
+    TEMPLATE = Path(__file__).resolve().parents[1] / "nginx" / "templates" / "api.conf.template"
+
+    def test_execute_locations_outlast_executor_timeout(self):
+        config = self.TEMPLATE.read_text(encoding="utf-8")
+        for path in ("/api/system/execute", "/api/system/execute-stream"):
+            with self.subTest(path=path):
+                header = re.search(rf"location\s+=\s+{re.escape(path)}\s*\{{", config)
+                self.assertIsNotNone(header, f"location = {path} is missing")
+                block = config[header.end():config.index("}", header.end())]
+                for directive in ("proxy_read_timeout", "proxy_send_timeout"):
+                    match = re.search(rf"{directive}\s+(\d+)s;", block)
+                    self.assertIsNotNone(match, directive)
+                    self.assertGreater(int(match.group(1)), host_executor.MAX_TIMEOUT)
 
 
 if __name__ == "__main__":

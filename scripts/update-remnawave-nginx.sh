@@ -6,9 +6,11 @@
 # возвращается прежний образ. Выключенный в панели nginx не запускается. Повторный запуск ничего не трогает.
 #
 # На ноде:   sh update-remnawave-nginx.sh
-# На парке:  панель → «Массовые действия» → терминал, таймаут 300 с (файлом, а не через `| sh`:
-# несостоявшееся скачивание иначе выглядело бы успехом с пустым выводом):
-#   curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/<ветка>/scripts/update-remnawave-nginx.sh -o /tmp/update-remnawave-nginx.sh && sh /tmp/update-remnawave-nginx.sh
+# На парке:  панель → «Массовые действия» → терминал, двумя командами. Скрипт запускается в фоне: скачивание
+# образа дольше, чем нода держит запрос терминала (ноды до 2026-11-20 обрывают его на 30-й секунде с 504).
+# Файлом, а не через `| sh`: несостоявшееся скачивание скрипта иначе выглядело бы успехом с пустым выводом.
+#   запуск:    curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/<ветка>/scripts/update-remnawave-nginx.sh -o /tmp/update-remnawave-nginx.sh && { setsid nohup sh /tmp/update-remnawave-nginx.sh > /tmp/update-remnawave-nginx.log 2>&1 < /dev/null & echo "запущено"; }
+#   результат: cat /tmp/update-remnawave-nginx.log; pgrep -f '[u]pdate-remnawave-nginx.sh' >/dev/null && echo "ещё выполняется"; docker exec remnawave-nginx nginx -v 2>&1; true
 #
 # Следующий выпуск безопасности nginx — поднять FIXED_*. Смена стабильной ветки — ещё и STABLE_BRANCH вместе
 # с образом в install.sh и FALLBACK_NGINX_IMAGE ноды: их сверяет node/tests/test_remnawave_nginx_image.py.
@@ -22,6 +24,8 @@ CONTAINER=remnawave-nginx
 COMPOSE="$INSTALL_DIR/docker-compose.yml"
 BACKUP="$COMPOSE.bak-nginx"
 START_GRACE_SEC=5
+# Скачивание слоя умеет зависать без ошибки; без предела фоновый запуск висел бы молча
+PULL_TIMEOUT_SEC=600
 EXIT_STILL_VULNERABLE=2
 
 lowest_of() { printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1; }
@@ -73,9 +77,9 @@ fi
 
 cp -p "$COMPOSE" "$BACKUP"
 retarget_images
-if ! pull_error=$(docker compose pull -q "$CONTAINER" 2>&1 >/dev/null); then
+if ! pull_error=$(timeout "$PULL_TIMEOUT_SEC" docker compose pull -q "$CONTAINER" 2>&1 >/dev/null); then
     restore_compose
-    echo "FAIL: образ не скачался, ничего не изменено: $(echo "$pull_error" | tail -n1)"
+    echo "FAIL: образ не скачался (предел $PULL_TIMEOUT_SEC с), ничего не изменено: $(echo "$pull_error" | tail -n1)"
     exit 1
 fi
 if [ "$state" != running ]; then
