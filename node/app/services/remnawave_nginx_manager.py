@@ -28,7 +28,10 @@ logger = logging.getLogger(__name__)
 
 NGINX_CONTAINER = "remnawave-nginx"
 DEFAULT_INSTALL_PATH = "/opt/remnawave"
-FALLBACK_NGINX_IMAGE = "nginx:1.28"
+# Стабильная ветка nginx — та же, что ставит install.sh. Ветка, с которой nginx
+# ушёл, исправлений безопасности не получает: менять вместе с install.sh и
+# scripts/update-remnawave-nginx.sh
+FALLBACK_NGINX_IMAGE = "nginx:1.30"
 BACKUP_SUFFIX = ".bak"
 CANDIDATE_SUFFIX = ".candidate"
 

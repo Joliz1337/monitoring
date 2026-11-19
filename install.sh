@@ -2621,7 +2621,7 @@ install_remnawave() {
     cat > "$REMNAWAVE_DIR/docker-compose.yml" <<COMPOSE_HEAD
 services:
   remnawave-nginx:
-    image: nginx:1.28
+    image: nginx:1.30
     container_name: remnawave-nginx
     hostname: remnawave-nginx
     restart: always
