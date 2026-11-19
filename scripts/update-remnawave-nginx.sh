@@ -6,8 +6,9 @@
 # возвращается прежний образ. Выключенный в панели nginx не запускается. Повторный запуск ничего не трогает.
 #
 # На ноде:   sh update-remnawave-nginx.sh
-# На парке:  панель → «Массовые действия» → терминал, таймаут 300 с:
-#   curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/<ветка>/scripts/update-remnawave-nginx.sh | sh
+# На парке:  панель → «Массовые действия» → терминал, таймаут 300 с (файлом, а не через `| sh`:
+# несостоявшееся скачивание иначе выглядело бы успехом с пустым выводом):
+#   curl -fsSL https://raw.githubusercontent.com/Joliz1337/monitoring/<ветка>/scripts/update-remnawave-nginx.sh -o /tmp/update-remnawave-nginx.sh && sh /tmp/update-remnawave-nginx.sh
 #
 # Следующий выпуск безопасности nginx — поднять FIXED_*. Смена стабильной ветки — ещё и STABLE_BRANCH вместе
 # с образом в install.sh и FALLBACK_NGINX_IMAGE ноды: их сверяет node/tests/test_remnawave_nginx_image.py.
